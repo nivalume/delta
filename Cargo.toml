@@ -25,6 +25,7 @@ google-cloud-auth = "1.17"
 http = "1.5"
 indexmap = { version = "2.14", features = ["serde"] }
 jsonschema = { version = "0.59", default-features = false }
+schemars = "1.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "http2", "system-proxy", "charset"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }

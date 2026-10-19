@@ -1,0 +1,44 @@
+[package]
+name = "tau-agent-runtime"
+description = "Stateful LLM agent for Rust: tool execution (parallel or sequential), steering and follow-up queues, lifecycle events and hooks (Rust port of pi-agent-core)"
+readme = "README.md"
+keywords = ["llm", "agent", "ai", "tools"]
+categories = ["asynchronous"]
+include = ["src/**", "docs/**", "README.md", "LICENSE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "tau_agent"
+
+[features]
+default = ["schemars"]
+# Typed tools: parameter schemas generated from Rust types.
+schemars = ["dep:schemars"]
+
+[dependencies]
+tau-llm.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+wiremock.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true

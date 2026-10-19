@@ -646,6 +646,20 @@ impl MessageBuilder {
         });
     }
 
+    /// Finish a tool call with a complete call from elsewhere (e.g. a proxy server),
+    /// ignoring any streamed JSON.
+    pub fn end_tool_call_with(&mut self, index: usize, tool_call: ToolCall) {
+        self.tool_json.remove(&index);
+        let Some(AssistantBlock::ToolCall(call)) = self.output.content.get_mut(index) else {
+            return;
+        };
+        *call = tool_call.clone();
+        self.sender.push(AssistantMessageEvent::ToolCallEnd {
+            content_index: index,
+            tool_call,
+        });
+    }
+
     /// End every block that is still open (tool calls with pending JSON).
     pub fn end_open_tool_calls(&mut self) {
         let mut open: Vec<usize> = self.tool_json.keys().copied().collect();
