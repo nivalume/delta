@@ -344,10 +344,22 @@ pub fn typesafe_provider() -> BuiltProvider {
     )
 }
 
+/// The API-key method's display name: upstream's `envApiKeyAuth` name, usually `"<name> API key"`.
+fn api_key_label(id: &str, name: &str) -> String {
+    match id {
+        "google" => "Gemini API key".into(),
+        "huggingface" => "Hugging Face token".into(),
+        "kimi-coding" => "Kimi API key".into(),
+        "meta" => "Meta Model API key".into(),
+        "moonshotai-cn" => "Moonshot AI API key".into(),
+        _ => format!("{name} API key"),
+    }
+}
+
 /// A built-in provider by id, or `None` for unknown or not yet ported providers.
 pub fn builtin_provider(id: &str) -> Option<Arc<dyn Provider>> {
     if let Some((id, name, base_url, env, kind)) = SIMPLE_PROVIDERS.iter().find(|entry| entry.0 == id) {
-        let mut auth = ProviderAuth::api_key(env_api_key_auth(format!("{name} API key"), env));
+        let mut auth = ProviderAuth::api_key(env_api_key_auth(api_key_label(id, name), env));
         auth.oauth = builtin_oauth(id);
         return Some(Arc::new(catalog_provider(id, name, Some(base_url), auth, apis(*kind))));
     }
@@ -1066,6 +1078,21 @@ mod vertex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_key_names_match_upstream() {
+        for (id, name) in [
+            ("google", "Gemini API key"),
+            ("huggingface", "Hugging Face token"),
+            ("kimi-coding", "Kimi API key"),
+            ("meta", "Meta Model API key"),
+            ("moonshotai-cn", "Moonshot AI API key"),
+            ("groq", "Groq API key"),
+        ] {
+            let provider = builtin_provider(id).unwrap();
+            assert_eq!(provider.auth().api_key.as_ref().unwrap().name(), name, "{id}");
+        }
+    }
 
     #[test]
     fn builds_every_supported_catalog_provider() {
