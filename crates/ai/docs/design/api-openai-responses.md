@@ -4,7 +4,7 @@
 
 Implements the OpenAI Responses API (`POST {baseUrl}/responses`, SSE streaming). The module has two layers:
 
-- `api::openai_responses_shared`: input item conversion, tool conversion and stream event handling shared by the Responses family. Both `openai-responses` and `azure-openai-responses` use it, and a future `openai-codex-responses` can reuse it.
+- `api::openai_responses_shared`: input item conversion, tool conversion and stream event handling shared by the Responses family. `openai-responses`, `azure-openai-responses` and `openai-codex-responses` (see [api-openai-codex-responses.md](api-openai-codex-responses.md)) use it. Transports that read and map events themselves use `ResponsesEventProcessor`, the incremental form of `process_responses_events`.
 - `api::openai_responses`: the unit struct `OpenAIResponsesApi`. It handles compat configuration, the request body, request headers, cache and session affinity, service tier pricing, and `stream` / `stream_simple`.
 
 The client is hand-written on `reqwest` + `delta_ai::http` and does not depend on the OpenAI SDK.
@@ -16,7 +16,7 @@ The client is hand-written on `reqwest` + `delta_ai::http` and does not depend o
 - `packages/ai/src/api/constrained-sampling.ts`: strict JSON Schema and grammar tools, in the shared module `api::constrained_sampling`.
 - `packages/ai/src/api/openai-prompt-cache.ts`: truncates `prompt_cache_key` to 64 code points.
 - `packages/ai/src/utils/hash.ts`: `shortHash`, in `api::common::short_hash`, bit-for-bit identical to TypeScript (over UTF-16 code units, `Math.imul` semantics, base-36 output).
-- Test references: `test/openai-responses-*.test.ts`, `test/cache-retention.test.ts` (the Responses part), `test/xai-responses.test.ts` (the request part), and pi-py's `tests/test_openai_responses.py`.
+- Test references: `test/openai-responses-*.test.ts` (including `openai-responses-chatgpt-sign-in.test.ts` and `openai-responses-usage-limit.test.ts`, ported to `tests/openai_responses_chatgpt.rs`), `test/cache-retention.test.ts` (the Responses part), `test/xai-responses.test.ts` (the request part), and pi-py's `tests/test_openai_responses.py`.
 
 ## Request mapping
 
@@ -72,6 +72,8 @@ If the model's `compat` does not have the Responses shape (for example custom JS
 | Sampling parameters | `resolve_sampling_params(model, level, options.sampling_params)` merged last; existing keys are overwritten in place |
 
 Cache retention: `options.cache_retention`; otherwise `long` when `PI_CACHE_RETENTION=long`; otherwise `short`.
+
+Sign in with ChatGPT: a request with `provider = openai`, `baseUrl = https://api.openai.com/v1` and an API key that does not start with `sk-` carries a ChatGPT access token (from `OpenAIChatGPTOAuth`, see [oauth.md](oauth.md)). Token sharing rejects some fields, so such a request leaves out `prompt_cache_retention`, `prompt_cache_options`, `max_output_tokens` and `temperature`, and never uses `configuration_update` items (the level goes into `reasoning.effort`, and `provider_thinking_level` stays unset). `prompt_cache_key` is still sent.
 
 Reasoning parameters (only when `model.reasoning`):
 
@@ -162,6 +164,7 @@ At stream end: if no terminal event was received, error `OpenAI Responses stream
 
 - Sending uses `http::send_with_retry`: retries 408/409/429/5xx and connection errors, honors `retry-after-ms` / `retry-after` and `max_retry_delay`, and can be interrupted by `options.cancel`.
 - The HTTP error format matches upstream `formatProviderError(normalizeProviderError(error), "<prefix> API error")`: when the body's `error` is a non-empty object, `<prefix> API error (<status>): <error JSON>`; otherwise `<prefix> API error (<status>): <SDK message>` (for example `... (502): 502 Bad Gateway`). The prefix is `OpenAI` when the provider is `openai`, otherwise the provider id. The raw body comes from `Error::Status.body`. Other errors (in-stream errors, configuration errors) keep their original message.
+- An error message that contains `subscription_sharing_usage_limit_exceeded` (from an HTTP error or a `response.failed` event) gets a second line: `Check your ChatGPT usage: https://chatgpt.com/settings/usage`. This applies to every provider of the API, as upstream.
 - The `start` event is emitted after the response is accepted and the `on_response` callback has run. Later failures end with an `error` event carrying the content already received. On cancellation the stop reason is `aborted` with the message `Request was aborted`; when the consumer drops the stream, the read loop returns `Error::Aborted` and stops.
 
 ## Rust-specific differences
@@ -180,8 +183,7 @@ At stream end: if no terminal event was received, error `OpenAI Responses stream
 
 ## Not ported
 
-- Sign in with ChatGPT: for requests with `provider = openai`, `baseUrl = https://api.openai.com/v1` and a key that does not start with `sk-`, upstream omits `prompt_cache_retention`, `prompt_cache_options`, `max_output_tokens` and `temperature`, does not send `configuration_update`, and appends a ChatGPT usage link after a `subscription_sharing_usage_limit_exceeded` error. Not ported because it is out of scope for this work; the code has a `// Not ported` comment.
-- The OpenAI Codex (ChatGPT subscription) API `openai-codex-responses`, WebSocket transport, telemetry, the `fetch` option (replaced by `StreamOptions::http_client`).
+- Telemetry, the `fetch` option (replaced by `StreamOptions::http_client`).
 
 ## Core changes needed
 

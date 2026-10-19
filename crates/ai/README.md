@@ -73,6 +73,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 | Ant Ling | `ant-ling` | `openai-completions` | |
 | Azure OpenAI | `azure` | `azure-openai-responses`, `openai-completions` | |
 | Radius (API key or OAuth, with a dynamically refreshed gateway catalog) | `radius` | `pi-messages` | |
+| OpenAI Codex (legacy; ChatGPT Plus/Pro subscription, OAuth only, see [OAuth Providers](#oauth-providers)) | `openai-codex` | `openai-codex-responses` | |
 | DeepSeek | `deepseek` | `openai-completions` | |
 | NVIDIA NIM | `nvidia` | `openai-completions` | |
 | TypeSafe | `typesafe` | classifiers only: `typesafe-system-one` | |
@@ -105,7 +106,6 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 
 Any OpenAI-compatible API (Ollama, vLLM, LM Studio, and so on) works through [`create_provider()`](#create_provider).
 
-Not built in yet: OpenAI Codex. Its catalog ships with the crate, but its API and auth flow are not ported.
 
 ## Installation
 
@@ -571,6 +571,8 @@ Built-in providers resolve these environment variables:
 | Xiaomi MiMo Token Plan (China) | `XIAOMI_TOKEN_PLAN_CN_API_KEY` |
 | Xiaomi MiMo Token Plan (Amsterdam) | `XIAOMI_TOKEN_PLAN_AMS_API_KEY` |
 | Xiaomi MiMo Token Plan (Singapore) | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` |
+
+OpenAI Codex has no environment variable: it authenticates only with OAuth (`delta-ai login openai-codex` or `Models::login`). The OpenAI provider also accepts Sign in with ChatGPT through OAuth. `PI_OAUTH_CALLBACK_HOST` sets the host of the loopback OAuth callback server (default `127.0.0.1`).
 
 `qwen-token-plan-individual` and `qwen-token-plan` share the international endpoint and `QWEN_TOKEN_PLAN_API_KEY`. The Individual provider lists only the models documented for Individual subscriptions. Stored credentials are provider-scoped, so save the key under the provider id you register.
 
@@ -1849,6 +1851,7 @@ Built-in API implementations:
 | `openai-completions` | `api::openai_completions` | `OpenAICompletionsApi` | `OpenAICompletions(OpenAICompletionsOptions)` |
 | `openai-responses` | `api::openai_responses` | `OpenAIResponsesApi` | `OpenAIResponses(OpenAIResponsesOptions)` |
 | `azure-openai-responses` | `api::azure_openai_responses` | `AzureOpenAIResponsesApi` | `AzureOpenAIResponses(AzureOpenAIResponsesOptions)` |
+| `openai-codex-responses` | `api::openai_codex_responses` | `OpenAICodexResponsesApi` | `OpenAICodexResponses(OpenAICodexResponsesOptions)` |
 | `google-generative-ai` | `api::google_generative_ai` | `GoogleGenerativeAiApi` | `GoogleGenerativeAi(GoogleOptions)` |
 | `google-vertex` (feature `vertex`) | `api::google_vertex` | `GoogleVertexApi` | `GoogleVertex(GoogleVertexOptions)` |
 | `mistral-conversations` | `api::mistral_conversations` | `MistralConversationsApi` | `MistralConversations(MistralOptions)` |
@@ -1857,7 +1860,7 @@ Built-in API implementations:
 
 Image and classifier APIs follow the same pattern with a `generate_images` or `classify` function and a struct that implements `ProviderImages` or `ProviderClassifier`: `api::openrouter_images` (`OpenRouterImagesApi`), `api::typesafe_system_one` (`TypeSafeSystemOneApi`), `api::cloudflare_workers_ai_system_one` (`CloudflareWorkersAiSystemOneApi`, with a resolved base URL), `api::openai_decisions` (`OpenAIDecisionsApi`) and `api::llama_cpp_classify` (`LlamaCppClassifyApi`).
 
-`openai-codex-responses` is not ported. The hand-written APIs (Anthropic, OpenAI, Google Generative AI, Mistral, pi-messages) are always compiled; they use `reqwest` and the helpers in `delta_ai::http`. Bedrock and Vertex use the vendors' official Rust SDKs. Upstream's custom `fetch` and injected SDK `client` options map to `StreamOptions::http_client` (a `reqwest::Client`).
+The hand-written APIs (Anthropic, OpenAI, OpenAI Codex, Google Generative AI, Mistral, pi-messages) are always compiled; they use `reqwest` and the helpers in `delta_ai::http` (the Codex WebSocket transport uses `tokio-tungstenite`). Bedrock and Vertex use the vendors' official Rust SDKs. Upstream's custom `fetch` and injected SDK `client` options map to `StreamOptions::http_client` (a `reqwest::Client`).
 
 ### OpenAI Compatibility Settings
 
@@ -2167,15 +2170,14 @@ Use this when one process needs different provider settings per request, or when
 Several providers support OAuth authentication instead of static API keys:
 
 - **Anthropic** (Claude Pro/Max subscription)
+- **OpenAI** (Sign in with ChatGPT: uses the ChatGPT subscription with the OpenAI API)
+- **OpenAI Codex (legacy)** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models; browser or device-code login)
 - **OpenRouter** (OAuth PKCE that mints a user-controlled API key)
 - **xAI** (SuperGrok or X Premium subscription, device-code login)
 - **GitHub Copilot** (Copilot subscription, device-code login, GitHub Enterprise supported)
 - **Kimi For Coding** (Kimi Code subscription, device-code login)
 - **Meta** (Muse subscription, device-code login that mints a Model API key)
-
 - **Radius** (browser or device-code login against the Radius gateway; `create_radius_oauth()` for other gateways)
-
-Upstream also offers OAuth for OpenAI (Sign in with ChatGPT) and OpenAI Codex. Those flows are being ported; until then the built-in providers among them authenticate with API keys.
 
 Each of these providers carries an `OAuthAuth` in `provider.auth().oauth` with three operations: `login(interaction, options)` uses the provider-neutral `AuthInteraction::prompt()`/`notify()` protocol and returns a credential, `refresh(credential)` refreshes expiring credentials, and `to_auth(credential)` derives request auth (GitHub Copilot's per-account base URL comes from here). Login is cancelled through `AuthInteraction::cancel()`. Refresh is automatic: `models.get_auth(provider_id, ..)` and request paths refresh expired tokens inside `CredentialStore::modify`, so concurrent requests cannot double-refresh. OpenRouter's flow returns a permanent API key, so its refresh is a no-op. An Anthropic OAuth access token is used as the API key; the `anthropic-messages` API recognizes it and sends it as a bearer token with Claude Code's identity and beta headers. A Kimi Code access token is sent as an `Authorization: Bearer` header. Meta's login exchanges its identity token for a Model API key that lives about a day; refresh mints a new key from the stored identity token.
 
@@ -2335,7 +2337,7 @@ Credentials are saved to `auth.json` in the current directory, in the same JSON 
 
 ### Programmatic OAuth
 
-Use the provider-owned `OAuthAuth` through `Models::login`, as above; it composes with `CredentialStore` and gets locked automatic refresh through `Models`. The flows are also public in `delta_ai::oauth` (`AnthropicOAuth`, `OpenRouterOAuth`, `XaiOAuth`, `KimiCodingOAuth`, `MetaOAuth`, `GitHubCopilotOAuth`), with their endpoints as public fields (`GitHubCopilotOAuth` derives its URLs from the enterprise domain and the Copilot token and offers `rewrite_url` instead). To add OAuth to a custom provider, implement `OAuthAuth` and attach it with `ProviderAuth::with_oauth`. The building blocks of the built-in flows are public too:
+Use the provider-owned `OAuthAuth` through `Models::login`, as above; it composes with `CredentialStore` and gets locked automatic refresh through `Models`. The flows are also public in `delta_ai::oauth` (`AnthropicOAuth`, `OpenRouterOAuth`, `XaiOAuth`, `KimiCodingOAuth`, `MetaOAuth`, `GitHubCopilotOAuth`, `OpenAIChatGPTOAuth`, `OpenAICodexOAuth`, `RadiusOAuth`), with their endpoints as public fields (`GitHubCopilotOAuth` derives its URLs from the enterprise domain and the Copilot token and offers `rewrite_url` instead). Sign in with ChatGPT needs `LoginOptions::device_id`: a stable UUID of the app installation; `LoginOptions::agent_name` becomes its name hint (and the Codex flow's `originator`). To add OAuth to a custom provider, implement `OAuthAuth` and attach it with `ProviderAuth::with_oauth`. The building blocks of the built-in flows are public too:
 
 - `generate_pkce()`: PKCE verifier and S256 challenge;
 - `start_oauth_callback_server(options)` and `wait_for_callback_or_manual_input(..)`: a loopback redirect server raced against a pasted code or redirect URL;
@@ -2349,7 +2351,39 @@ Provider notes:
 
 **GitHub Copilot**: Log in with `delta-ai login github-copilot` (or `Models::login`). Leave the GitHub Enterprise prompt blank for github.com, or enter the enterprise domain (`company.ghe.com`). Login enables models whose account policy is still unconfigured, and the stored credential lists the models the account may use; `models.get_available(Some("github-copilot"))` returns only those. Requests go to the account's own Copilot API host, taken from the Copilot token. Each request carries Copilot's `X-Initiator`, `Openai-Intent` and, for images, `Copilot-Vision-Request` headers. If you get "The requested model is not supported" error, enable the model manually in VS Code: open Copilot Chat, click the model selector, select the model (warning icon), and click "Enable".
 
-OpenAI Codex is not ported.
+**OpenAI (Sign in with ChatGPT)**: The access token is sent to `api.openai.com` as the API key. The `openai-responses` API recognizes it (a key without the `sk-` prefix on the OpenAI endpoint) and leaves out `max_output_tokens`, `temperature`, `prompt_cache_retention` and `prompt_cache_options`, which token sharing rejects; the thinking level goes into `reasoning.effort` instead of `configuration_update` items. When the subscription's usage limit is hit, the error ends with a link to the ChatGPT usage page.
+
+**OpenAI Codex (legacy)**: Superseded by Sign in with ChatGPT on the OpenAI provider. Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `session_id` is provided in stream options unless `cache_retention` is `CacheRetention::None`. You can set `transport` in stream options to `Transport::Sse`, `Transport::Websocket`, `Transport::WebsocketCached` or `Transport::Auto` (used when `transport` is unset) for Codex Responses transport selection. When using WebSocket with a `session_id` and cache retention enabled, connections are reused per session and expire after 5 minutes of inactivity. Call `delta_ai::session_resources::cleanup_session_resources(Some(session_id))` when finished so the pooled connection is closed. `get_openai_codex_websocket_debug_stats(session_id)` in `delta_ai::api::openai_codex_responses` reports how requests were sent. The WebSocket does not use `HTTP(S)_PROXY`; behind a proxy, `auto` falls back to SSE.
+
+```rust,no_run
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() {
+use delta_ai::api::openai_codex_responses;
+use delta_ai::options::Transport;
+use delta_ai::providers::builtin::openai_codex_provider;
+use delta_ai::session_resources::cleanup_session_resources;
+use delta_ai::{Context, Message, Provider, StreamOptions, normalize_context};
+
+let model = openai_codex_provider()
+    .models()
+    .into_iter()
+    .find(|model| model.id == "gpt-5.5")
+    .unwrap();
+let context = normalize_context(&Context::new(vec![Message::user("Hello")]));
+let options = StreamOptions {
+    // The ChatGPT OAuth access token; `Models` resolves it from the stored credential.
+    api_key: Some(std::env::var("CODEX_ACCESS_TOKEN").unwrap()),
+    session_id: Some("session-1".into()),
+    transport: Some(Transport::Auto),
+    ..StreamOptions::default()
+};
+let message = openai_codex_responses::stream(&model, &context, options).result().await;
+println!("{:?}", message.content);
+cleanup_session_resources(Some("session-1")).unwrap();
+# }
+```
+
+GitHub Copilot is not ported.
 
 ## Migrating from the Old Global API
 

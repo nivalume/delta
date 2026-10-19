@@ -5,19 +5,19 @@
 `delta_ai::oauth` holds the OAuth login flows of the built-in providers and the helpers they share. The framework (the `OAuthAuth` trait, `AuthInteraction`, `Models::login`, locked refresh) lives in `auth` and is described in [auth.md](auth.md). This module adds:
 
 - shared helpers: PKCE, the loopback callback server, the race between the callback and a pasted code, device-code polling, the browser pages;
-- seven flows: Anthropic (Claude Pro/Max), OpenRouter (PKCE that mints an API key), the device-code flows of xAI, Kimi Code and Meta, and GitHub Copilot (device code plus a Copilot token; described in [github-copilot.md](github-copilot.md)), Radius (browser or device code against a gateway; see [radius.md](radius.md));
+- nine flows: Anthropic (Claude Pro/Max), OpenRouter (PKCE that mints an API key), the device-code flows of xAI, Kimi Code and Meta, and GitHub Copilot (device code plus a Copilot token; described in [github-copilot.md](github-copilot.md)), Radius (browser or device code against a gateway; see [radius.md](radius.md)), OpenAI Codex (ChatGPT Plus/Pro: browser or device code) and Sign in with ChatGPT (OpenAI API token sharing);
 - the `delta-ai` login CLI (`src/bin/delta-ai.rs`, feature `cli`).
 
-The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Codex, OpenAI ChatGPT) can be ported one-to-one.
+The helpers keep upstream's names and shapes.
 
 ## Upstream source files
 
 - `packages/ai/src/auth/oauth/pkce.ts`, `callback-server.ts`, `device-code.ts`
 - `packages/ai/src/utils/oauth-page.ts`
-- `packages/ai/src/auth/oauth/anthropic.ts`, `openrouter.ts`, `xai.ts`, `kimi-coding.ts`, `meta.ts`, `radius.ts`
-- `packages/ai/src/providers/anthropic.ts`, `openrouter.ts`, `xai.ts`, `kimi-coding.ts`, `meta.ts`, `radius.ts` (the `auth.oauth` entries)
+- `packages/ai/src/auth/oauth/anthropic.ts`, `openrouter.ts`, `xai.ts`, `kimi-coding.ts`, `meta.ts`, `radius.ts`, `openai-codex.ts`, `openai-chatgpt.ts`
+- `packages/ai/src/providers/anthropic.ts`, `openrouter.ts`, `xai.ts`, `kimi-coding.ts`, `meta.ts`, `radius.ts`, `openai.ts`, `openai-codex.ts` (the `auth.oauth` entries)
 - `packages/ai/src/cli.ts`
-- Tests: `test/oauth-callback-server.test.ts`, `test/oauth-device-code.test.ts`, `test/oauth-auth.test.ts` (the parts for these flows), `test/anthropic-oauth.test.ts`, `test/openrouter-oauth.test.ts`, `test/xai-oauth.test.ts`, `test/kimi-coding-oauth.test.ts`, `test/meta-oauth.test.ts`. Ported to `tests/oauth_helpers.rs`, `tests/oauth_flows.rs` and `tests/oauth_kimi_meta.rs`. `test/radius-oauth.test.ts` is ported to `tests/radius.rs`.
+- Tests: `test/oauth-callback-server.test.ts`, `test/oauth-device-code.test.ts`, `test/oauth-auth.test.ts` (the parts for these flows), `test/anthropic-oauth.test.ts`, `test/openrouter-oauth.test.ts`, `test/xai-oauth.test.ts`, `test/kimi-coding-oauth.test.ts`, `test/meta-oauth.test.ts`, `test/openai-codex-oauth.test.ts`, `test/openai-chatgpt-oauth.test.ts`. Ported to `tests/oauth_helpers.rs`, `tests/oauth_flows.rs`, `tests/oauth_kimi_meta.rs` and `tests/oauth_openai.rs` (the OpenAI flows). `test/radius-oauth.test.ts` is ported to `tests/radius.rs`.
 
 ## Module layout
 
@@ -34,6 +34,8 @@ The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Cod
 | `auth/oauth/meta.ts` | `oauth::meta` (`MetaOAuth`) |
 | `auth/oauth/github-copilot.ts` | `oauth::github_copilot` (`GitHubCopilotOAuth`), see [github-copilot.md](github-copilot.md) |
 | `auth/oauth/radius.ts` | `oauth::radius` (`RadiusOAuth`, `create_radius_oauth`) |
+| `auth/oauth/openai-codex.ts` | `oauth::openai_codex` (`OpenAICodexOAuth`, `chatgpt_account_id`, `decode_jwt_payload`) |
+| `auth/oauth/openai-chatgpt.ts` | `oauth::openai_chatgpt` (`OpenAIChatGPTOAuth`) |
 | `auth/oauth/load.ts`, `lazyOAuth` | Not needed: the flows are plain structs compiled into the crate |
 
 The helpers are re-exported from `delta_ai::oauth`.
@@ -185,6 +187,26 @@ Name `GitHub Copilot`, subscription, no login label. Login asks a `Text` prompt 
 - Token requests and refresh: form `POST {gateway}/v1/oauth/token`, `client_id=pi-gateway`. Errors: `Radius OAuth token request failed: <error>: <error_description>`. `expires` is now + `expires_in` − 60 s; `scope` is kept in `extra`.
 - `to_auth`: `api_key = access`. Details and error texts: [radius.md](radius.md).
 
+### OpenAI Codex (`OpenAICodexOAuth`)
+
+- Name `OpenAI (ChatGPT Plus/Pro)`, subscription, no login label. Client id `app_EMoamEEZ73f0CkXaXp7hrann`.
+- `login` first asks a `Select` prompt `Select OpenAI Codex login method:` with `browser` (`Browser login (default)`) and `device_code` (`Device code login (headless)`). Other answers fail with `Unknown OpenAI Codex login method: <id>`.
+- Browser login: PKCE and a 16-byte hex `state`. The authorize URL `https://auth.openai.com/oauth/authorize` carries `response_type=code`, `client_id`, `redirect_uri=http://localhost:1455/auth/callback`, `scope=openid profile email offline_access`, `code_challenge`, `code_challenge_method=S256`, `state`, `id_token_add_organizations=true`, `codex_cli_simplified_flow=true` and `originator` (the app's `agent_name`, default `pi`). Port 1455 is registered with OpenAI and shared with the Codex CLI: the callback server listens on `callback_host:1455/auth/callback` with the state check, and when the port is taken login continues without it. `AuthUrl` (`A browser window should open. Complete login to finish.`), then the race between the callback and a pasted code / redirect URL (same parser as Anthropic). A pasted different state fails with `State mismatch`; no code with `Missing authorization code`.
+- Device code: JSON `POST https://auth.openai.com/api/accounts/deviceauth/usercode` with `client_id`. 404 → `OpenAI Codex device code login is not enabled for this server. Use browser login or verify the server URL.`; other failures → `OpenAI Codex device code request failed with status <status>[: <body>]`. The response needs `device_auth_id`, `user_code` and a finite `interval` ≥ 0 (number or numeric string), else `Invalid OpenAI Codex device code response: <json>`. A `DeviceCode` event with `https://auth.openai.com/codex/device`, the interval and 900 s; polling (first poll at once, 15-minute deadline) posts `device_auth_id` and `user_code` to `…/deviceauth/token`: 403/404 and `deviceauth_authorization_pending` → pending, `slow_down` → slow down, success needs `authorization_code` and `code_verifier`, other errors → `OpenAI Codex device auth failed with status <status>[: <body>]`. The code is exchanged with `redirect_uri=https://auth.openai.com/deviceauth/callback`.
+- Token exchange and refresh: form `POST https://auth.openai.com/oauth/token`. Errors: `OpenAI Codex token <exchange|refresh> failed (<status>): <body or status text>`, `OpenAI Codex token <operation> response missing fields: <json>`, refresh connection errors `OpenAI Codex token refresh error: <message>`. `expires` is now + `expires_in` (no margin).
+- Credential: the account id from the access token's JWT claim `https://api.openai.com/auth` → `chatgpt_account_id` is stored as `accountId` (`Failed to extract accountId from token` when missing). `to_auth`: `api_key = access`; the `openai-codex-responses` API decodes the account id again (see [api-openai-codex-responses.md](api-openai-codex-responses.md)).
+
+### Sign in with ChatGPT (`OpenAIChatGPTOAuth`)
+
+- Name `OpenAI (ChatGPT subscription)`, subscription, login label `Sign in with ChatGPT`. A public client without a secret: every login registers a new client.
+- Login needs the installation's device id (`LoginOptions::device_id`, a UUID), else `Sign in with ChatGPT requires a device ID (UUID) for this installation` before anything starts.
+- The flow runs its own loopback server on `callback_host:1455` (`/auth/callback`), because the callback also carries the issued `client_id`. A taken port fails with `Port 1455 is in use, probably by an unfinished login in another pi session or by the Codex CLI. Cancel that login and try again.` Requests: other paths → 404 `Callback route not found.`; `error` → 400 `ChatGPT was not connected.` (`Error: <error>`) and the login fails with `ChatGPT authorization failed: <error>`; missing `code`/`state`, a state mismatch or no `client_id` → 400 page with the message (`Missing authorization code`, `Missing OAuth state`, `OAuth state mismatch`, `OpenAI OAuth registration callback did not contain an issued client ID`) and the login keeps waiting; otherwise 200 `ChatGPT authentication completed. You can close this window.` When login ends, the server stops and closes every connection, including spare connections the browser opened ahead of time.
+- Authorize URL `https://auth.openai.com/api/accounts/authorize` with `client_id=dynamic_agent_client`, `agent_name_hint` (the app's `agent_name`, default `Pi`), `ext_agent_host_id=urn:uuid:<lowercase device id>`, `response_type=code`, `redirect_uri=http://127.0.0.1:1455/auth/callback`, `resource=https://api.openai.com/v1`, `scope=openid profile email offline_access resource.invoke chatgpt.tokens.use.direct`, `state`, `code_challenge`, `code_challenge_method=S256`, `nonce` (state and nonce: 32 random bytes, base64url). `AuthUrl` instructions: `Complete sign-in in your browser. If the callback does not complete, paste the final redirect URL here.`
+- The callback races a `ManualCode` prompt (`Complete login in your browser, or paste the final redirect URL here:`). Pasted input must be the full callback URL (`Paste the full callback URL from the browser`; another origin or path → `The pasted callback URL must start with <redirect uri>`), and is checked like a callback.
+- Exchange: form `POST https://auth.openai.com/api/accounts/oauth/token` (`accept: application/json`) with the issued client id, `code`, `code_verifier`, `redirect_uri` and `resource`. The response must contain a non-blank `id_token` (`OpenAI OAuth token response did not contain an ID token`). Refresh posts `grant_type=refresh_token`, the stored `clientId`, the refresh token and `resource` (no scope); without a stored client id it fails with `Stored OpenAI OAuth credential does not contain an issued client ID; reconnect ChatGPT`.
+- Token responses: non-2xx → `OpenAI OAuth token request failed (<status>): <body or status text>`; not an object → `OpenAI OAuth token response must be an object`; `access_token`, `refresh_token`, `scope` must be non-blank strings and `expires_in` positive (`OpenAI OAuth token response has invalid <field>`); the granted scopes must include `chatgpt.tokens.use.direct` (`OpenAI OAuth grant did not include chatgpt.tokens.use.direct`).
+- Credential: `clientId` and `scopes` (array) in the extra fields; `expires` is now + `expires_in` − 3 minutes. `to_auth`: `api_key = access`. The `openai-responses` API detects the token (not `sk-`, sent to `api.openai.com`) and leaves out the fields token sharing rejects (see [api-openai-responses.md](api-openai-responses.md)).
+
 ### Provider wiring
 
 | Provider | Upstream | Rust |
@@ -196,6 +218,8 @@ Name `GitHub Copilot`, subscription, no login label. Login asks a `Text` prompt 
 | `meta` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(meta) }` | `builtin_oauth("meta")` |
 | `github-copilot` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(githubCopilot) }` | `github_copilot_provider()`: `ProviderAuth::api_key(..).with_oauth(GitHubCopilotOAuth::default())` |
 | `radius` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth({ name, load: () => loadRadiusOAuth({ name, gateway }) }) }` | `radius_provider(..)`: `ProviderAuth::api_key(..).with_oauth(create_radius_oauth(..))` with the provider's name and gateway |
+| `openai` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(openaiChatGPT) }` | `builtin_oauth("openai")` |
+| `openai-codex` | `auth: { oauth: lazyOAuth(openaiCodex) }` (no API key) | `openai_codex_provider()`: `ProviderAuth { api_key: None, oauth: OpenAICodexOAuth }` |
 
 `builtin_oauth(id)` adds the OAuth method to a table-driven provider. Later flows add their entries there.
 
@@ -226,10 +250,11 @@ Name `GitHub Copilot`, subscription, no login label. Login asks a `Text` prompt 
 - Endpoints are public struct fields (`token_url`, `authorize_url`, `device_code_url`, `callback_port`) so tests can use wiremock and free ports; upstream stubs global `fetch` and binds the real port 53692.
 - CLI: the usage line names `delta-ai` instead of `npx @earendil-works/pi-ai`. Stdin is read by a background thread; end of input fails the pending prompt with `Input closed` (Node's readline would wait forever).
 - `lazyOAuth`/`load.ts` are not needed: Rust has no bundle-size reason to load flows lazily.
+- OpenAI Codex and ChatGPT: `callback_port` is a field (default 1455) and the redirect URIs follow it, so tests use free ports. The Codex token refresh cannot be cancelled (see above). The ChatGPT flow reads `PI_OAUTH_CALLBACK_HOST` when login starts (upstream at import) and also stops at once when the interaction's cancel token fires, besides the prompt's own cancellation; every error after cancellation is `Login cancelled`, as upstream.
+- The Codex device interval accepts numeric strings like `Number()`; hexadecimal strings are not parsed.
 
 ## Not ported
 
-- The other flows: OpenAI Codex, OpenAI ChatGPT. They are ported separately on top of these helpers.
 - `src/oauth.ts` (type-only compatibility exports for coding-agent extensions).
 - `registerBundledOAuthFlowLoaders` (Bun standalone binaries).
 

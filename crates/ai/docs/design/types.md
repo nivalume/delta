@@ -62,6 +62,7 @@ All fields of the compat structs are `Option`. When a field is unset, the API im
 | `OpenAICompletions(OpenAICompletionsOptions)` | `OpenAICompletionsOptions` |
 | `OpenAIResponses(OpenAIResponsesOptions)` | `OpenAIResponsesOptions` |
 | `AzureOpenAIResponses(AzureOpenAIResponsesOptions)` | `AzureOpenAIResponsesOptions` |
+| `OpenAICodexResponses(OpenAICodexResponsesOptions)` | `OpenAICodexResponsesOptions` |
 | `GoogleGenerativeAi(GoogleOptions)` | `GoogleOptions` |
 | `GoogleVertex(GoogleVertexOptions)` | `GoogleVertexOptions` |
 | `MistralConversations(MistralOptions)` | `MistralOptions` |
