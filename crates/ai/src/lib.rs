@@ -4,6 +4,7 @@
 //! Rust port of [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai).
 //! Design notes live in `docs/design/` of this crate.
 
+pub mod api;
 pub mod auth;
 pub mod compat;
 pub mod error;

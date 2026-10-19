@@ -159,6 +159,7 @@ pub enum ApiOptions {
     AnthropicMessages(AnthropicOptions),
     OpenAICompletions(OpenAICompletionsOptions),
     OpenAIResponses(OpenAIResponsesOptions),
+    AzureOpenAIResponses(AzureOpenAIResponsesOptions),
     GoogleGenerativeAi(GoogleOptions),
     GoogleVertex(GoogleVertexOptions),
     MistralConversations(MistralOptions),
@@ -284,6 +285,18 @@ pub struct OpenAIResponsesOptions {
     pub service_tier: Option<String>,
     /// Raw `tool_choice` value.
     pub tool_choice: Option<Value>,
+}
+
+/// Options of the `azure-openai-responses` API.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AzureOpenAIResponsesOptions {
+    pub responses: OpenAIResponsesOptions,
+    /// Default: `AZURE_OPENAI_API_VERSION`, else `v1`.
+    pub azure_api_version: Option<String>,
+    pub azure_resource_name: Option<String>,
+    pub azure_base_url: Option<String>,
+    /// Deployment name; defaults to the model id or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`.
+    pub azure_deployment_name: Option<String>,
 }
 
 /// Gemini thinking level.
