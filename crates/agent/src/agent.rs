@@ -692,6 +692,7 @@ impl<C: CustomMessage> Agent<C> {
                 reasoning: thinking_level.reasoning(),
                 thinking_budgets: settings.thinking_budgets,
                 tool_choice: None,
+                deferred: None,
             },
             tool_execution: settings.tool_execution,
             hooks: settings.hooks.clone(),

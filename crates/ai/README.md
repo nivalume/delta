@@ -4,7 +4,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 
 `delta-ai` (imported as `delta_ai`) is the Rust port of [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai). It is part of [delta](https://github.com/nivalume/pi-rs). Serialized types (messages, models, credentials) keep upstream's JSON shape, so contexts and `auth.json` files move between pi, pi-py and delta.
 
-**Note**: The chat catalog only includes models that support tool calling. The catalog also lists image and classifier models from upstream, but this crate cannot run them yet (see [Image Generation](#image-generation) and [Classification](#classification)).
+**Note**: The chat catalog only includes models that support tool calling. The catalog also lists image and classifier models from upstream. `Models` runs them through providers that register image or classifier implementations; the built-in image and classifier APIs are still being ported (see [Image Generation](#image-generation) and [Classification](#classification)).
 
 **Status**: in development. Nothing is published to crates.io yet. The design notes, including every difference from upstream, are in [docs/design/README.md](docs/design/README.md).
 
@@ -38,6 +38,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
   - [Provider-Specific Options](#provider-specific-options-streamcomplete)
   - [Streaming Thinking Content](#streaming-thinking-content)
 - [Stop Reasons](#stop-reasons)
+  - [Deferred Responses](#deferred-responses)
 - [Telemetry](#telemetry)
 - [Error Handling](#error-handling)
   - [Aborting Requests](#aborting-requests)
@@ -862,11 +863,239 @@ for block in &response.content {
 
 ## Image Generation
 
-Not ported yet. The catalog contains image models (`ImageModel`, listed by `get_models_of_type(ModelType::Image, ..)`), but there is no `generate_images()` and providers have no image implementations.
+Image models live in the same `Models` collection and on the same `Provider` as chat models, so one credential per provider covers both. They are `ImageModel` values (`AnyModel::Image`, `"type": "image"` in JSON) and run through `generate_images()`, a one-shot call that waits for the provider response and returns the final `AssistantImages` result. The chat and stream methods take `Model`, so image models cannot reach them.
+
+### Basic Image Generation
+
+```rust,no_run
+# async fn example() {
+use delta_ai::providers::builtin::builtin_models;
+use delta_ai::{AnyModel, CreateModelsOptions, ImagesContext, ImagesOptions, ModelType, UserBlock};
+
+let models = builtin_models(CreateModelsOptions::default());
+
+let Some(AnyModel::Image(model)) =
+    models.get_model_of_type(ModelType::Image, "openrouter", "google/gemini-2.5-flash-image")
+else {
+    panic!("image model in catalog");
+};
+
+// Auth resolves through the provider (OPENROUTER_API_KEY here); an explicit api_key wins
+let context = ImagesContext::new(vec![UserBlock::text(
+    "Generate a red circle on a plain white background.",
+)]);
+let result = models.generate_images(&model, &context, ImagesOptions::default()).await;
+
+for block in &result.output {
+    match block {
+        UserBlock::Text(text) => println!("{}", text.text),
+        UserBlock::Image(image) => println!("{} ({} base64 chars)", image.mime_type, image.data.len()),
+    }
+}
+# }
+```
+
+`generate_images()` accepts only `ImageModel` values. If an upstream model supports both chat and image generation, the catalog contains separate entries with the same provider and id: `get_model()` returns its chat operation and `get_model_of_type(ModelType::Image, ..)` returns its image operation. Failures never panic or return `Err`; they return an `AssistantImages` with `stop_reason: ImagesStopReason::Error` (`Aborted` when the request was cancelled), including unknown providers, unconfigured auth, and providers without an image implementation.
+
+The result (`AssistantImages`) has the JSON shape of upstream's: `api`, `provider`, `model`, `output` (text and base64 image blocks), optional `response_id` and `usage`, `stop_reason` (`Stop`, `Error`, `Aborted`), `error_message` and `timestamp`.
+
+A provider declares image support with `CreateProviderOptions::images(api, implementation)` of [`create_provider()`](#create_provider): it registers an implementation of `ProviderImages` for one `model.api`. Image models go into the same `models` list as chat models. A provider without chat models passes `ProviderApi::none()` as its chat implementation:
+
+```rust
+use delta_ai::model::OutputModality;
+use delta_ai::{
+    AssistantImages, CreateProviderOptions, ImageModel, ImagesContext, ImagesOptions, InputModality, ModelCost,
+    ProviderApi, ProviderAuth, ProviderImages, create_provider, env_api_key_auth,
+};
+use futures::future::BoxFuture;
+
+struct PixelsImages;
+
+impl ProviderImages for PixelsImages {
+    fn generate_images<'a>(
+        &'a self,
+        model: &'a ImageModel,
+        context: &'a ImagesContext,
+        options: ImagesOptions,
+    ) -> BoxFuture<'a, AssistantImages> {
+        Box::pin(async move {
+            // options.base.api_key and options.base.headers hold the resolved auth.
+            // Call the service here; report failures as AssistantImages::error(model, message, aborted).
+            let _ = (context, options);
+            AssistantImages::empty(model)
+        })
+    }
+}
+
+let pixels = create_provider(
+    CreateProviderOptions::new(
+        "pixels",
+        ProviderAuth::api_key(env_api_key_auth("Pixels API key", &["PIXELS_API_KEY"])),
+        vec![
+            ImageModel {
+                id: "flux-pro".into(),
+                name: "FLUX Pro".into(),
+                api: "pixels-images".into(),
+                provider: "pixels".into(),
+                base_url: "https://api.pixels.test/v1".into(),
+                input: vec![InputModality::Text],
+                input_limits: None,
+                cost: ModelCost::default(),
+                headers: None,
+                output: vec![OutputModality::Image],
+            }
+            .into(),
+        ],
+        ProviderApi::none(),
+    )
+    .images("pixels-images", PixelsImages),
+);
+```
+
+`ImagesOptions { base, metadata }` holds the request options in `base` (`RequestOptions<ImageModel>`: `api_key`, `headers`, `env`, `cancel`, `timeout`, `max_retries`, `on_payload`, `on_response`, `transform_headers`, ...), as `SimpleStreamOptions` holds `StreamOptions`. `RequestOptions::transport_options()` turns them into `StreamOptions` for the `delta_ai::http` helpers.
+
+Some models also support image input:
+
+```rust,no_run
+# use delta_ai::{ImageModel, Models};
+# async fn example(models: Models, model: ImageModel) -> Result<(), Box<dyn std::error::Error>> {
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use delta_ai::{ImageContent, ImagesContext, ImagesOptions, UserBlock};
+
+let image = STANDARD.encode(std::fs::read("input.png")?);
+let result = models
+    .generate_images(
+        &model,
+        &ImagesContext::new(vec![
+            UserBlock::text("Create a variation of this image with a blue background."),
+            UserBlock::Image(ImageContent {
+                data: image,
+                mime_type: "image/png".into(),
+            }),
+        ]),
+        ImagesOptions::default(),
+    )
+    .await;
+# Ok(())
+# }
+```
+
+Check capabilities on the model metadata: `model.input` (`[Text]` or `[Text, Image]`) and `model.output` (`[Image]` or `[Image, Text]`).
+
+### Notes and Limitations
+
+- Image models and chat models share `Models` and `Provider`; list them with `get_models_of_type(ModelType::Image, ..)` and run them with `generate_images()`.
+- Image-generation models do not take part in tool calling.
+- Outputs are returned in `AssistantImages.output` and can include both base64 `ImageContent` blocks and `TextContent` blocks.
+- Some models return only images, others images plus text. Check `model.output`.
+- Some models accept image input, others are text-to-image only. Check `model.input`.
+- Like the streaming methods, image generation supports `api_key`, `cancel`, `headers`, `on_payload` and `on_response`, and results may include `stop_reason`, `response_id` and `usage`.
+- To have a model analyze images in a conversation or call tools, use the chat methods with a model that supports image input.
+
+### Image Providers
+
+Upstream generates images through one provider, OpenRouter (`openrouter-images` API). The built-in API implementation is being ported; until then the built-in `openrouter` provider lists its image models but `generate_images()` returns an error result (`Provider openrouter does not support image generation`).
 
 ## Classification
 
-Not ported yet. The catalog contains classifier models (`ClassifierModel`, listed by `get_models_of_type(ModelType::Classifier, ..)`), but there is no `classify()` and none of the classifier APIs (TypeSafe System One, OpenAI Decisions, llama.cpp) are implemented.
+Classifier models consume structured JSON state, and optionally images, and answer one or more typed questions. They do not use the chat or image-generation methods. They are `ClassifierModel` values (`AnyModel::Classifier`) and run through `classify()`:
+
+```rust,no_run
+# async fn example(models: delta_ai::Models, model: delta_ai::ClassifierModel) -> Result<(), Box<dyn std::error::Error>> {
+use delta_ai::{ClassifierContext, ClassifierOptions};
+use serde_json::json;
+
+// Built in, `models.get_model_of_type(ModelType::Classifier, "typesafe", "jev-latest")`.
+// Questions keep their order; JSON as upstream.
+let context: ClassifierContext = serde_json::from_value(json!({
+    "state": { "message": "The change works perfectly, thanks." },
+    "questions": {
+        "category": {
+            "type": "choice",
+            "instructions": "Classify the message.",
+            "criteria": {
+                "approval": "The user approves of the result",
+                "correction": "The user requests a correction"
+            }
+        },
+        "satisfaction": {
+            "type": "score",
+            "instructions": "Score user satisfaction.",
+            "criteria": ["dissatisfied", "neutral", "satisfied"]
+        },
+        "approved": {
+            "type": "bool",
+            "instructions": "Does the user approve?",
+            "criteria": { "true": "Approval", "false": "No approval" }
+        }
+    }
+}))?;
+let result = models.classify(&model, &context, ClassifierOptions::default()).await;
+
+println!("{:?}", result.answers);
+# Ok(())
+# }
+```
+
+In Rust, `ClassifierQuestion` is an enum with `Choice`, `Score` and `Bool` variants, and `ClassifierAnswer` has the same variants: `Choice { choice, probabilities, confidence }`, `Score { score, confidence }` and `Bool { probability }` (the probability of `true`). `questions`, `answers` and `probabilities` are `IndexMap`s, so they keep request order.
+
+`ClassifierResult` holds `api`, `provider`, `model`, `answers`, optional `usage`, `stop_reason` (`Stop`, `Error`, `Aborted`), `error_message` and `timestamp`. Like image generation, `classify()` returns a result with stop reason `Error` instead of failing for provider, authentication or response errors.
+
+When the service reports token counts, `result.usage` carries them with their cost at the model's catalog price, the same `Usage` shape as chat messages.
+
+`ClassifierOptions::temperature` divides the answer logits by the given value before they are normalized; values above 1 soften the distribution. APIs that cannot apply it ignore it.
+
+`ClassifierContext::images` holds image blocks judged together with the state. Only models whose `input` includes `Image` accept them; `classify()` returns an error result (`Model <provider>/<id> does not accept image input`) for other models without calling the provider.
+
+Custom providers register classifier models and implementations by API id:
+
+```rust
+use delta_ai::{
+    ClassifierContext, ClassifierModel, ClassifierOptions, ClassifierResult, CreateProviderOptions, ProviderApi,
+    ProviderAuth, ProviderClassifier, create_provider,
+};
+use futures::future::BoxFuture;
+
+struct MyClassifier;
+
+impl ProviderClassifier for MyClassifier {
+    fn classify<'a>(
+        &'a self,
+        model: &'a ClassifierModel,
+        context: &'a ClassifierContext,
+        options: ClassifierOptions,
+    ) -> BoxFuture<'a, ClassifierResult> {
+        Box::pin(async move {
+            // Answer every question of `context`; report failures as ClassifierResult::error(..).
+            let _ = (context, options);
+            ClassifierResult::empty(model)
+        })
+    }
+}
+
+let provider = create_provider(
+    CreateProviderOptions::new(
+        "classifier-service",
+        ProviderAuth::keyless("Classifier service"),
+        vec![/* ClassifierModel values with api "classifier-api" */],
+        ProviderApi::none(),
+    )
+    .classifier("classifier-api", MyClassifier),
+);
+```
+
+### Built-in Classifier Providers
+
+Upstream serves TypeSafe's Jev, Cloudflare's Clef and OpenAI's GPT-6 Luna through the `typesafe`, `openrouter`, `cloudflare-workers-ai`, `vercel-ai-gateway`, `opencode` and `openai` providers, with the `typesafe-system-one`, `cloudflare-workers-ai-system-one` and `openai-decisions` APIs. The catalog lists these models; the built-in API implementations are being ported, and until then `classify()` returns an error result for them.
+
+### OpenAI Decisions
+
+The built-in API implementation is being ported.
+
+### Chat models on llama.cpp
+
+The built-in API implementation (`llama-cpp-classify`) is being ported.
 
 ## Thinking/Reasoning
 
@@ -1004,7 +1233,50 @@ Every `AssistantMessage` has a `stop_reason` field (`StopReason`) that tells how
 - `Error`: an error occurred during generation
 - `Aborted`: the request was cancelled
 
-`StopReason` also has a `Deferred` variant for upstream's deferred responses; no ported API produces it. The JSON values are upstream's strings (`"stop"`, `"toolUse"`, ...); `StopReason::as_str()` returns them.
+- `Deferred`: the provider continues the request asynchronously; `deferred` holds the handle (see [Deferred Responses](#deferred-responses))
+
+The JSON values are upstream's strings (`"stop"`, `"toolUse"`, ...); `StopReason::as_str()` returns them.
+
+### Deferred Responses
+
+A provider that supports it can answer a request with a durable `DeferredHandle` instead of the response, and continue the request asynchronously. Ask for it with `SimpleStreamOptions::deferred` (upstream `deferred: true` or `{ window: "15m" | "1h" | "24h" }`). The answer ends with stop reason `Deferred` and the handle in `AssistantMessage::deferred` (`provider`, `model_id`, `api`, `id`, optional `expires_at`, `poll_after_ms` and `data`). Redeem the handle later with `Models::fetch_deferred()` (or `stream_deferred()` for the events): it returns the handle again while the response is still running, then the final message. `Models::cancel_deferred()` cancels on a best-effort basis. Auth resolves for these calls as for `stream()`. Providers without deferred support answer `Provider <id> does not support deferred responses`.
+
+```rust
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() {
+use delta_ai::providers::faux::{FauxDeferredOptions, FauxOptions, FauxProvider, faux_assistant_message, faux_text};
+use delta_ai::{
+    Context, DeferredFetchOptions, DeferredRequest, DeferredWindow, Message, Models, SimpleStreamOptions, StopReason,
+};
+
+// The faux provider simulates a deferred request that is ready on the second poll.
+let faux = FauxProvider::new(FauxOptions {
+    deferred: Some(FauxDeferredOptions { pending_fetches: 1, poll_after_ms: Some(1000) }),
+    ..FauxOptions::default()
+});
+let models = Models::default();
+models.set_provider(faux.clone());
+faux.set_responses(vec![faux_assistant_message(vec![faux_text("done")]).into()]);
+let model = faux.model();
+
+let options = SimpleStreamOptions {
+    deferred: Some(DeferredRequest::with_window(DeferredWindow::OneHour)),
+    ..SimpleStreamOptions::default()
+};
+let submitted = models.complete_simple(&model, &Context::new(vec![Message::user("hi")]), options).await;
+assert_eq!(submitted.stop_reason, StopReason::Deferred);
+let handle = submitted.deferred.expect("deferred handle");
+
+let mut message = models.fetch_deferred(&model, &handle, DeferredFetchOptions::default()).await;
+while message.stop_reason == StopReason::Deferred {
+    // Wait handle.poll_after_ms before polling a real provider again.
+    message = models.fetch_deferred(&model, &handle, DeferredFetchOptions::default()).await;
+}
+assert_eq!(message.text(), "done");
+# }
+```
+
+API implementations support deferred responses by overriding `ProviderStreams::supports_fetch_deferred` / `fetch_deferred` and `supports_cancel_deferred` / `cancel_deferred`; `create_provider()` exposes them per `model.api`. None of the built-in APIs implements them, as upstream.
 
 `AssistantMessage` may also have `response_id`, a provider-specific upstream response or message id when the API exposes one. Do not assume it is always present.
 
@@ -1590,6 +1862,7 @@ Notes:
 - Usage is estimated at roughly 1 token per 4 characters. When `session_id` is set and cache retention is not `None`, prompt cache reads and writes are simulated.
 - Tool call arguments stream in chunks through `ToolCallDelta` events.
 - By default chunks are emitted as fast as possible. Set `tokens_per_second` to pace them in real time.
+- `stream_simple()` with `deferred` set answers with a deferred handle; `fetch_deferred()` redeems it after `FauxOptions::deferred.pending_fetches` pending polls, and `cancel_deferred()` cancels it. `faux.state()` counts `deferred_fetch_count` and lists `cancelled_deferred` (see [Deferred Responses](#deferred-responses)).
 - `FauxProvider` itself implements `Provider`, and clones share the queue (upstream separates the handle from the provider). For independent concurrent flows, create separate faux providers with distinct `provider` ids.
 
 ## Cross-Provider Handoffs

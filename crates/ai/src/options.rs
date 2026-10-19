@@ -22,11 +22,15 @@ pub struct ProviderResponse {
 }
 
 /// Inspect or replace the provider payload before it is sent. `Ok(None)` keeps it.
-pub type OnPayload =
-    Arc<dyn Fn(&Value, &Model) -> BoxFuture<'static, Result<Option<Value>, CallbackError>> + Send + Sync>;
+pub type OnPayload = OnPayloadFor<Model>;
+/// [`OnPayload`] of a request for a model of type `M`.
+pub type OnPayloadFor<M> =
+    Arc<dyn Fn(&Value, &M) -> BoxFuture<'static, Result<Option<Value>, CallbackError>> + Send + Sync>;
 /// Called after an HTTP response is received and before its body is consumed.
-pub type OnResponse =
-    Arc<dyn Fn(&ProviderResponse, &Model) -> BoxFuture<'static, Result<(), CallbackError>> + Send + Sync>;
+pub type OnResponse = OnResponseFor<Model>;
+/// [`OnResponse`] of a request for a model of type `M`.
+pub type OnResponseFor<M> =
+    Arc<dyn Fn(&ProviderResponse, &M) -> BoxFuture<'static, Result<(), CallbackError>> + Send + Sync>;
 /// Observe each parsed provider stream event before normalization. Awaited in stream order.
 pub type OnProviderStreamEvent =
     Arc<dyn Fn(&Value, &Model) -> BoxFuture<'static, Result<(), CallbackError>> + Send + Sync>;
@@ -142,6 +146,9 @@ pub struct SimpleStreamOptions {
     pub reasoning: Option<ThinkingLevel>,
     /// Custom token budgets for thinking levels.
     pub thinking_budgets: Option<ThinkingBudgets>,
+    /// Ask a capable provider to return a durable handle and continue the request
+    /// asynchronously (upstream `deferred: true | { window }`). See [`crate::deferred`].
+    pub deferred: Option<crate::deferred::DeferredRequest>,
 }
 
 impl From<StreamOptions> for SimpleStreamOptions {
@@ -149,6 +156,111 @@ impl From<StreamOptions> for SimpleStreamOptions {
         Self {
             base,
             ..Self::default()
+        }
+    }
+}
+
+/// Auth, HTTP transport and callbacks shared by provider requests for a model of type `M`
+/// (upstream `ProviderRequestOptions<TModel>`). Image generation, classification and deferred
+/// fetches use it; chat streams use the flat [`StreamOptions`].
+pub struct RequestOptions<M> {
+    /// Cancels the request; the result then has stop reason `aborted`.
+    pub cancel: Option<CancellationToken>,
+    /// Explicit API key. Wins over anything the provider would resolve.
+    pub api_key: Option<String>,
+    /// Provider-scoped environment values, used before the process environment.
+    pub env: Option<ProviderEnv>,
+    /// Extra request headers; `None` values suppress API defaults of the same name.
+    pub headers: Option<ProviderHeaders>,
+    /// HTTP client to send requests with. Defaults to a shared client.
+    pub http_client: Option<reqwest::Client>,
+    /// Request timeout. Default: 10 minutes.
+    pub timeout: Option<Duration>,
+    /// Maximum client-side retry attempts. Default: 2.
+    pub max_retries: Option<u32>,
+    /// Longest server-requested retry delay to wait for. Default: 60 s; zero disables the cap.
+    pub max_retry_delay: Option<Duration>,
+    pub on_payload: Option<OnPayloadFor<M>>,
+    pub on_response: Option<OnResponseFor<M>>,
+    /// Final transform of the assembled headers. Consumed by [`crate::Models`]; providers never
+    /// see it.
+    pub transform_headers: Option<TransformHeaders>,
+}
+
+impl<M> Default for RequestOptions<M> {
+    fn default() -> Self {
+        Self {
+            cancel: None,
+            api_key: None,
+            env: None,
+            headers: None,
+            http_client: None,
+            timeout: None,
+            max_retries: None,
+            max_retry_delay: None,
+            on_payload: None,
+            on_response: None,
+            transform_headers: None,
+        }
+    }
+}
+
+impl<M> Clone for RequestOptions<M> {
+    fn clone(&self) -> Self {
+        Self {
+            cancel: self.cancel.clone(),
+            api_key: self.api_key.clone(),
+            env: self.env.clone(),
+            headers: self.headers.clone(),
+            http_client: self.http_client.clone(),
+            timeout: self.timeout,
+            max_retries: self.max_retries,
+            max_retry_delay: self.max_retry_delay,
+            on_payload: self.on_payload.clone(),
+            on_response: self.on_response.clone(),
+            transform_headers: self.transform_headers.clone(),
+        }
+    }
+}
+
+impl<M> fmt::Debug for RequestOptions<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RequestOptions")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("env", &self.env.as_ref().map(|env| env.keys().collect::<Vec<_>>()))
+            .field(
+                "headers",
+                &self.headers.as_ref().map(|headers| headers.keys().collect::<Vec<_>>()),
+            )
+            .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<M> RequestOptions<M> {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(CancellationToken::is_cancelled)
+    }
+
+    /// A value from `env`, else from the process environment. Blank values count as unset.
+    pub fn env_var(&self, name: &str) -> Option<String> {
+        crate::auth::env_value(self.env.as_ref(), name)
+    }
+
+    /// The auth and transport settings as [`StreamOptions`], without callbacks, for the
+    /// [`crate::http`] helpers (`client`, `send_with_retry`).
+    pub fn transport_options(&self) -> StreamOptions {
+        StreamOptions {
+            cancel: self.cancel.clone(),
+            api_key: self.api_key.clone(),
+            env: self.env.clone(),
+            headers: self.headers.clone(),
+            http_client: self.http_client.clone(),
+            timeout: self.timeout,
+            max_retries: self.max_retries,
+            max_retry_delay: self.max_retry_delay,
+            ..StreamOptions::default()
         }
     }
 }

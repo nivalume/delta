@@ -6,11 +6,14 @@
 
 pub mod api;
 pub mod auth;
+pub mod classifier;
 pub mod compat;
+pub mod deferred;
 pub mod error;
 pub mod estimate;
 pub mod events;
 pub mod http;
+pub mod images;
 pub mod json;
 pub mod model;
 pub mod models;
@@ -40,6 +43,16 @@ pub use models::{CreateModelsOptions, Models, ModelsRefreshOptions, ModelsRefres
 pub use options::{ApiOptions, SimpleStreamOptions, StreamOptions, ToolChoice};
 pub use provider::{CreateProviderOptions, Provider, ProviderApi, ProviderStreams, create_provider, lazy_stream};
 pub use transcript::{get_current_system_prompt, get_current_tools, normalize_context};
+
+// Image generation, classification and deferred responses.
+pub use classifier::{
+    ClassifierAnswer, ClassifierContext, ClassifierOptions, ClassifierQuestion, ClassifierResult, ClassifierStopReason,
+    ProviderClassifier,
+};
+pub use deferred::{DeferredCancelOptions, DeferredFetchOptions, DeferredHandle, DeferredRequest, DeferredWindow};
+pub use images::{AssistantImages, ImagesContext, ImagesOptions, ImagesStopReason, ProviderImages};
+pub use options::RequestOptions;
+pub use provider::try_create_provider;
 pub use types::{
     AssistantBlock, AssistantMessage, Context, ImageContent, JsonObject, Message, StopReason, SystemMessage,
     TextContent, ThinkingContent, Tool, ToolCall, ToolResultMessage, TranscriptContext, Usage, UserBlock, UserContent,

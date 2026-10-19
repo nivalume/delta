@@ -14,6 +14,7 @@
 //! # }
 //! ```
 
+use futures::future::BoxFuture;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -21,14 +22,16 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::{Credential, ProviderAuth};
+use crate::deferred::{DeferredCancelOptions, DeferredFetchOptions};
+use crate::error::Error;
 use crate::events::{AssistantMessageEventStream, MessageBuilder};
 use crate::model::{AnyModel, InputModality, Model, ModelCost};
-use crate::options::{SimpleStreamOptions, StreamOptions};
+use crate::options::{CallbackError, OnResponse, ProviderResponse, SimpleStreamOptions, StreamOptions};
 use crate::provider::Provider;
 use crate::transcript::get_system_message_text;
 use crate::types::{
-    AssistantBlock, AssistantMessage, Message, StopReason, TextContent, ThinkingContent, ToolCall, TranscriptContext,
-    Usage, UserBlock, UserContent, now_ms,
+    AssistantBlock, AssistantMessage, DeferredHandle, Message, StopReason, TextContent, ThinkingContent, ToolCall,
+    TranscriptContext, Usage, UserBlock, UserContent, now_ms,
 };
 
 const DEFAULT_API: &str = "faux";
@@ -74,9 +77,13 @@ pub fn faux_assistant_message(content: Vec<AssistantBlock>) -> AssistantMessage 
 }
 
 /// Mutable call counters of a faux provider.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct FauxState {
     pub call_count: usize,
+    /// Calls of `fetch_deferred`.
+    pub deferred_fetch_count: usize,
+    /// Handles passed to `cancel_deferred`, in call order.
+    pub cancelled_deferred: Vec<DeferredHandle>,
 }
 
 /// Builds a reply from the request.
@@ -143,6 +150,30 @@ pub struct FauxOptions {
     pub tokens_per_second: Option<f64>,
     /// Chunk size range in tokens (4 characters each). Default: 3 to 5.
     pub token_size: Option<(usize, usize)>,
+    /// Behavior of deferred requests (`SimpleStreamOptions::deferred`).
+    pub deferred: Option<FauxDeferredOptions>,
+}
+
+/// Deferred-response behavior of a faux provider.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FauxDeferredOptions {
+    /// Number of fetches that return the original handle before the scripted response is
+    /// ready.
+    pub pending_fetches: usize,
+    /// `poll_after_ms` of the handles.
+    pub poll_after_ms: Option<u64>,
+}
+
+/// A submitted deferred request.
+struct DeferredEntry {
+    handle: DeferredHandle,
+    step: FauxResponse,
+    context: TranscriptContext,
+    session: Option<String>,
+    model: Model,
+    pending_fetches: usize,
+    cancelled: bool,
+    final_message: Option<AssistantMessage>,
 }
 
 struct Core {
@@ -151,9 +182,11 @@ struct Core {
     models: Vec<Model>,
     tokens_per_second: Option<f64>,
     token_size: (usize, usize),
+    deferred_options: FauxDeferredOptions,
     pending: Mutex<VecDeque<FauxResponse>>,
     state: Mutex<FauxState>,
     prompt_cache: Mutex<HashMap<String, Vec<String>>>,
+    deferred: Mutex<HashMap<String, DeferredEntry>>,
     auth: ProviderAuth,
 }
 
@@ -218,9 +251,11 @@ impl FauxProvider {
                 models,
                 tokens_per_second: options.tokens_per_second,
                 token_size: (min, max.max(min)),
+                deferred_options: options.deferred.unwrap_or_default(),
                 pending: Mutex::default(),
                 state: Mutex::default(),
                 prompt_cache: Mutex::default(),
+                deferred: Mutex::default(),
             }),
         }
     }
@@ -254,16 +289,22 @@ impl FauxProvider {
     }
 
     pub fn state(&self) -> FauxState {
-        *self.core.state.lock().unwrap_or_else(PoisonError::into_inner)
+        self.core.state.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
-    fn run(&self, model: &Model, context: &TranscriptContext, options: &StreamOptions) -> AssistantMessageEventStream {
+    fn run(
+        &self,
+        model: &Model,
+        context: &TranscriptContext,
+        options: &StreamOptions,
+        deferred: bool,
+    ) -> AssistantMessageEventStream {
         let core = self.core.clone();
         let step = core.pending.lock().unwrap_or_else(PoisonError::into_inner).pop_front();
         let state = {
             let mut state = core.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.call_count += 1;
-            *state
+            state.clone()
         };
         let (sender, stream) = AssistantMessageEventStream::channel();
         let model = model.clone();
@@ -273,32 +314,141 @@ impl FauxProvider {
             .clone()
             .filter(|_| options.cache_retention != Some(crate::model::CacheRetention::None));
         let cancel = options.cancel.clone();
+        let on_response = options.on_response.clone();
         tokio::spawn(async move {
-            let mut message = match step {
-                Some(FauxResponse::Message(message)) => message,
-                Some(FauxResponse::Factory(factory)) => factory(&context, &state, &model),
-                None => AssistantMessage {
-                    stop_reason: StopReason::Error,
-                    error_message: Some("No more faux responses queued".into()),
-                    ..AssistantMessage::empty(&model.api, &model.provider, &model.id)
-                },
+            let builder = MessageBuilder::new(sender, AssistantMessage::default());
+            if let Err(error) = notify_response(on_response.as_ref(), &model).await {
+                return core.play(builder, core.error_message(&model.id, error), None).await;
+            }
+            // As upstream, an empty queue fails the request even when it asks to be deferred.
+            let step = match step {
+                Some(step) if deferred => step,
+                step => {
+                    let message = core.resolve(step, &context, &state, &model, session.as_deref());
+                    return core.play(builder, message, cancel).await;
+                }
             };
-            message.api.clone_from(&core.api);
-            message.provider.clone_from(&core.provider);
-            message.model.clone_from(&model.id);
-            message.usage = core.estimate_usage(&message, &context, session.as_deref());
-            core.play(
-                MessageBuilder::new(sender, AssistantMessage::default()),
-                message,
-                cancel,
-            )
-            .await;
+            let handle = DeferredHandle {
+                provider: model.provider.clone(),
+                model_id: model.id.clone(),
+                api: model.api.clone(),
+                id: random_id("deferred"),
+                expires_at: None,
+                poll_after_ms: core.deferred_options.poll_after_ms,
+                data: None,
+            };
+            let entry = DeferredEntry {
+                handle: handle.clone(),
+                step,
+                context,
+                session,
+                model: model.clone(),
+                pending_fetches: core.deferred_options.pending_fetches,
+                cancelled: false,
+                final_message: None,
+            };
+            core.deferred
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(handle.id.clone(), entry);
+            core.play(builder, deferred_message(&model, handle), cancel).await;
         });
         stream
     }
 }
 
+/// Call `on_response` with the faux response metadata (status 200, no headers).
+async fn notify_response(on_response: Option<&OnResponse>, model: &Model) -> Result<(), CallbackError> {
+    match on_response {
+        Some(on_response) => {
+            let response = ProviderResponse {
+                status: 200,
+                ..ProviderResponse::default()
+            };
+            on_response(&response, model).await
+        }
+        None => Ok(()),
+    }
+}
+
+/// The still-running answer of a deferred request.
+fn deferred_message(model: &Model, handle: DeferredHandle) -> AssistantMessage {
+    AssistantMessage {
+        stop_reason: StopReason::Deferred,
+        deferred: Some(handle),
+        ..AssistantMessage::empty(&model.api, &model.provider, &model.id)
+    }
+}
+
 impl Core {
+    /// The scripted reply of `step` (an error reply when the queue was empty), stamped with
+    /// this provider's ids and an estimated usage.
+    fn resolve(
+        &self,
+        step: Option<FauxResponse>,
+        context: &TranscriptContext,
+        state: &FauxState,
+        model: &Model,
+        session: Option<&str>,
+    ) -> AssistantMessage {
+        let mut message = match step {
+            Some(FauxResponse::Message(message)) => message,
+            Some(FauxResponse::Factory(factory)) => factory(context, state, model),
+            None => AssistantMessage {
+                stop_reason: StopReason::Error,
+                error_message: Some("No more faux responses queued".into()),
+                ..AssistantMessage::empty(&model.api, &model.provider, &model.id)
+            },
+        };
+        message.api.clone_from(&self.api);
+        message.provider.clone_from(&self.provider);
+        message.model.clone_from(&model.id);
+        message.usage = self.estimate_usage(&message, context, session);
+        message
+    }
+
+    /// An error reply without usage (upstream `createErrorMessage`).
+    fn error_message(&self, model_id: &str, error: impl fmt::Display) -> AssistantMessage {
+        AssistantMessage {
+            stop_reason: StopReason::Error,
+            error_message: Some(error.to_string()),
+            ..AssistantMessage::empty(&self.api, &self.provider, model_id)
+        }
+    }
+
+    /// The next answer of a deferred request: the handle again while fetches are pending,
+    /// then the scripted reply (resolved once and kept).
+    fn redeem(&self, model: &Model, handle: &DeferredHandle) -> Result<AssistantMessage, String> {
+        let mut entries = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = entries
+            .get_mut(&handle.id)
+            .filter(|entry| {
+                entry.handle.provider == handle.provider
+                    && entry.handle.model_id == handle.model_id
+                    && entry.handle.api == handle.api
+            })
+            .ok_or_else(|| format!("Unknown faux deferred response: {}", handle.id))?;
+        if entry.cancelled {
+            return Err(format!("Faux deferred response was cancelled: {}", handle.id));
+        }
+        if entry.pending_fetches > 0 {
+            entry.pending_fetches -= 1;
+            return Ok(deferred_message(model, entry.handle.clone()));
+        }
+        if entry.final_message.is_none() {
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let message = self.resolve(
+                Some(entry.step.clone()),
+                &entry.context,
+                &state,
+                &entry.model,
+                entry.session.as_deref(),
+            );
+            entry.final_message = Some(message);
+        }
+        Ok(entry.final_message.clone().unwrap_or_default())
+    }
+
     fn estimate_usage(&self, message: &AssistantMessage, context: &TranscriptContext, session: Option<&str>) -> Usage {
         let prompt: Vec<String> = context
             .messages()
@@ -559,7 +709,7 @@ impl Provider for FauxProvider {
         context: &TranscriptContext,
         options: StreamOptions,
     ) -> AssistantMessageEventStream {
-        self.run(model, context, &options)
+        self.run(model, context, &options, false)
     }
 
     fn stream_simple(
@@ -568,7 +718,71 @@ impl Provider for FauxProvider {
         context: &TranscriptContext,
         options: SimpleStreamOptions,
     ) -> AssistantMessageEventStream {
-        self.run(model, context, &options.base)
+        self.run(model, context, &options.base, options.deferred.is_some())
+    }
+
+    fn supports_fetch_deferred(&self) -> bool {
+        true
+    }
+
+    fn fetch_deferred(
+        &self,
+        model: &Model,
+        handle: &DeferredHandle,
+        options: DeferredFetchOptions,
+    ) -> AssistantMessageEventStream {
+        let core = self.core.clone();
+        core.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .deferred_fetch_count += 1;
+        let (sender, stream) = AssistantMessageEventStream::channel();
+        let model = model.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let builder = MessageBuilder::new(sender, AssistantMessage::default());
+            let redeemed = match notify_response(options.base.on_response.as_ref(), &model).await {
+                Ok(()) => core.redeem(&model, &handle),
+                Err(error) => Err(error.to_string()),
+            };
+            match redeemed {
+                Ok(message) => core.play(builder, message, options.base.cancel).await,
+                Err(error) => core.play(builder, core.error_message(&model.id, error), None).await,
+            }
+        });
+        stream
+    }
+
+    fn supports_cancel_deferred(&self) -> bool {
+        true
+    }
+
+    fn cancel_deferred<'a>(
+        &'a self,
+        model: &'a Model,
+        handle: &'a DeferredHandle,
+        options: DeferredCancelOptions,
+    ) -> BoxFuture<'a, Result<(), Error>> {
+        Box::pin(async move {
+            self.core
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .cancelled_deferred
+                .push(handle.clone());
+            if let Some(entry) = self
+                .core
+                .deferred
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_mut(&handle.id)
+            {
+                entry.cancelled = true;
+            }
+            notify_response(options.on_response.as_ref(), model)
+                .await
+                .map_err(|error| Error::msg(error.to_string()))
+        })
     }
 }
 

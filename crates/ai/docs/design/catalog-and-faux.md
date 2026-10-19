@@ -41,4 +41,6 @@ Behavior shared with upstream:
 - The cancellation token is checked between chunks. On abort, partial content is kept.
 - Helper functions: `faux_text`, `faux_thinking`, `faux_tool_call`, `faux_assistant_message` (the stop reason is `toolUse` when there are tool calls).
 
-Differences from upstream: `FauxProvider` itself implements `Provider` and is cloneable (clones share the queue); there is no separate handle and provider. Deferred response features are not in the first phase. Chunk sizes use a simple xorshift pseudo-random generator instead of adding a `rand` dependency.
+- Deferred responses (`FauxOptions::deferred`, `stream_simple` with `deferred`, `fetch_deferred`, `cancel_deferred`, `FauxState::deferred_fetch_count` / `cancelled_deferred`): see [images-classifiers-deferred.md](images-classifiers-deferred.md#faux-provider). As upstream, the faux provider has no image or classifier support.
+
+Differences from upstream: `FauxProvider` itself implements `Provider` and is cloneable (clones share the queue); there is no separate handle and provider. Chunk sizes use a simple xorshift pseudo-random generator instead of adding a `rand` dependency.

@@ -506,23 +506,10 @@ impl<S: ProviderStreams + Clone + 'static> ProviderStreams for AzureStreams<S> {
         let inner = self.inner.clone();
         let (model_c, context) = (model.clone(), context.clone());
         lazy_stream(model, options.base.cancel.clone(), async move {
-            let SimpleStreamOptions {
-                base,
-                tool_choice,
-                reasoning,
-                thinking_budgets,
-            } = options;
-            let (model, base) = Self::prepare(&model_c, base)?;
-            Ok(inner.stream_simple(
-                &model,
-                &context,
-                SimpleStreamOptions {
-                    base,
-                    tool_choice,
-                    reasoning,
-                    thinking_budgets,
-                },
-            ))
+            let mut options = options;
+            let (model, base) = Self::prepare(&model_c, std::mem::take(&mut options.base))?;
+            options.base = base;
+            Ok(inner.stream_simple(&model, &context, options))
         })
     }
 }

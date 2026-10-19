@@ -13,13 +13,16 @@ use crate::auth::{
     CredentialStore, DefaultAuthContext, InMemoryCredentialStore, LoginOptions, ModifyFn, merge_headers,
     read_credential, refresh_stored_oauth_credential, resolve_provider_auth,
 };
-use crate::error::{ModelsError, ModelsErrorCode};
+use crate::classifier::{ClassifierContext, ClassifierOptions, ClassifierResult, check_classifier_input};
+use crate::deferred::{DeferredCancelOptions, DeferredFetchOptions};
+use crate::error::{Error, ModelsError, ModelsErrorCode};
 use crate::events::AssistantMessageEventStream;
-use crate::model::{AnyModel, Model, ModelType};
-use crate::options::{SimpleStreamOptions, StreamOptions};
+use crate::images::{AssistantImages, ImagesContext, ImagesOptions};
+use crate::model::{AnyModel, ClassifierModel, ImageModel, Model, ModelType};
+use crate::options::{RequestOptions, SimpleStreamOptions, StreamOptions, TransformHeaders};
 use crate::provider::{ModelsPublication, ModelsStoreEntry, Persist, Provider, RefreshModelsContext, lazy_stream};
 use crate::transcript::normalize_context;
-use crate::types::{AssistantMessage, Context, ProviderHeaders, now_ms};
+use crate::types::{AssistantMessage, Context, DeferredHandle, ProviderEnv, ProviderHeaders, now_ms};
 
 /// Persistent dynamic model catalogs keyed by provider id.
 pub trait ModelsStore: Send + Sync {
@@ -703,44 +706,105 @@ impl Models {
             .ok_or_else(|| ModelsError::new(ModelsErrorCode::Provider, format!("Unknown provider: {provider_id}")))
     }
 
-    /// Resolve auth and merge it into the request: explicit options win per field, then the
-    /// `transform_headers` hook runs last.
+    /// Resolve auth and merge it into the request fields: explicit options win per field,
+    /// then the `transform_headers` hook runs last. Returns the base URL auth resolved, if
+    /// any. Auth resolution races `cancel`, as upstream's abort signal.
+    async fn resolve_request(&self, model: AnyModel, request: RequestAuth<'_>) -> Result<Option<String>, ModelsError> {
+        let RequestAuth {
+            api_key,
+            env,
+            headers,
+            transform_headers,
+            cancel,
+        } = request;
+        let overrides = AuthResolutionOverrides {
+            api_key: api_key.clone(),
+            env: env.clone(),
+            min_oauth_validity: None,
+        };
+        let resolve = self.get_model_auth(&model, &overrides);
+        let resolution = match cancel {
+            Some(cancel) => tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(ModelsError::aborted()),
+                resolution = resolve => resolution,
+            },
+            None => resolve.await,
+        }?;
+        let resolution = resolution.ok_or_else(|| {
+            ModelsError::new(
+                ModelsErrorCode::Auth,
+                format!("Provider is not configured: {}", model.provider()),
+            )
+        })?;
+        let auth = resolution.auth;
+        *api_key = api_key.take().or(auth.api_key);
+        let mut merged = merge_headers(auth.headers.as_ref(), headers.as_ref());
+        if let Some(transform) = transform_headers.take() {
+            merged = Some(transform(merged.unwrap_or_default()).await);
+        }
+        *headers = merged;
+        if resolution.env.is_some() || env.is_some() {
+            let mut merged = resolution.env.unwrap_or_default();
+            merged.extend(env.take().unwrap_or_default());
+            *env = Some(merged);
+        }
+        Ok(auth.base_url)
+    }
+
+    /// [`Self::resolve_request`] for chat stream options.
     async fn apply_auth(
         &self,
         model: &Model,
         mut options: StreamOptions,
     ) -> Result<(Model, StreamOptions), ModelsError> {
-        let overrides = AuthResolutionOverrides {
-            api_key: options.api_key.clone(),
-            env: options.env.clone(),
-            min_oauth_validity: None,
+        let cancel = options.cancel.clone();
+        let request = RequestAuth {
+            api_key: &mut options.api_key,
+            env: &mut options.env,
+            headers: &mut options.headers,
+            transform_headers: &mut options.transform_headers,
+            cancel: cancel.as_ref(),
         };
-        let resolution = self
-            .get_model_auth(&AnyModel::Chat(model.clone()), &overrides)
-            .await?
-            .ok_or_else(|| {
-                ModelsError::new(
-                    ModelsErrorCode::Auth,
-                    format!("Provider is not configured: {}", model.provider),
-                )
-            })?;
-        let auth = resolution.auth;
-        options.api_key = options.api_key.or(auth.api_key);
-        let mut headers = merge_headers(auth.headers.as_ref(), options.headers.as_ref());
-        if let Some(transform) = options.transform_headers.take() {
-            headers = Some(transform(headers.unwrap_or_default()).await);
-        }
-        options.headers = headers;
-        if resolution.env.is_some() || options.env.is_some() {
-            let mut env = resolution.env.unwrap_or_default();
-            env.extend(options.env.take().unwrap_or_default());
-            options.env = Some(env);
-        }
+        let base_url = self.resolve_request(AnyModel::Chat(model.clone()), request).await?;
         let mut request_model = model.clone();
-        if let Some(base_url) = auth.base_url {
+        if let Some(base_url) = base_url {
             request_model.base_url = base_url;
         }
         Ok((request_model, options))
+    }
+
+    /// [`Self::resolve_request`] for [`RequestOptions`]; returns the resolved base URL.
+    async fn apply_request_auth<M>(
+        &self,
+        model: AnyModel,
+        options: &mut RequestOptions<M>,
+    ) -> Result<Option<String>, ModelsError> {
+        let cancel = options.cancel.clone();
+        let request = RequestAuth {
+            api_key: &mut options.api_key,
+            env: &mut options.env,
+            headers: &mut options.headers,
+            transform_headers: &mut options.transform_headers,
+            cancel: cancel.as_ref(),
+        };
+        self.resolve_request(model, request).await
+    }
+
+    /// Provider of a chat model with a deferred capability, or the upstream error.
+    fn require_deferred_provider(
+        &self,
+        model: &Model,
+        supported: impl Fn(&dyn Provider) -> bool,
+    ) -> Result<Arc<dyn Provider>, ModelsError> {
+        let provider = self.require_provider(&model.provider)?;
+        if !supported(provider.as_ref()) {
+            return Err(ModelsError::new(
+                ModelsErrorCode::Provider,
+                format!("Provider {} does not support deferred responses", model.provider),
+            ));
+        }
+        Ok(provider)
     }
 
     /// Stream a response with the model's API options. Auth resolves through the provider.
@@ -772,19 +836,9 @@ impl Models {
         let target = model.clone();
         lazy_stream(model, options.base.cancel.clone(), async move {
             let provider = models.require_provider(&target.provider)?;
-            let SimpleStreamOptions {
-                base,
-                tool_choice,
-                reasoning,
-                thinking_budgets,
-            } = options;
-            let (request_model, base) = models.apply_auth(&target, base).await?;
-            let options = SimpleStreamOptions {
-                base,
-                tool_choice,
-                reasoning,
-                thinking_budgets,
-            };
+            let mut options = options;
+            let (request_model, base) = models.apply_auth(&target, std::mem::take(&mut options.base)).await?;
+            options.base = base;
             Ok(provider.stream_simple(&request_model, &transcript, options))
         })
     }
@@ -798,4 +852,137 @@ impl Models {
     ) -> AssistantMessage {
         self.stream_simple(model, context, options).result().await
     }
+
+    /// Poll or redeem a deferred response through the owning provider, with auth resolved
+    /// like [`Self::stream`]. A response that is still running ends with stop reason
+    /// `deferred`. Providers without deferred support produce an error stream.
+    pub fn stream_deferred(
+        &self,
+        model: &Model,
+        handle: &DeferredHandle,
+        options: DeferredFetchOptions,
+    ) -> AssistantMessageEventStream {
+        let models = self.clone();
+        let target = model.clone();
+        let handle = handle.clone();
+        lazy_stream(model, options.base.cancel.clone(), async move {
+            let provider = models.require_deferred_provider(&target, |provider| provider.supports_fetch_deferred())?;
+            let mut options = options;
+            let base_url = models
+                .apply_request_auth(AnyModel::Chat(target.clone()), &mut options.base)
+                .await?;
+            let mut request_model = target;
+            if let Some(base_url) = base_url {
+                request_model.base_url = base_url;
+            }
+            Ok(provider.fetch_deferred(&request_model, &handle, options))
+        })
+    }
+
+    /// Await the final message of [`Self::stream_deferred`].
+    pub async fn fetch_deferred(
+        &self,
+        model: &Model,
+        handle: &DeferredHandle,
+        options: DeferredFetchOptions,
+    ) -> AssistantMessage {
+        self.stream_deferred(model, handle, options).result().await
+    }
+
+    /// Best-effort cancellation of a deferred response through the owning provider.
+    pub async fn cancel_deferred(
+        &self,
+        model: &Model,
+        handle: &DeferredHandle,
+        mut options: DeferredCancelOptions,
+    ) -> Result<(), Error> {
+        let provider = self.require_deferred_provider(model, |provider| provider.supports_cancel_deferred())?;
+        let base_url = self
+            .apply_request_auth(AnyModel::Chat(model.clone()), &mut options)
+            .await?;
+        let mut request_model = model.clone();
+        if let Some(base_url) = base_url {
+            request_model.base_url = base_url;
+        }
+        provider.cancel_deferred(&request_model, handle, options).await
+    }
+
+    /// Generate images through the owning provider, with auth resolved like
+    /// [`Self::stream`]. Never fails: unknown providers, unconfigured auth and providers
+    /// without image generation return a result with stop reason `error`.
+    pub async fn generate_images(
+        &self,
+        model: &ImageModel,
+        context: &ImagesContext,
+        mut options: ImagesOptions,
+    ) -> AssistantImages {
+        let prepared = async {
+            let provider = self.require_provider(&model.provider)?;
+            if !provider.supports_images() {
+                return Err(ModelsError::new(
+                    ModelsErrorCode::Provider,
+                    format!("Provider {} does not support image generation", model.provider),
+                ));
+            }
+            let base_url = self
+                .apply_request_auth(AnyModel::Image(model.clone()), &mut options.base)
+                .await?;
+            Ok((provider, base_url))
+        }
+        .await;
+        match prepared {
+            Ok((provider, base_url)) => {
+                let mut request_model = model.clone();
+                if let Some(base_url) = base_url {
+                    request_model.base_url = base_url;
+                }
+                provider.generate_images(&request_model, context, options).await
+            }
+            Err(error) => AssistantImages::error(model, error.to_string(), options.base.is_cancelled()),
+        }
+    }
+
+    /// Classify structured state through the owning provider. Never fails: errors, including
+    /// images sent to a model without image input, return a result with stop reason `error`.
+    pub async fn classify(
+        &self,
+        model: &ClassifierModel,
+        context: &ClassifierContext,
+        mut options: ClassifierOptions,
+    ) -> ClassifierResult {
+        let prepared = async {
+            check_classifier_input(model, context)?;
+            let provider = self.require_provider(&model.provider)?;
+            if !provider.supports_classify() {
+                return Err(ModelsError::new(
+                    ModelsErrorCode::Provider,
+                    format!("Provider {} does not support classification", model.provider),
+                ));
+            }
+            let base_url = self
+                .apply_request_auth(AnyModel::Classifier(model.clone()), &mut options.base)
+                .await?;
+            Ok((provider, base_url))
+        }
+        .await;
+        match prepared {
+            Ok((provider, base_url)) => {
+                let mut request_model = model.clone();
+                if let Some(base_url) = base_url {
+                    request_model.base_url = base_url;
+                }
+                provider.classify(&request_model, context, options).await
+            }
+            Err(error) => ClassifierResult::error(model, error.to_string(), options.base.is_cancelled()),
+        }
+    }
+}
+
+/// Mutable request fields that [`Models::resolve_request`] merges auth into.
+struct RequestAuth<'a> {
+    api_key: &'a mut Option<String>,
+    env: &'a mut Option<ProviderEnv>,
+    headers: &'a mut Option<ProviderHeaders>,
+    transform_headers: &'a mut Option<TransformHeaders>,
+    cancel: Option<&'a CancellationToken>,
 }

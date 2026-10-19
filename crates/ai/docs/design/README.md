@@ -15,6 +15,7 @@
 | [http.md](http.md) | `http`, `json`, `api::common`, `api::constrained_sampling` | SSE decoding, retries, error bodies, streaming JSON parsing, API task framework, shared constrained sampling |
 | [catalog-and-faux.md](catalog-and-faux.md) | `providers::catalog`, `providers::faux` | Built-in model catalog, faux provider for tests |
 | [cloudflare.md](cloudflare.md) | `api::cloudflare`, `providers::cloudflare` | Cloudflare AI Gateway and Workers AI: auth, endpoint placeholders |
+| [images-classifiers-deferred.md](images-classifiers-deferred.md) | `images`, `classifier`, `deferred` | Image generation and classification contracts, deferred responses, their `Models` and `create_provider` wiring |
 | `api-*.md` | `api::*` | Implementation of each wire protocol, one document per API |
 
 ## Overall structure

@@ -54,7 +54,7 @@ All fields of the compat structs are `Option`. When a field is unset, the API im
 
 ## Options (`options`)
 
-`StreamOptions` corresponds to upstream `StreamOptions` + `ProviderRequestOptions`. `SimpleStreamOptions { base, tool_choice, reasoning, thinking_budgets }` corresponds to upstream `SimpleStreamOptions` (`deferred` is not in the first phase). API-specific options go in `StreamOptions::api: Option<ApiOptions>`. A variant that does not match `model.api` is ignored:
+`StreamOptions` corresponds to upstream `StreamOptions` + `ProviderRequestOptions`. `SimpleStreamOptions { base, tool_choice, reasoning, thinking_budgets, deferred }` corresponds to upstream `SimpleStreamOptions`. The generic `RequestOptions<M>` is upstream `ProviderRequestOptions<TModel>` for the image, classifier and deferred options; those types are described in [images-classifiers-deferred.md](images-classifiers-deferred.md). API-specific options go in `StreamOptions::api: Option<ApiOptions>`. A variant that does not match `model.api` is ignored:
 
 | `ApiOptions` variant | Upstream type |
 | --- | --- |
