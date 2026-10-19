@@ -5,19 +5,19 @@
 `delta_ai::oauth` holds the OAuth login flows of the built-in providers and the helpers they share. The framework (the `OAuthAuth` trait, `AuthInteraction`, `Models::login`, locked refresh) lives in `auth` and is described in [auth.md](auth.md). This module adds:
 
 - shared helpers: PKCE, the loopback callback server, the race between the callback and a pasted code, device-code polling, the browser pages;
-- three flows: Anthropic (Claude Pro/Max), OpenRouter (PKCE that mints an API key), xAI (device code);
+- five flows: Anthropic (Claude Pro/Max), OpenRouter (PKCE that mints an API key), and the device-code flows of xAI, Kimi Code and Meta;
 - the `delta-ai` login CLI (`src/bin/delta-ai.rs`, feature `cli`).
 
-The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Codex, OpenAI ChatGPT, GitHub Copilot, Kimi, Meta, Radius) can be ported one-to-one.
+The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Codex, OpenAI ChatGPT, GitHub Copilot, Radius) can be ported one-to-one.
 
 ## Upstream source files
 
 - `packages/ai/src/auth/oauth/pkce.ts`, `callback-server.ts`, `device-code.ts`
 - `packages/ai/src/utils/oauth-page.ts`
-- `packages/ai/src/auth/oauth/anthropic.ts`, `openrouter.ts`, `xai.ts`
-- `packages/ai/src/providers/anthropic.ts`, `openrouter.ts`, `xai.ts` (the `auth.oauth` entries)
+- `packages/ai/src/auth/oauth/anthropic.ts`, `openrouter.ts`, `xai.ts`, `kimi-coding.ts`, `meta.ts`
+- `packages/ai/src/providers/anthropic.ts`, `openrouter.ts`, `xai.ts`, `kimi-coding.ts`, `meta.ts` (the `auth.oauth` entries)
 - `packages/ai/src/cli.ts`
-- Tests: `test/oauth-callback-server.test.ts`, `test/oauth-device-code.test.ts`, `test/oauth-auth.test.ts` (the parts for these flows), `test/anthropic-oauth.test.ts`, `test/openrouter-oauth.test.ts`, `test/xai-oauth.test.ts`. Ported to `tests/oauth_helpers.rs` and `tests/oauth_flows.rs`.
+- Tests: `test/oauth-callback-server.test.ts`, `test/oauth-device-code.test.ts`, `test/oauth-auth.test.ts` (the parts for these flows), `test/anthropic-oauth.test.ts`, `test/openrouter-oauth.test.ts`, `test/xai-oauth.test.ts`, `test/kimi-coding-oauth.test.ts`, `test/meta-oauth.test.ts`. Ported to `tests/oauth_helpers.rs`, `tests/oauth_flows.rs` and `tests/oauth_kimi_meta.rs`.
 
 ## Module layout
 
@@ -30,6 +30,8 @@ The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Cod
 | `auth/oauth/anthropic.ts` | `oauth::anthropic` (`AnthropicOAuth`) |
 | `auth/oauth/openrouter.ts` | `oauth::openrouter` (`OpenRouterOAuth`) |
 | `auth/oauth/xai.ts` | `oauth::xai` (`XaiOAuth`) |
+| `auth/oauth/kimi-coding.ts` | `oauth::kimi_coding` (`KimiCodingOAuth`) |
+| `auth/oauth/meta.ts` | `oauth::meta` (`MetaOAuth`) |
 | `auth/oauth/load.ts`, `lazyOAuth` | Not needed: the flows are plain structs compiled into the crate |
 
 The helpers are re-exported from `delta_ai::oauth`.
@@ -148,6 +150,28 @@ Each flow is a struct implementing `OAuthAuth`. `Default` uses upstream's endpoi
 - Refresh: form `POST https://auth.x.ai/oauth2/token` with `grant_type=refresh_token`. A missing `refresh_token` keeps the old one; a missing `expires_in` means one hour; `expires` is now + lifetime − 5 minutes. Field errors: `Invalid xAI OAuth response field: <field>`.
 - `to_auth`: `api_key = access`.
 
+### Kimi Code (`KimiCodingOAuth`)
+
+- Name `Kimi Code (subscription)`, subscription, login label `Sign in with Kimi Code`.
+- OAuth host: the `oauth_host` field, else `KIMI_CODE_OAUTH_HOST`, else `KIMI_OAUTH_HOST`, else `https://auth.kimi.com`. Trailing slashes are removed. The host is resolved at each login and refresh.
+- Requests are form `POST`s with `Accept: application/json` and a 30 s timeout. A response body counts only when it parses as a JSON object or array (upstream `readJson`).
+- Login: `POST <host>/api/oauth/device_authorization` with `client_id`. Non-2xx → `Kimi Code device authorization failed with status <status>[: <body text>]`. `device_code`, `user_code`, `verification_uri` and `verification_uri_complete` must be strings, and both URIs must be `http` or `https` URLs; otherwise `Invalid Kimi Code device authorization response: <JSON>`. `interval` defaults to 5 s and `expires_in` to 15 minutes when they are not positive. The `DeviceCode` event carries `verification_uri_complete`.
+- Polling: `POST <host>/api/oauth/token` with `client_id`, `device_code` and the device-code grant type, through `poll_oauth_device_code_flow` with `wait_before_first_poll`. Status 500 or higher → `Kimi Code device token request failed with status <status>[: <body text>]`. A 2xx with a string `access_token` completes. `authorization_pending` → pending; `slow_down` → the server's positive `interval`; `expired_token` → `Kimi Code device authorization expired. Please restart login.`; `access_denied` → `Kimi Code login was denied.`; anything else → `Kimi Code device token request failed (status <status>)[: <error>[: <description>]]`.
+- A token response needs a non-empty `access_token` and `refresh_token` and a positive `expires_in`, else `Kimi Code token <poll|refresh> response missing fields: <JSON>`. `expires` is now + `expires_in`, with no skew.
+- Refresh: `POST <host>/api/oauth/token` with `client_id`, `grant_type=refresh_token` and `refresh_token`. Network errors, 429 and 5xx are retried up to three times, after 1 s, 2 s and 4 s. 401, 403 or `invalid_grant` fail at once with `Kimi Code token refresh unauthorized (status <status>)[: <description>]`. Other failures: `Kimi Code token refresh failed with status <status>: <JSON>`. When the retries run out, the last error is returned.
+- `to_auth`: `headers = {Authorization: Bearer <access>}` and no API key. `openai-completions` uses the bearer key `unused` when an `Authorization` header is present, and the auth header replaces the default one, so the request carries exactly `Authorization: Bearer <access>`. The base URL and the model list do not change.
+
+### Meta (`MetaOAuth`)
+
+- Name `Meta (Muse subscription)`, subscription, login label `Sign in with Meta`.
+- Meta splits identity from API access. The device flow yields an identity token, which is exchanged for a Model API key at the Muse Code key-mint endpoint. The credential stores the identity token as `refresh` and the key as `access`, with `expires` now + 24 hours, so the standard refresh mints a new key. The identity token itself cannot be renewed.
+- Login: form `POST https://auth.meta.com/oidc/device/authorization/` with `client_id`. Non-2xx → `Meta device authorization failed with status <status><detail>`, where the detail is `: ` and the first non-blank of `error_description`, `detail`, `message`, `error` (trimmed). The verification URI is `verification_uri_complete` if it is an `http(s)` URL, else `verification_uri` under the same rule. It must be present, and `device_code` and `user_code` must be non-empty strings, else `Invalid Meta device authorization response: <JSON>`. `interval` and `expires_in` are used only when positive; without `expires_in` polling runs until cancelled.
+- Polling: form `POST https://auth.meta.com/oidc/device/token/` with the device-code grant type, `device_code` and `client_id`, with `wait_before_first_poll`. A 2xx with a non-empty `access_token` completes. `authorization_pending` → pending; `slow_down` → the positive `interval`; `access_denied` → `Meta login was denied.`; `expired_token` → `Meta device authorization expired. Please restart login.`; anything else → `Meta device token request failed with status <status><detail>`.
+- Then `Progress` `Enabling Meta Model API access...` and the mint: `POST https://api.meta.ai/muse-code/key` with body `{}` and headers `Accept: application/json`, `Authorization: Bearer <identity token>`, `Content-Type: application/json`, `x-api-version: 1.0.0`. 401/403 → ``Meta session expired (status <status>). Run `/login meta` to sign in again.<detail>``; other non-2xx → `Meta API key mint failed with status <status><detail>`; no `api_key` → `Meta did not issue an API key.[ Complete setup at <action_url>]` (only an `http(s)` `action_url` is shown).
+- A login that fails after the cancel token fired reports `Login cancelled`.
+- Refresh: the mint request with the stored identity token.
+- `to_auth`: `api_key = access`. The `openai-responses` request does not change otherwise.
+
 ### Provider wiring
 
 | Provider | Upstream | Rust |
@@ -155,8 +179,10 @@ Each flow is a struct implementing `OAuthAuth`. `Default` uses upstream's endpoi
 | `anthropic` | `auth: { apiKey, oauth: lazyOAuth(anthropic) }` | `anthropic_provider()`: `ProviderAuth::api_key(..).with_oauth(AnthropicOAuth::default())` |
 | `openrouter` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(openrouter) }` | `builtin_oauth("openrouter")` in `providers::builtin` |
 | `xai` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(xai) }` | `builtin_oauth("xai")` |
+| `kimi-coding` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(kimiCoding) }` | `builtin_oauth("kimi-coding")` |
+| `meta` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(meta) }` | `builtin_oauth("meta")` |
 
-`builtin_oauth(id)` adds the OAuth method to a table-driven provider. Later flows (Kimi, Meta, …) add their entries there.
+`builtin_oauth(id)` adds the OAuth method to a table-driven provider. Later flows add their entries there.
 
 ## CLI (`delta-ai`)
 
@@ -171,13 +197,16 @@ Each flow is a struct implementing `OAuthAuth`. `Default` uses upstream's endpoi
 ## Rust-specific differences
 
 - Cancellation is a `CancellationToken` (`AuthInteraction::cancel()`, `ManualCode { cancel }`, the helpers' `cancel` fields) instead of an `AbortSignal`. Flows call `interaction.cancel()` once and keep the token.
-- `OAuthAuth::refresh` takes no signal (see [auth.md](auth.md)); the Anthropic and xAI refresh requests cannot be cancelled by the caller. `Models` bounds a refresh with its 15 s timeout; Anthropic also keeps its own 30 s request timeout.
+- `OAuthAuth::refresh` takes no signal (see [auth.md](auth.md)); the Anthropic, xAI, Kimi and Meta refresh requests cannot be cancelled by the caller. `Models` bounds a refresh with its 15 s timeout; Anthropic, Kimi and Meta also keep their own 30 s request timeouts. Kimi's refresh therefore has no `Kimi Code token refresh aborted` error; its backoff sleeps end only when the future is dropped (for example by the `Models` timeout).
 - `generate_pkce` is synchronous.
 - `OAuthCallbackServer::wait` hands out the result once (a second call fails); upstream returns the same promise each time. Dropping the server closes it.
 - `start_oauth_callback_server` is a small HTTP/1.1 handler on Tokio's `TcpListener`: one request per connection, `connection: close`, the request body is ignored. A connection accepted after `close()` is dropped unanswered, so later requests fail as with a closed Node server.
 - `poll_oauth_device_code_flow` takes `poll` as its second argument instead of an options field. It measures time with `tokio::time::Instant`, so tests run on paused time instead of fake timers. `interval_seconds` and `expires_in_seconds` are `f64` (JavaScript numbers); the `DeviceCode` event's fields are `u64` and are truncated.
 - Anthropic's `formatErrorDetails` has no error name, `code`/`errno` or stack in Rust; `format_error_details` gives the message and the `source()` chain. A token response missing `access_token`, `refresh_token` or `expires_in` is reported as invalid JSON (upstream would store `undefined` values).
-- When the Anthropic token exchange is cancelled, the error is `Login cancelled` instead of a wrapped `AbortError`.
+- When the Anthropic token exchange or a Kimi login request is cancelled, the error is `Login cancelled` instead of an `AbortError`. A Kimi or Meta request that hits its 30 s timeout fails with reqwest's timeout message instead of the DOM `TimeoutError` text; other network errors carry reqwest's message instead of `fetch failed`.
+- Kimi and Meta print response bodies with `serde_json` (`JSON.stringify` upstream). The output is the same compact JSON for the bodies these endpoints return; a float such as `5.0` prints as `5.0` instead of `5`.
+- The Kimi host variables are read through delta's `env_value`, so blank values count as unset (upstream treats only the empty string as unset). Tests set the `oauth_host` field; the environment lookup is a unit test.
+- Meta's endpoints are public struct fields (`device_authorization_url`, `device_token_url`, `api_key_mint_url`).
 - `PI_OAUTH_CALLBACK_HOST` is read when a login starts (upstream's Anthropic module reads it once at import). Blank values count as unset, as everywhere in delta. The flow structs also take a `callback_host` field, which the tests use instead of mutating the process environment (forbidden without `unsafe` in Rust 2024).
 - Endpoints are public struct fields (`token_url`, `authorize_url`, `device_code_url`, `callback_port`) so tests can use wiremock and free ports; upstream stubs global `fetch` and binds the real port 53692.
 - CLI: the usage line names `delta-ai` instead of `npx @earendil-works/pi-ai`. Stdin is read by a background thread; end of input fails the pending prompt with `Input closed` (Node's readline would wait forever).
@@ -185,7 +214,7 @@ Each flow is a struct implementing `OAuthAuth`. `Default` uses upstream's endpoi
 
 ## Not ported
 
-- The other flows: OpenAI Codex, OpenAI ChatGPT, GitHub Copilot, Kimi For Coding, Meta, Radius. They are ported separately on top of these helpers.
+- The other flows: OpenAI Codex, OpenAI ChatGPT, GitHub Copilot, Radius. They are ported separately on top of these helpers.
 - `src/oauth.ts` (type-only compatibility exports for coding-agent extensions).
 - `registerBundledOAuthFlowLoaders` (Bun standalone binaries).
 

@@ -2045,10 +2045,12 @@ Several providers support OAuth authentication instead of static API keys:
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenRouter** (OAuth PKCE that mints a user-controlled API key)
 - **xAI** (SuperGrok or X Premium subscription, device-code login)
+- **Kimi For Coding** (Kimi Code subscription, device-code login)
+- **Meta** (Muse subscription, device-code login that mints a Model API key)
 
-Upstream also offers OAuth for OpenAI (Sign in with ChatGPT), OpenAI Codex, GitHub Copilot, Kimi For Coding, Meta and Radius. Those flows are being ported; until then the built-in providers among them authenticate with API keys.
+Upstream also offers OAuth for OpenAI (Sign in with ChatGPT), OpenAI Codex, GitHub Copilot and Radius. Those flows are being ported; until then the built-in providers among them authenticate with API keys.
 
-Each of these providers carries an `OAuthAuth` in `provider.auth().oauth` with three operations: `login(interaction, options)` uses the provider-neutral `AuthInteraction::prompt()`/`notify()` protocol and returns a credential, `refresh(credential)` refreshes expiring credentials, and `to_auth(credential)` derives request auth. Login is cancelled through `AuthInteraction::cancel()`. Refresh is automatic: `models.get_auth(provider_id, ..)` and request paths refresh expired tokens inside `CredentialStore::modify`, so concurrent requests cannot double-refresh. OpenRouter's flow returns a permanent API key, so its refresh is a no-op. An Anthropic OAuth access token is used as the API key; the `anthropic-messages` API recognizes it and sends it as a bearer token with Claude Code's identity and beta headers.
+Each of these providers carries an `OAuthAuth` in `provider.auth().oauth` with three operations: `login(interaction, options)` uses the provider-neutral `AuthInteraction::prompt()`/`notify()` protocol and returns a credential, `refresh(credential)` refreshes expiring credentials, and `to_auth(credential)` derives request auth. Login is cancelled through `AuthInteraction::cancel()`. Refresh is automatic: `models.get_auth(provider_id, ..)` and request paths refresh expired tokens inside `CredentialStore::modify`, so concurrent requests cannot double-refresh. OpenRouter's flow returns a permanent API key, so its refresh is a no-op. An Anthropic OAuth access token is used as the API key; the `anthropic-messages` API recognizes it and sends it as a bearer token with Claude Code's identity and beta headers. A Kimi Code access token is sent as an `Authorization: Bearer` header. Meta's login exchanges its identity token for a Model API key that lives about a day; refresh mints a new key from the stored identity token.
 
 ```rust,no_run
 # #[tokio::main(flavor = "current_thread")]
@@ -2206,13 +2208,13 @@ Credentials are saved to `auth.json` in the current directory, in the same JSON 
 
 ### Programmatic OAuth
 
-Use the provider-owned `OAuthAuth` through `Models::login`, as above; it composes with `CredentialStore` and gets locked automatic refresh through `Models`. The flows are also public in `delta_ai::oauth` (`AnthropicOAuth`, `OpenRouterOAuth`, `XaiOAuth`), with their endpoints as public fields. To add OAuth to a custom provider, implement `OAuthAuth` and attach it with `ProviderAuth::with_oauth`. The building blocks of the built-in flows are public too:
+Use the provider-owned `OAuthAuth` through `Models::login`, as above; it composes with `CredentialStore` and gets locked automatic refresh through `Models`. The flows are also public in `delta_ai::oauth` (`AnthropicOAuth`, `OpenRouterOAuth`, `XaiOAuth`, `KimiCodingOAuth`, `MetaOAuth`), with their endpoints as public fields. To add OAuth to a custom provider, implement `OAuthAuth` and attach it with `ProviderAuth::with_oauth`. The building blocks of the built-in flows are public too:
 
 - `generate_pkce()`: PKCE verifier and S256 challenge;
 - `start_oauth_callback_server(options)` and `wait_for_callback_or_manual_input(..)`: a loopback redirect server raced against a pasted code or redirect URL;
 - `poll_oauth_device_code_flow(options, poll)`: RFC 8628 device-code polling with `slow_down` and expiry handling.
 
-The callback host defaults to `127.0.0.1`; set `PI_OAUTH_CALLBACK_HOST` to change it (for example inside containers).
+The callback host defaults to `127.0.0.1`; set `PI_OAUTH_CALLBACK_HOST` to change it (for example inside containers). `KIMI_CODE_OAUTH_HOST` (or `KIMI_OAUTH_HOST`) overrides Kimi Code's OAuth host.
 
 Provider notes:
 

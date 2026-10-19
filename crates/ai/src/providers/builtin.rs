@@ -6,9 +6,9 @@
 //! The Cloudflare providers live in [`crate::providers::cloudflare`].
 //!
 //! Not built in yet: providers whose APIs or auth flows are not ported (GitHub Copilot,
-//! OpenAI Codex, Radius, TypeSafe). OAuth login is ported for Anthropic, OpenRouter and xAI
-//! ([`crate::oauth`]); the other providers that offer it upstream authenticate with API keys
-//! until their flows are ported.
+//! OpenAI Codex, Radius, TypeSafe). OAuth login is ported for Anthropic, OpenRouter, xAI,
+//! Kimi For Coding and Meta ([`crate::oauth`]); the other providers that offer it upstream
+//! authenticate with API keys until their flows are ported.
 
 use futures::future::BoxFuture;
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ use crate::error::{ModelsError, ModelsErrorCode};
 use crate::events::AssistantMessageEventStream;
 use crate::model::Model;
 use crate::models::{CreateModelsOptions, Models};
-use crate::oauth::{AnthropicOAuth, OpenRouterOAuth, XaiOAuth};
+use crate::oauth::{AnthropicOAuth, KimiCodingOAuth, MetaOAuth, OpenRouterOAuth, XaiOAuth};
 use crate::options::{AzureOpenAIResponsesOptions, OnPayload, SimpleStreamOptions, StreamOptions};
 use crate::provider::{
     BuiltProvider, CreateProviderOptions, Provider, ProviderApi, ProviderStreams, create_provider, lazy_stream,
@@ -323,6 +323,8 @@ fn builtin_oauth(id: &str) -> Option<Arc<dyn OAuthAuth>> {
     let oauth: Arc<dyn OAuthAuth> = match id {
         "openrouter" => Arc::new(OpenRouterOAuth::default()),
         "xai" => Arc::new(XaiOAuth::default()),
+        "kimi-coding" => Arc::new(KimiCodingOAuth::default()),
+        "meta" => Arc::new(MetaOAuth::default()),
         _ => return None,
     };
     Some(oauth)
