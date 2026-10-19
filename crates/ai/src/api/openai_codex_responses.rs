@@ -2084,4 +2084,73 @@ mod tests {
             None
         );
     }
+
+    /// A WebSocket server that answers every `response.create` with `response.completed`
+    /// and records which connection served each request.
+    async fn completing_websocket_server() -> (String, std::sync::Arc<Mutex<Vec<usize>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let served = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let record = served.clone();
+        tokio::spawn(async move {
+            let mut connection = 0;
+            while let Ok((stream, _)) = listener.accept().await {
+                connection += 1;
+                let record = record.clone();
+                tokio::spawn(async move {
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    while let Some(Ok(WsMessage::Text(_))) = socket.next().await {
+                        record.lock().unwrap().push(connection);
+                        let event = json!({"type": "response.completed", "response": {
+                            "id": format!("resp_{connection}"), "status": "completed",
+                            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}}});
+                        socket.send(WsMessage::text(event.to_string())).await.unwrap();
+                    }
+                });
+            }
+        });
+        (base_url, served)
+    }
+
+    #[tokio::test]
+    async fn opens_a_fresh_cached_websocket_before_the_backend_connection_age_limit() {
+        use base64::Engine as _;
+        let (base_url, served) = completing_websocket_server().await;
+        let mut model = model("gpt-5.1-codex", None);
+        model.base_url = base_url;
+        let payload = json!({"https://api.openai.com/auth": {"chatgpt_account_id": "acc_age"}});
+        let token = format!(
+            "aaa.{}.bbb",
+            base64::engine::general_purpose::STANDARD.encode(payload.to_string())
+        );
+        let session = "codex-aged-ws-session";
+        let options = StreamOptions {
+            api_key: Some(token),
+            session_id: Some(session.into()),
+            transport: Some(Transport::WebsocketCached),
+            ..StreamOptions::default()
+        };
+        let context = normalize_context(&Context::new(vec![Message::user("Say hello")]));
+        let first = stream(&model, &context, options.clone()).result().await;
+        assert_eq!(first.stop_reason, StopReason::Stop, "{:?}", first.error_message);
+
+        // Age the cached connection past 55 minutes.
+        {
+            let mut cache = lock(&SESSION_CACHE);
+            let entry = cache.get_mut(session).unwrap().get_mut("acc_age").unwrap();
+            entry.created_at = Instant::now().checked_sub(Duration::from_secs(56 * 60)).unwrap();
+        }
+        let mut messages = context.messages().to_vec();
+        messages.push(Message::Assistant(first));
+        messages.push(Message::user("Now finish"));
+        let second = stream(&model, &normalize_context(&Context::new(messages)), options)
+            .result()
+            .await;
+        assert_eq!(second.stop_reason, StopReason::Stop, "{:?}", second.error_message);
+
+        assert_eq!(*served.lock().unwrap(), [1, 2]);
+        let stats = get_openai_codex_websocket_debug_stats(session).unwrap();
+        assert_eq!((stats.connections_created, stats.connections_reused), (2, 0));
+        close_openai_codex_websocket_sessions(Some(session));
+    }
 }

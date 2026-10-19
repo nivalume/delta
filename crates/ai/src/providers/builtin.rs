@@ -27,7 +27,7 @@ use crate::api::typesafe_system_one::{self, TypeSafeSystemOneApi};
 use crate::auth::{Credential, OAuthAuth, ProviderAuth, env_api_key_auth};
 use crate::error::{ModelsError, ModelsErrorCode};
 use crate::events::AssistantMessageEventStream;
-use crate::model::{AnyModel, Model, ModelType};
+use crate::model::Model;
 use crate::models::{CreateModelsOptions, Models};
 use crate::oauth::{
     AnthropicOAuth, KimiCodingOAuth, MetaOAuth, OpenAIChatGPTOAuth, OpenAICodexOAuth, OpenRouterOAuth, XaiOAuth,
@@ -164,6 +164,13 @@ const SIMPLE_PROVIDERS: &[(&str, &str, &str, &[&str], Apis)] = &[
         "https://integrate.api.nvidia.com/v1",
         &["NVIDIA_API_KEY"],
         Apis::OpenAICompletions,
+    ),
+    (
+        "openai",
+        "OpenAI",
+        "https://api.openai.com/v1",
+        &["OPENAI_API_KEY"],
+        Apis::OpenAIResponses,
     ),
     (
         "openrouter",
@@ -361,7 +368,6 @@ pub fn builtin_provider(id: &str) -> Option<Arc<dyn Provider>> {
     }
     let provider: Arc<dyn Provider> = match id {
         "anthropic" => Arc::new(anthropic_provider()),
-        "openai" => Arc::new(openai_provider()),
         "openai-codex" => Arc::new(openai_codex_provider()),
         "azure" => Arc::new(azure_provider()),
         "opencode" => Arc::new(opencode_provider("opencode", "OpenCode Zen")),
@@ -386,6 +392,7 @@ pub fn builtin_provider(id: &str) -> Option<Arc<dyn Provider>> {
 /// `auth.oauth` in `src/providers/<id>.ts`).
 fn builtin_oauth(id: &str) -> Option<Arc<dyn OAuthAuth>> {
     let oauth: Arc<dyn OAuthAuth> = match id {
+        "openai" => Arc::new(OpenAIChatGPTOAuth::default()),
         "openrouter" => Arc::new(OpenRouterOAuth::default()),
         "xai" => Arc::new(XaiOAuth::default()),
         "kimi-coding" => Arc::new(KimiCodingOAuth::default()),
@@ -418,34 +425,6 @@ pub fn builtin_models(options: CreateModelsOptions) -> Models {
         models.set_provider_arc(provider);
     }
     models
-}
-
-/// OpenAI: `OPENAI_API_KEY`, or Sign in with ChatGPT (upstream `providers/openai.ts`).
-/// Sign in with ChatGPT tokens only reach the Responses API; with an OAuth credential the
-/// classifier models are not listed.
-pub fn openai_provider() -> BuiltProvider {
-    let auth = ProviderAuth::api_key(env_api_key_auth("OpenAI API key", &["OPENAI_API_KEY"]))
-        .with_oauth(OpenAIChatGPTOAuth::default());
-    let mut options = CreateProviderOptions::new(
-        "openai",
-        auth,
-        all_builtin_models("openai").to_vec(),
-        ProviderApi::single(OpenAIResponsesApi),
-    )
-    .name("OpenAI");
-    options.base_url = Some("https://api.openai.com/v1".into());
-    options.filter_all_models = Some(Arc::new(|models: &[AnyModel], credential: Option<&Credential>| {
-        if matches!(credential, Some(Credential::OAuth(_))) {
-            models
-                .iter()
-                .filter(|model| model.model_type() != ModelType::Classifier)
-                .cloned()
-                .collect()
-        } else {
-            models.to_vec()
-        }
-    }));
-    create_provider(options)
 }
 
 /// OpenAI Codex: the ChatGPT Plus/Pro subscription's Codex backend, OAuth only (upstream
