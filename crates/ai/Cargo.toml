@@ -23,11 +23,14 @@ bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types
 # Vertex AI (google-vertex) through the official Google Cloud client libraries for Rust.
 vertex = ["dep:google-cloud-aiplatform-v1", "dep:google-cloud-auth", "dep:google-cloud-gax"]
 full = ["bedrock", "vertex"]
+# The `delta-ai` login CLI (port of upstream `src/cli.ts`).
+cli = []
 
 [dependencies]
 base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
+getrandom.workspace = true
 http.workspace = true
 indexmap.workspace = true
 jsonschema.workspace = true
@@ -36,7 +39,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+# `net` and `io-util` serve the OAuth loopback callback server.
+tokio = { workspace = true, features = ["net", "io-util"] }
 tokio-util.workspace = true
 tracing.workspace = true
 url.workspace = true
@@ -48,6 +52,11 @@ aws-smithy-types = { workspace = true, optional = true }
 google-cloud-aiplatform-v1 = { workspace = true, optional = true }
 google-cloud-auth = { workspace = true, optional = true }
 google-cloud-gax = { workspace = true, optional = true }
+
+[[bin]]
+name = "delta-ai"
+path = "src/bin/delta-ai.rs"
+required-features = ["cli"]
 
 [dev-dependencies]
 aws-smithy-eventstream.workspace = true

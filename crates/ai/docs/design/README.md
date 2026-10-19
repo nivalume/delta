@@ -10,6 +10,7 @@
 | [events.md](events.md) | `events` | Event protocol, `AssistantMessageEventStream`, `MessageBuilder` |
 | [models-and-providers.md](models-and-providers.md) | `models`, `provider` | The `Models` collection, the `Provider` trait, `create_provider`, dynamic model refresh |
 | [auth.md](auth.md) | `auth` | Credentials, credential store, API key and OAuth, resolution order and locked refresh |
+| [oauth.md](oauth.md) | `oauth`, `bin/delta-ai` | OAuth helpers (PKCE, callback server, device code), the Anthropic/OpenRouter/xAI flows, the login CLI |
 | [transcript.md](transcript.md) | `transcript`, `transform`, `estimate`, `simple_options` | System message replay, cross-provider switching, token estimation, thinking budgets |
 | [http.md](http.md) | `http`, `json`, `api::common`, `api::constrained_sampling` | SSE decoding, retries, error bodies, streaming JSON parsing, API task framework, shared constrained sampling |
 | [catalog-and-faux.md](catalog-and-faux.md) | `providers::catalog`, `providers::faux` | Built-in model catalog, faux provider for tests |

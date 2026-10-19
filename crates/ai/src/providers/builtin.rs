@@ -6,9 +6,9 @@
 //! The Cloudflare providers live in [`crate::providers::cloudflare`].
 //!
 //! Not built in yet: providers whose APIs or auth flows are not ported (GitHub Copilot,
-//! OpenAI Codex, Radius, TypeSafe). OAuth login of
-//! the providers that offer it upstream is not ported either; they authenticate with API
-//! keys.
+//! OpenAI Codex, Radius, TypeSafe). OAuth login is ported for Anthropic, OpenRouter and xAI
+//! ([`crate::oauth`]); the other providers that offer it upstream authenticate with API keys
+//! until their flows are ported.
 
 use futures::future::BoxFuture;
 use std::collections::HashMap;
@@ -20,11 +20,12 @@ use crate::api::google_generative_ai::GoogleGenerativeAiApi;
 use crate::api::mistral_conversations::MistralConversationsApi;
 use crate::api::openai_completions::OpenAICompletionsApi;
 use crate::api::openai_responses::OpenAIResponsesApi;
-use crate::auth::{ProviderAuth, env_api_key_auth};
+use crate::auth::{OAuthAuth, ProviderAuth, env_api_key_auth};
 use crate::error::{ModelsError, ModelsErrorCode};
 use crate::events::AssistantMessageEventStream;
 use crate::model::Model;
 use crate::models::{CreateModelsOptions, Models};
+use crate::oauth::{AnthropicOAuth, OpenRouterOAuth, XaiOAuth};
 use crate::options::{AzureOpenAIResponsesOptions, OnPayload, SimpleStreamOptions, StreamOptions};
 use crate::provider::{
     BuiltProvider, CreateProviderOptions, Provider, ProviderApi, ProviderStreams, create_provider, lazy_stream,
@@ -296,7 +297,8 @@ fn catalog_provider(
 /// A built-in provider by id, or `None` for unknown or not yet ported providers.
 pub fn builtin_provider(id: &str) -> Option<Arc<dyn Provider>> {
     if let Some((id, name, base_url, env, kind)) = SIMPLE_PROVIDERS.iter().find(|entry| entry.0 == id) {
-        let auth = ProviderAuth::api_key(env_api_key_auth(format!("{name} API key"), env));
+        let mut auth = ProviderAuth::api_key(env_api_key_auth(format!("{name} API key"), env));
+        auth.oauth = builtin_oauth(id);
         return Some(Arc::new(catalog_provider(id, name, Some(base_url), auth, apis(*kind))));
     }
     let provider: Arc<dyn Provider> = match id {
@@ -313,6 +315,17 @@ pub fn builtin_provider(id: &str) -> Option<Arc<dyn Provider>> {
         _ => return None,
     };
     Some(provider)
+}
+
+/// The OAuth login of a table-driven provider, next to its API key (upstream
+/// `auth.oauth` in `src/providers/<id>.ts`).
+fn builtin_oauth(id: &str) -> Option<Arc<dyn OAuthAuth>> {
+    let oauth: Arc<dyn OAuthAuth> = match id {
+        "openrouter" => Arc::new(OpenRouterOAuth::default()),
+        "xai" => Arc::new(XaiOAuth::default()),
+        _ => return None,
+    };
+    Some(oauth)
 }
 
 /// Ids of the providers [`builtin_provider`] builds, in catalog order.
@@ -341,13 +354,13 @@ pub fn builtin_models(options: CreateModelsOptions) -> Models {
 }
 
 /// Anthropic: `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, or `ANTHROPIC_AUTH_TOKEN` sent as a
-/// bearer token.
+/// bearer token; OAuth login with a Claude Pro/Max subscription.
 pub fn anthropic_provider() -> BuiltProvider {
     catalog_provider(
         "anthropic",
         "Anthropic",
         Some("https://api.anthropic.com"),
-        ProviderAuth::api_key(anthropic_auth::AnthropicApiKeyAuth),
+        ProviderAuth::api_key(anthropic_auth::AnthropicApiKeyAuth).with_oauth(AnthropicOAuth::default()),
         ProviderApi::single(AnthropicMessagesApi),
     )
 }

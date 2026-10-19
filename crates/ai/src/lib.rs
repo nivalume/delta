@@ -14,6 +14,7 @@ pub mod http;
 pub mod json;
 pub mod model;
 pub mod models;
+pub mod oauth;
 pub mod options;
 pub mod provider;
 pub mod providers;

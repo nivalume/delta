@@ -1767,9 +1767,81 @@ Use this when one process needs different provider settings per request, or when
 
 ## OAuth Providers
 
-Not ported yet: no built-in provider has an OAuth login flow. Upstream offers OAuth for Anthropic (Claude Pro/Max), OpenAI (Sign in with ChatGPT), OpenAI Codex, GitHub Copilot and OpenRouter; here those providers that are built in authenticate with API keys.
+Several providers support OAuth authentication instead of static API keys:
 
-The framework exists. `OAuthAuth` has `login(interaction, options)`, `refresh(credential)` and `to_auth(credential)`. Attach one to a provider with `ProviderAuth::with_oauth(..)`. `Models::login(provider_id, AuthType::OAuth, interaction, options)` runs it and stores the credential. Requests and `get_auth()` refresh expired tokens inside `CredentialStore::modify`, so concurrent requests cannot double-refresh. `Models::logout(provider_id)` deletes the credential.
+- **Anthropic** (Claude Pro/Max subscription)
+- **OpenRouter** (OAuth PKCE that mints a user-controlled API key)
+- **xAI** (SuperGrok or X Premium subscription, device-code login)
+
+Upstream also offers OAuth for OpenAI (Sign in with ChatGPT), OpenAI Codex, GitHub Copilot, Kimi For Coding, Meta and Radius. Those flows are being ported; until then the built-in providers among them authenticate with API keys.
+
+Each of these providers carries an `OAuthAuth` in `provider.auth().oauth` with three operations: `login(interaction, options)` uses the provider-neutral `AuthInteraction::prompt()`/`notify()` protocol and returns a credential, `refresh(credential)` refreshes expiring credentials, and `to_auth(credential)` derives request auth. Login is cancelled through `AuthInteraction::cancel()`. Refresh is automatic: `models.get_auth(provider_id, ..)` and request paths refresh expired tokens inside `CredentialStore::modify`, so concurrent requests cannot double-refresh. OpenRouter's flow returns a permanent API key, so its refresh is a no-op. An Anthropic OAuth access token is used as the API key; the `anthropic-messages` API recognizes it and sends it as a bearer token with Claude Code's identity and beta headers.
+
+```rust,no_run
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), delta_ai::ModelsError> {
+use delta_ai::auth::{AuthEvent, AuthInteraction, AuthPrompt, AuthType, LoginOptions};
+use delta_ai::providers::builtin::anthropic_provider;
+use delta_ai::{Context, Message, Models, ModelsError, StreamOptions};
+use futures::future::BoxFuture;
+
+struct Terminal;
+
+impl AuthInteraction for Terminal {
+    fn prompt(&self, prompt: AuthPrompt) -> BoxFuture<'_, Result<String, ModelsError>> {
+        Box::pin(async move {
+            match prompt {
+                // Anthropic asks for the login method first.
+                AuthPrompt::Select { options, .. } => Ok(options[0].id.clone()),
+                // Raced against a local callback server; `cancel` fires when the server wins.
+                AuthPrompt::ManualCode { message, cancel, .. } => {
+                    println!("{message}");
+                    cancel.cancelled().await;
+                    Err(ModelsError::new(delta_ai::ModelsErrorCode::Aborted, "dismissed"))
+                }
+                AuthPrompt::Text { message, .. } | AuthPrompt::Secret { message, .. } => {
+                    Ok(read_line(&message))
+                }
+            }
+        })
+    }
+
+    fn notify(&self, event: AuthEvent) {
+        match event {
+            AuthEvent::Info { message, links } => {
+                println!("{message}");
+                for link in links {
+                    println!("{}: {}", link.label.as_deref().unwrap_or("More information"), link.url);
+                }
+            }
+            AuthEvent::AuthUrl { url, .. } => println!("Open: {url}"),
+            AuthEvent::DeviceCode { user_code, verification_uri, .. } => {
+                println!("Code: {user_code} at {verification_uri}");
+            }
+            AuthEvent::Progress { message } => println!("{message}"),
+        }
+    }
+}
+
+# fn read_line(_: &str) -> String { String::new() }
+let models = Models::default(); // pass a persistent CredentialStore in real code
+models.set_provider(anthropic_provider());
+
+// Login: Models drives the flow and persists the credential
+models
+    .login("anthropic", AuthType::OAuth, &Terminal, &LoginOptions::default())
+    .await?;
+
+// From here on, requests resolve and refresh the token automatically
+let model = models.get_model("anthropic", "claude-sonnet-4-5").expect("model");
+let context = Context::new(vec![Message::user("Hello")]);
+models.complete(&model, &context, StreamOptions::default()).await;
+
+// Logout
+models.logout("anthropic").await?;
+# Ok(())
+# }
+```
 
 API-key login works today through the same `Models::login` call with `AuthType::ApiKey`. Standard providers prompt for the key; Bedrock and Vertex offer a choice of methods:
 
@@ -1848,11 +1920,26 @@ Official docs: [Application Default Credentials](https://cloud.google.com/docs/a
 
 ### CLI Login
 
-Not ported. This crate has no command-line tool. Use `Models::login` from your own program (see above). Credentials stored by pi's CLI in `auth.json` use the same JSON shape as `Credential`, so a file-backed `CredentialStore` can read them.
+The quickest way to authenticate is the `delta-ai` binary, built with the `cli` feature:
+
+```bash
+cargo install delta-ai --features cli
+delta-ai login              # interactive provider selection
+delta-ai login anthropic    # login to specific provider
+delta-ai list               # list available providers
+```
+
+Credentials are saved to `auth.json` in the current directory, in the same JSON shape as pi's `auth.json` (`{"anthropic": {"type": "oauth", "refresh": ..., "access": ..., "expires": ...}}`), so a file-backed `CredentialStore` can read them. Only providers with an OAuth flow are listed.
 
 ### Programmatic OAuth
 
-Built-in OAuth flows are not ported. To use OAuth with a custom provider, implement `OAuthAuth` and attach it with `ProviderAuth::with_oauth`. It composes with `CredentialStore` and gets locked automatic refresh through `Models`.
+Use the provider-owned `OAuthAuth` through `Models::login`, as above; it composes with `CredentialStore` and gets locked automatic refresh through `Models`. The flows are also public in `delta_ai::oauth` (`AnthropicOAuth`, `OpenRouterOAuth`, `XaiOAuth`), with their endpoints as public fields. To add OAuth to a custom provider, implement `OAuthAuth` and attach it with `ProviderAuth::with_oauth`. The building blocks of the built-in flows are public too:
+
+- `generate_pkce()`: PKCE verifier and S256 challenge;
+- `start_oauth_callback_server(options)` and `wait_for_callback_or_manual_input(..)`: a loopback redirect server raced against a pasted code or redirect URL;
+- `poll_oauth_device_code_flow(options, poll)`: RFC 8628 device-code polling with `slow_down` and expiry handling.
+
+The callback host defaults to `127.0.0.1`; set `PI_OAUTH_CALLBACK_HOST` to change it (for example inside containers).
 
 Provider notes:
 
