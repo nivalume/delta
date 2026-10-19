@@ -13,10 +13,11 @@
 //! - [`oauth_callback_host`]: `PI_OAUTH_CALLBACK_HOST` or `127.0.0.1`.
 //!
 //! Flows: [`anthropic`] (Claude Pro/Max), [`openrouter`] (PKCE that mints an API key),
-//! [`xai`], [`kimi_coding`] and [`meta`] (device code), and [`github_copilot`] (GitHub device code
-//! plus the Copilot token exchange). Each flow is a struct implementing [`crate::auth::OAuthAuth`];
-//! `Default` uses upstream's endpoints, and the endpoint fields are public so tests (and
-//! proxies) can point them elsewhere.
+//! [`xai`], [`kimi_coding`] and [`meta`] (device code), [`github_copilot`] (GitHub device code
+//! plus the Copilot token exchange) and [`radius`] (browser or device code against a Radius
+//! gateway). Each flow is a struct implementing [`crate::auth::OAuthAuth`]; `Default` (for Radius,
+//! [`create_radius_oauth`]) uses upstream's endpoints, and the endpoint fields are public so
+//! tests (and proxies) can point them elsewhere.
 //!
 //! Flow errors are [`ModelsError`]s: cancellation is `Login cancelled` with code
 //! [`ModelsErrorCode::Aborted`]; everything else has code [`ModelsErrorCode::OAuth`] and
@@ -31,6 +32,7 @@ pub mod meta;
 pub mod openrouter;
 pub mod page;
 pub mod pkce;
+pub mod radius;
 pub mod xai;
 
 pub use anthropic::AnthropicOAuth;
@@ -48,6 +50,7 @@ pub use meta::MetaOAuth;
 pub use openrouter::OpenRouterOAuth;
 pub use page::{oauth_error_html, oauth_success_html};
 pub use pkce::{Pkce, generate_pkce};
+pub use radius::{RadiusOAuth, RadiusOAuthOptions, create_radius_oauth};
 pub use xai::XaiOAuth;
 
 use crate::auth::env_value;

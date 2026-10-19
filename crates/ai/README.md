@@ -72,6 +72,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 | OpenAI | `openai` | `openai-responses` | |
 | Ant Ling | `ant-ling` | `openai-completions` | |
 | Azure OpenAI | `azure` | `azure-openai-responses`, `openai-completions` | |
+| Radius (API key or OAuth, with a dynamically refreshed gateway catalog) | `radius` | `pi-messages` | |
 | DeepSeek | `deepseek` | `openai-completions` | |
 | NVIDIA NIM | `nvidia` | `openai-completions` | |
 | Anthropic | `anthropic` | `anthropic-messages` | |
@@ -103,7 +104,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 
 Any OpenAI-compatible API (Ollama, vLLM, LM Studio, and so on) works through [`create_provider()`](#create_provider).
 
-Not built in yet: OpenAI Codex, Radius and TypeSafe. Their catalogs ship with the crate, but their APIs or auth flows are not ported.
+Not built in yet: OpenAI Codex and TypeSafe. Their catalogs ship with the crate, but their APIs or auth flows are not ported.
 
 ## Installation
 
@@ -246,7 +247,7 @@ Providers share **API implementations** (the wire protocols, `ProviderStreams`):
 
 ### Provider Factories
 
-Upstream has one module per provider. Most providers only pair an environment variable with an API implementation, so this crate keeps them in one table in `providers::builtin` and builds them by id. Anthropic and Azure also have their own factory functions. The Cloudflare providers are in `providers::cloudflare` (`cloudflare_ai_gateway_provider()`, `cloudflare_workers_ai_provider()`).
+Upstream has one module per provider. Most providers only pair an environment variable with an API implementation, so this crate keeps them in one table in `providers::builtin` and builds them by id. Anthropic and Azure also have their own factory functions. The Cloudflare providers are in `providers::cloudflare` (`cloudflare_ai_gateway_provider()`, `cloudflare_workers_ai_provider()`), Radius in `providers::radius` (`radius_provider()`, see [Dynamic Providers](#dynamic-providers)).
 
 ```rust
 use delta_ai::Models;
@@ -344,6 +345,8 @@ use delta_ai::providers::catalog::{
 
 let model = builtin_model("openai", "gpt-4o-mini").expect("in catalog");
 assert_eq!(model.api, "openai-responses");
+let radius = builtin_model("radius", "balanced").expect("in catalog");
+assert_eq!(radius.api, "pi-messages");
 let flux = builtin_model_of_type(ModelType::Image, "openrouter", "google/gemini-2.5-flash-image");
 let jev = builtin_model_of_type(ModelType::Classifier, "typesafe", "jev-latest");
 let providers = builtin_provider_ids(); // every provider in the catalog, ported or not
@@ -377,7 +380,23 @@ let fresh = models.get_model("llamacpp", "qwen3-30b");
 # }
 ```
 
-Built-in providers are static, so `refresh()` skips them. Radius, the one upstream provider that is both static and dynamic, is not ported. See [create_provider()](#create_provider) for building a dynamic provider.
+Static built-in providers are no-ops for `refresh()`. Radius is both static and dynamic: it ships the public `radius.pi.dev` catalog for synchronous lookups, then replaces it with the cached and freshly fetched `/v1/config` catalog of the account when refreshed with configured auth (organization owners can disable models, so the gateway catalog is used as it is, not merged). See [create_provider()](#create_provider) for building a dynamic provider.
+
+`radius_provider()` also serves other Radius gateways. A custom gateway has no shipped catalog: its models appear after the first refresh. Its OAuth login runs against that gateway.
+
+```rust
+use delta_ai::providers::radius::{RadiusProviderOptions, radius_provider};
+use delta_ai::{Models, Provider};
+
+let models = Models::default();
+let gateway = radius_provider(RadiusProviderOptions {
+    id: Some("radius-dev".into()),
+    name: Some("Radius Dev".into()),
+    gateway: Some("http://localhost:8788".into()),
+});
+assert!(gateway.models().is_empty()); // filled by models.refresh(..)
+models.set_provider(gateway);
+```
 
 ## Auth
 
@@ -542,6 +561,7 @@ Built-in providers resolve these environment variables:
 | Hugging Face | `HF_TOKEN` |
 | OpenCode Zen / OpenCode Go | `OPENCODE_API_KEY` |
 | Kimi For Coding | `KIMI_API_KEY` |
+| Radius | `RADIUS_API_KEY` |
 | Meta | `META_API_KEY` |
 | Qwen Token Plan (existing catalog, Individual) | `QWEN_TOKEN_PLAN_API_KEY` |
 | Qwen Token Plan (China) | `QWEN_TOKEN_PLAN_CN_API_KEY` |
@@ -1526,6 +1546,54 @@ let proxy = create_provider(CreateProviderOptions::new(
 ));
 ```
 
+Any backend that speaks pi's own message protocol works through the `pi-messages` API (`api::pi_messages::PiMessagesApi`): models use `"api": "pi-messages"`, and each request is a `POST {baseUrl}/messages` of `{model, context, options}` answered by an SSE stream of serialized assistant-message events (`api::pi_messages::PiMessagesEvent`). This is the protocol of the Radius gateway. The backend owns retries; the client sends each request once.
+
+```rust,no_run
+# async fn example(context: delta_ai::Context) -> Result<(), Box<dyn std::error::Error>> {
+use delta_ai::api::pi_messages::PiMessagesApi;
+use delta_ai::options::PiMessagesOptions;
+use delta_ai::{
+    ApiOptions, CreateProviderOptions, Model, Models, ProviderApi, ProviderAuth, StreamOptions, ThinkingLevel,
+    create_provider, env_api_key_auth,
+};
+use serde_json::json;
+
+let model: Model = serde_json::from_value(json!({
+    "id": "auto",
+    "name": "My Gateway Auto",
+    "api": "pi-messages",
+    "provider": "my-gateway",
+    "baseUrl": "https://gateway.example.com/v1",
+    "reasoning": true,
+    "input": ["text", "image"],
+    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+    "contextWindow": 200000,
+    "maxTokens": 32000
+}))?;
+
+let models = Models::default();
+models.set_provider(create_provider(CreateProviderOptions::new(
+    "my-gateway",
+    ProviderAuth::api_key(env_api_key_auth("My gateway key", &["MY_GATEWAY_API_KEY"])),
+    vec![model.into()],
+    ProviderApi::single(PiMessagesApi),
+)));
+
+let model = models.get_model("my-gateway", "auto").expect("registered");
+let options = StreamOptions {
+    // Forwarded to the backend as `options.reasoning`, `options.toolChoice`; `debug` adds `?debug=1`
+    api: Some(ApiOptions::PiMessages(PiMessagesOptions {
+        reasoning: Some(ThinkingLevel::High),
+        tool_choice: Some(json!("auto")),
+        debug: None,
+    })),
+    ..Default::default()
+};
+let reply = models.complete(&model, &context, options).await;
+# Ok(())
+# }
+```
+
 Mixed-API providers pass a map keyed by `model.api`; each model dispatches to its API's implementation. A model whose API has no entry gets an error stream.
 
 ```rust
@@ -1734,8 +1802,9 @@ Built-in API implementations:
 | `google-vertex` (feature `vertex`) | `api::google_vertex` | `GoogleVertexApi` | `GoogleVertex(GoogleVertexOptions)` |
 | `mistral-conversations` | `api::mistral_conversations` | `MistralConversationsApi` | `MistralConversations(MistralOptions)` |
 | `bedrock-converse-stream` (feature `bedrock`) | `api::bedrock_converse_stream` | `BedrockConverseStreamApi` | `BedrockConverseStream(BedrockOptions)` |
+| `pi-messages` | `api::pi_messages` | `PiMessagesApi` | `PiMessages(PiMessagesOptions)` |
 
-`openai-codex-responses` is not ported. The hand-written APIs (Anthropic, OpenAI, Google Generative AI, Mistral) are always compiled; they use `reqwest` and the helpers in `delta_ai::http`. Bedrock and Vertex use the vendors' official Rust SDKs. Upstream's custom `fetch` and injected SDK `client` options map to `StreamOptions::http_client` (a `reqwest::Client`).
+`openai-codex-responses` is not ported. The hand-written APIs (Anthropic, OpenAI, Google Generative AI, Mistral, pi-messages) are always compiled; they use `reqwest` and the helpers in `delta_ai::http`. Bedrock and Vertex use the vendors' official Rust SDKs. Upstream's custom `fetch` and injected SDK `client` options map to `StreamOptions::http_client` (a `reqwest::Client`).
 
 ### OpenAI Compatibility Settings
 
@@ -2051,7 +2120,9 @@ Several providers support OAuth authentication instead of static API keys:
 - **Kimi For Coding** (Kimi Code subscription, device-code login)
 - **Meta** (Muse subscription, device-code login that mints a Model API key)
 
-Upstream also offers OAuth for OpenAI (Sign in with ChatGPT), OpenAI Codex and Radius. Those flows are being ported; until then the built-in providers among them authenticate with API keys.
+- **Radius** (browser or device-code login against the Radius gateway; `create_radius_oauth()` for other gateways)
+
+Upstream also offers OAuth for OpenAI (Sign in with ChatGPT) and OpenAI Codex. Those flows are being ported; until then the built-in providers among them authenticate with API keys.
 
 Each of these providers carries an `OAuthAuth` in `provider.auth().oauth` with three operations: `login(interaction, options)` uses the provider-neutral `AuthInteraction::prompt()`/`notify()` protocol and returns a credential, `refresh(credential)` refreshes expiring credentials, and `to_auth(credential)` derives request auth (GitHub Copilot's per-account base URL comes from here). Login is cancelled through `AuthInteraction::cancel()`. Refresh is automatic: `models.get_auth(provider_id, ..)` and request paths refresh expired tokens inside `CredentialStore::modify`, so concurrent requests cannot double-refresh. OpenRouter's flow returns a permanent API key, so its refresh is a no-op. An Anthropic OAuth access token is used as the API key; the `anthropic-messages` API recognizes it and sends it as a bearer token with Claude Code's identity and beta headers. A Kimi Code access token is sent as an `Authorization: Bearer` header. Meta's login exchanges its identity token for a Model API key that lives about a day; refresh mints a new key from the stored identity token.
 

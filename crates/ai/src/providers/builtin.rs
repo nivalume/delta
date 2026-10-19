@@ -4,11 +4,11 @@
 //! an environment variable with an API implementation, so delta keeps those in one table and
 //! writes out the providers with their own behavior (Azure, OpenCode, Bedrock, Vertex AI).
 //! The Cloudflare providers live in [`crate::providers::cloudflare`], GitHub Copilot in
-//! [`crate::providers::github_copilot`].
+//! [`crate::providers::github_copilot`], Radius in [`crate::providers::radius`].
 //!
 //! Not built in yet: providers whose APIs or auth flows are not ported (OpenAI Codex,
-//! Radius, TypeSafe). OAuth login is ported for Anthropic, OpenRouter, xAI, Kimi For Coding,
-//! Meta and GitHub Copilot ([`crate::oauth`]); the other providers that offer it upstream
+//! TypeSafe). OAuth login is ported for Anthropic, OpenRouter, xAI, Kimi For Coding, Meta,
+//! GitHub Copilot and Radius ([`crate::oauth`]); the other providers that offer it upstream
 //! authenticate with API keys until their flows are ported.
 
 use futures::future::BoxFuture;
@@ -310,6 +310,9 @@ pub fn builtin_provider(id: &str) -> Option<Arc<dyn Provider>> {
         "cloudflare-ai-gateway" => Arc::new(crate::providers::cloudflare::cloudflare_ai_gateway_provider()),
         "cloudflare-workers-ai" => Arc::new(crate::providers::cloudflare::cloudflare_workers_ai_provider()),
         "github-copilot" => Arc::new(crate::providers::github_copilot::github_copilot_provider()),
+        "radius" => Arc::new(crate::providers::radius::radius_provider(
+            crate::providers::radius::RadiusProviderOptions::default(),
+        )),
         #[cfg(feature = "bedrock")]
         "amazon-bedrock" => Arc::new(cloud::amazon_bedrock_provider()),
         #[cfg(feature = "vertex")]

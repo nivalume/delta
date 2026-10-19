@@ -46,4 +46,4 @@ Error codes: refresh failure → `OAuth` (the credential is kept; logging in aga
 ## Scope of the first phase
 
 - Implemented: types, in-memory store, resolution order, locked refresh, `env_api_key_auth`, `keyless`, the `Models::login/logout` framework.
-- OAuth login flows and their helpers (PKCE, the loopback callback server, device-code polling) live in `oauth`; see [oauth.md](oauth.md). Ported so far: Anthropic, OpenRouter, xAI, Kimi Code, Meta, GitHub Copilot. The other upstream flows (OpenAI ChatGPT, Codex, Radius) are ported one provider at a time on top of the same helpers.
+- OAuth login flows and their helpers (PKCE, the loopback callback server, device-code polling) live in `oauth`; see [oauth.md](oauth.md). Ported so far: Anthropic, OpenRouter, xAI, Kimi Code, Meta, GitHub Copilot, Radius. The other upstream flows (OpenAI ChatGPT, Codex) are ported one provider at a time on top of the same helpers.

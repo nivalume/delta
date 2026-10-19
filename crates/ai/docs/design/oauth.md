@@ -5,19 +5,19 @@
 `delta_ai::oauth` holds the OAuth login flows of the built-in providers and the helpers they share. The framework (the `OAuthAuth` trait, `AuthInteraction`, `Models::login`, locked refresh) lives in `auth` and is described in [auth.md](auth.md). This module adds:
 
 - shared helpers: PKCE, the loopback callback server, the race between the callback and a pasted code, device-code polling, the browser pages;
-- six flows: Anthropic (Claude Pro/Max), OpenRouter (PKCE that mints an API key), the device-code flows of xAI, Kimi Code and Meta, and GitHub Copilot (device code plus a Copilot token; described in [github-copilot.md](github-copilot.md));
+- seven flows: Anthropic (Claude Pro/Max), OpenRouter (PKCE that mints an API key), the device-code flows of xAI, Kimi Code and Meta, and GitHub Copilot (device code plus a Copilot token; described in [github-copilot.md](github-copilot.md)), Radius (browser or device code against a gateway; see [radius.md](radius.md));
 - the `delta-ai` login CLI (`src/bin/delta-ai.rs`, feature `cli`).
 
-The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Codex, OpenAI ChatGPT, Radius) can be ported one-to-one.
+The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Codex, OpenAI ChatGPT) can be ported one-to-one.
 
 ## Upstream source files
 
 - `packages/ai/src/auth/oauth/pkce.ts`, `callback-server.ts`, `device-code.ts`
 - `packages/ai/src/utils/oauth-page.ts`
-- `packages/ai/src/auth/oauth/anthropic.ts`, `openrouter.ts`, `xai.ts`, `kimi-coding.ts`, `meta.ts`
-- `packages/ai/src/providers/anthropic.ts`, `openrouter.ts`, `xai.ts`, `kimi-coding.ts`, `meta.ts` (the `auth.oauth` entries)
+- `packages/ai/src/auth/oauth/anthropic.ts`, `openrouter.ts`, `xai.ts`, `kimi-coding.ts`, `meta.ts`, `radius.ts`
+- `packages/ai/src/providers/anthropic.ts`, `openrouter.ts`, `xai.ts`, `kimi-coding.ts`, `meta.ts`, `radius.ts` (the `auth.oauth` entries)
 - `packages/ai/src/cli.ts`
-- Tests: `test/oauth-callback-server.test.ts`, `test/oauth-device-code.test.ts`, `test/oauth-auth.test.ts` (the parts for these flows), `test/anthropic-oauth.test.ts`, `test/openrouter-oauth.test.ts`, `test/xai-oauth.test.ts`, `test/kimi-coding-oauth.test.ts`, `test/meta-oauth.test.ts`. Ported to `tests/oauth_helpers.rs`, `tests/oauth_flows.rs` and `tests/oauth_kimi_meta.rs`.
+- Tests: `test/oauth-callback-server.test.ts`, `test/oauth-device-code.test.ts`, `test/oauth-auth.test.ts` (the parts for these flows), `test/anthropic-oauth.test.ts`, `test/openrouter-oauth.test.ts`, `test/xai-oauth.test.ts`, `test/kimi-coding-oauth.test.ts`, `test/meta-oauth.test.ts`. Ported to `tests/oauth_helpers.rs`, `tests/oauth_flows.rs` and `tests/oauth_kimi_meta.rs`. `test/radius-oauth.test.ts` is ported to `tests/radius.rs`.
 
 ## Module layout
 
@@ -33,6 +33,7 @@ The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Cod
 | `auth/oauth/kimi-coding.ts` | `oauth::kimi_coding` (`KimiCodingOAuth`) |
 | `auth/oauth/meta.ts` | `oauth::meta` (`MetaOAuth`) |
 | `auth/oauth/github-copilot.ts` | `oauth::github_copilot` (`GitHubCopilotOAuth`), see [github-copilot.md](github-copilot.md) |
+| `auth/oauth/radius.ts` | `oauth::radius` (`RadiusOAuth`, `create_radius_oauth`) |
 | `auth/oauth/load.ts`, `lazyOAuth` | Not needed: the flows are plain structs compiled into the crate |
 
 The helpers are re-exported from `delta_ai::oauth`.
@@ -126,7 +127,7 @@ Flows return `ModelsError`. Cancellation is `Login cancelled` with code `Aborted
 
 ## Flows
 
-Each flow is a struct implementing `OAuthAuth`. `Default` uses upstream's endpoints. The endpoint fields are public so tests can point them at wiremock; upstream tests stub `fetch` instead.
+Each flow is a struct implementing `OAuthAuth`. `Default` uses upstream's endpoints; Radius has no default gateway in the flow and is built with `create_radius_oauth(RadiusOAuthOptions { name, gateway })`, like upstream's `createRadiusOAuth`. The endpoint fields are public so tests can point them at wiremock; upstream tests stub `fetch` instead.
 
 ### Anthropic (`AnthropicOAuth`)
 
@@ -177,6 +178,13 @@ Each flow is a struct implementing `OAuthAuth`. `Default` uses upstream's endpoi
 
 Name `GitHub Copilot`, subscription, no login label. Login asks a `Text` prompt for a GitHub Enterprise URL or domain (blank for github.com), runs the GitHub device flow with `poll_oauth_device_code_flow` (`wait_before_first_poll`), exchanges the GitHub token for a Copilot token, reads the account's model catalog and enables `unconfigured` model policies. Refresh repeats the token exchange and the catalog read. `to_auth` gives the Copilot token as `api_key` and the credential's own API `base_url`. Endpoints are derived from the enterprise domain and the token, so the struct has no endpoint fields; tests set `rewrite_url` instead. Details: [github-copilot.md](github-copilot.md).
 
+### Radius (`RadiusOAuth`)
+
+- Built by `create_radius_oauth(RadiusOAuthOptions { name, gateway })`; the gateway is normalized (`https://` added, trailing slashes removed). Name: the `name` option; not a subscription; no login label.
+- `login` asks a `Select` prompt `Sign in to <name>:` with `browser` and `device-code`. Browser login discovers `authorizationEndpoint` at `GET {gateway}/v1/oauth`, then runs PKCE with a UUID `state` against a callback server on `127.0.0.1:1456/oauth/callback` (`callback_port` is public for tests). The code is exchanged inside the callback's `complete`, so the browser page shows exchange failures. Device login posts to `{gateway}/v1/oauth/device` and polls `{gateway}/v1/oauth/token` with `poll_oauth_device_code_flow` (first poll at once).
+- Token requests and refresh: form `POST {gateway}/v1/oauth/token`, `client_id=pi-gateway`. Errors: `Radius OAuth token request failed: <error>: <error_description>`. `expires` is now + `expires_in` − 60 s; `scope` is kept in `extra`.
+- `to_auth`: `api_key = access`. Details and error texts: [radius.md](radius.md).
+
 ### Provider wiring
 
 | Provider | Upstream | Rust |
@@ -187,6 +195,7 @@ Name `GitHub Copilot`, subscription, no login label. Login asks a `Text` prompt 
 | `kimi-coding` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(kimiCoding) }` | `builtin_oauth("kimi-coding")` |
 | `meta` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(meta) }` | `builtin_oauth("meta")` |
 | `github-copilot` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(githubCopilot) }` | `github_copilot_provider()`: `ProviderAuth::api_key(..).with_oauth(GitHubCopilotOAuth::default())` |
+| `radius` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth({ name, load: () => loadRadiusOAuth({ name, gateway }) }) }` | `radius_provider(..)`: `ProviderAuth::api_key(..).with_oauth(create_radius_oauth(..))` with the provider's name and gateway |
 
 `builtin_oauth(id)` adds the OAuth method to a table-driven provider. Later flows add their entries there.
 
@@ -220,7 +229,7 @@ Name `GitHub Copilot`, subscription, no login label. Login asks a `Text` prompt 
 
 ## Not ported
 
-- The other flows: OpenAI Codex, OpenAI ChatGPT, Radius. They are ported separately on top of these helpers.
+- The other flows: OpenAI Codex, OpenAI ChatGPT. They are ported separately on top of these helpers.
 - `src/oauth.ts` (type-only compatibility exports for coding-agent extensions).
 - `registerBundledOAuthFlowLoaders` (Bun standalone binaries).
 
