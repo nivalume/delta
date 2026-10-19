@@ -139,7 +139,7 @@ Across chunks, text and thinking keep appending while the type stays the same; w
 
 At the end of the stream: if cancelled, the result is `aborted`; if no `finish_reason` was ever received, fail with `Mistral stream ended without a finish reason`; when the stop reason is `error`, end with an `error` event (keeping the content received); otherwise emit `done`.
 
-## Errors and retry
+## Errors and retries
 
 - No client-side retry (upstream calls `fetch` directly and ignores `maxRetries`). `max_retries` and `max_retry_delay` have no effect for this API.
 - The timeout covers only waiting for response headers: 60 seconds by default (upstream `timeoutMs ?? 60000`), overridden by `options.timeout`. On timeout, fail with `Mistral response headers timed out after <milliseconds>ms`. Reading the response body has no overall time limit, so long thinking streams are not cut off (upstream #10609).
@@ -147,7 +147,7 @@ At the end of the stream: if cancelled, the result is `aborted`; if no `finish_r
 - Cancellation: `options.cancel` takes effect while waiting for response headers, reading the response body and reading SSE. The stream ends with `aborted` and `Request was aborted`. When the consumer drops the stream, the producer stops reading.
 - Failures in the request phase (before `start` is emitted) produce only a single `error` event.
 
-## Rust implementation differences
+## Rust-specific differences
 
 - Upstream merges `model.headers` once more inside the API. In delta, `Models` merges the model headers into `options.headers` before calling the API (and runs `transform_headers` after that), and the API merges only the default headers and `options.headers`. The "explicitly set" check for `x-affinity` therefore looks only at `options.headers`, with the same effect. When calling `stream` directly, put the model headers into `options.headers` yourself.
 - `User-Agent` uses delta's own value, not `pi (...)`.

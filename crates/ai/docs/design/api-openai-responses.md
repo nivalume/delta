@@ -166,7 +166,7 @@ At stream end: if no terminal event was received, error `OpenAI Responses stream
 ## Rust-specific differences
 
 1. Events do not carry a shared `partial`. The temporary `stop` stop reason set by `phase = final_answer` only shows up in the final message; the consumer's partial does not see this intermediate state.
-2. `MessageBuilder::end_tool_call` parses arguments from the streamed JSON it has accumulated itself. Upstream uses the full arguments in `output_item.done`. The implementation sets them first, calls `end_tool_call`, and then overwrites them again, so the final message matches upstream. But when the server's final arguments do not continue the streamed content (for example the malformed-arguments test case), the arguments in the `toolcall_end` event are parsed from the streamed content. See "Required core changes".
+2. `MessageBuilder::end_tool_call` parses arguments from the streamed JSON it has accumulated itself. Upstream uses the full arguments in `output_item.done`. The implementation sets them first, calls `end_tool_call`, and then overwrites them again, so the final message matches upstream. But when the server's final arguments do not continue the streamed content (for example the malformed-arguments test case), the arguments in the `toolcall_end` event are parsed from the streamed content. See "Core changes needed".
 3. Function arguments already present in `output_item.added` are emitted as one `toolcall_delta` (upstream only puts them into `partialJson` and emits no event), so the JSON parsed by the builder matches upstream's `partialJson`.
 4. `MessageBuilder` skips empty text/thinking/toolcall deltas; upstream emits empty delta events.
 5. When the stop reason is `length`, `spawn_stream` calls `end_open_tool_calls` for tool calls still unfinished and emits `toolcall_end`; upstream does not.
@@ -183,7 +183,7 @@ At stream end: if no terminal event was received, error `OpenAI Responses stream
 - GitHub Copilot dynamic request headers (`X-Initiator`, `Copilot-Vision-Request`).
 - The OpenAI Codex (ChatGPT subscription) API `openai-codex-responses`, WebSocket transport, telemetry, the `fetch` option (replaced by `StreamOptions::http_client`).
 
-## Required core changes (not implemented in this work)
+## Core changes needed
 
 - `events.rs`: add `end_tool_call_with(index: usize, arguments: JsonObject, arguments_error: Option<String>)` to `MessageBuilder` (or a method that replaces the accumulated JSON), so that the `toolcall_end` event carries the final arguments given by the API directly. This removes difference 2.
 

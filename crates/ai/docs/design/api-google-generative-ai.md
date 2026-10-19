@@ -110,7 +110,7 @@ Each SSE `data:` is one `GenerateContentResponse` JSON. Empty data and proxy-inj
 
 Usage: `input = promptTokenCount - cachedContentTokenCount` (saturating subtraction), `output = candidatesTokenCount + thoughtsTokenCount`, `cache_read = cachedContentTokenCount`, `cache_write = 0`, `reasoning = thoughtsTokenCount`, `total_tokens = totalTokenCount` (the server's value, as in upstream, not recomputed), cost via `calculate_cost`. Each chunk with usage overwrites the previous value, but usage without `promptTokenCount` does not overwrite (an early report with only some fields does not replace a complete one). Counts accept numbers or numeric strings.
 
-## Errors and retry
+## Errors and retries
 
 - Missing key: `No API key for provider: <provider>`. `require_auth` also accepts `x-goog-api-key` in `options.headers`.
 - HTTP errors: `http::send_with_retry`. The message matches `@google/genai`'s `ApiError` (`google_shared::format_google_http_error`): for a JSON body, the whole JSON re-serialized (e.g. `{"error":{"code":400,"message":"API key not valid.","status":"INVALID_ARGUMENT"}}`); for a non-JSON body, `{"error":{"message":"<text>","code":<status>,"status":"<status phrase>"}}`. Upstream's `formatProviderError` keeps it as is. Retryable: 408, 409, 429, 5xx, connection errors. `retry-after-ms`/`retry-after` are honored; exceeding `max_retry_delay` fails immediately.
@@ -156,7 +156,7 @@ Usage: `input = promptTokenCount - cachedContentTokenCount` (saturating subtract
 - Lenient part parsing, unknown types not fatal, `[DONE]` skipped, error when there is no finish event: yes.
 - `parametersJsonSchema`: yes. Inlining `$defs`/`definitions` references: not implemented, see below.
 
-## Core changes needed (not done, left to the maintainer)
+## Core changes needed
 
 - Optional: `http` exposes a generic `retry(options, f)` (or makes `backoff` public), so `retry_google_request` does not have to copy the backoff calculation.
 - Optional: add `as_str()` to `options::GoogleThinkingLevel` returning the wire enum name; for now `google_shared::google_thinking_level_name` is used.

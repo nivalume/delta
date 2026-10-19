@@ -128,7 +128,7 @@ The `model` field is the resolved resource name. The rules for message conversio
 
 Same as upstream `streamSimple`: `build_base_options`, `tool_choice` mapping, `thinking: {enabled: false}` when `reasoning` is empty or clamped to `off`; otherwise models that use `thinkingLevel` send the level and the rest send a budget.
 
-Budgets use Vertex's own table (`getGoogleBudget` in upstream `google-vertex.ts`): custom `thinking_budgets` take precedence; `2.5-pro` is 128/2048/8192/32768; `2.5-flash` (**including** `2.5-flash-lite`; the upstream Vertex table has no Flash-Lite row) is 128/2048/8192/24576; others `-1`. Because this table differs from the Gemini API one, `google_shared::simple_thinking` cannot be used directly, and this module copies its logic (see "Core changes").
+Budgets use Vertex's own table (`getGoogleBudget` in upstream `google-vertex.ts`): custom `thinking_budgets` take precedence; `2.5-pro` is 128/2048/8192/32768; `2.5-flash` (**including** `2.5-flash-lite`; the upstream Vertex table has no Flash-Lite row) is 128/2048/8192/24576; others `-1`. Because this table differs from the Gemini API one, this module calls `google_shared::simple_thinking_with` with its own budget function (see "Core changes").
 
 As in upstream, `stream_simple` does not keep `project`/`location` (`build_base_options` clears `api`); they can only come from `options.env` or the process environment.
 
