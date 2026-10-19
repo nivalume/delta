@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>A Models::stream request</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&family=Noto+Sans+KR:wght@400;500;600&family=Noto+Serif+KR:wght@400&family=Noto+Sans+TC:wght@400;500;600&family=Noto+Serif+TC:wght@400&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:   #f5f5f5;   /* white-smoke */
+      --color-ink:     #2d3142;   /* jet-black */
+      --color-muted:   #4f5d75;   /* blue-slate */
+      --color-accent:  #bf4520;   /* burnt-tangerine */
+      --font-sans:     'Geist', system-ui, sans-serif;
+      --font-serif:    'Instrument Serif', 'Noto Serif', 'Noto Serif KR', serif;
+      --font-mono:     'Geist Mono', ui-monospace, monospace;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 2rem;
+    }
+
+    .frame { max-width: 1200px; width: 100%; }
+    /* The SVG holds its readable width (min-width == the viewBox width, so the
+       type ramp is never silently scaled down). This wrapper lets a narrow
+       screen scroll the diagram instead of the whole page. */
+    .diagram-container { width: 100%; overflow-x: auto; }
+
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      color: var(--color-ink);
+      margin-bottom: 1.5rem;
+    }
+
+    svg { width: 100%; min-width: 960px; display: block; }
+    /* Paper has no scrollbar, so the local scroller would clip instead of
+       scroll. Let the diagram scale down to the sheet: smaller but whole
+       beats sharp but cut off. Must come after the svg rule above - a media
+       query adds no specificity, so a later plain rule would win. */
+    @media print {
+      .diagram-container { overflow-x: visible; }
+      svg { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Sequence · tau-llm</p>
+    <h1>A Models::stream request</h1>
+
+    <!-- Replace [diagram-slug] with a unique slug for this diagram before export. -->
+    <div class="diagram-container">
+      <svg viewBox="0 0 960 700" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="tau-ai-stream-sequence-title tau-ai-stream-sequence-desc">
+        <title id="tau-ai-stream-sequence-title">A Models::stream request</title>
+        <desc id="tau-ai-stream-sequence-desc">Models returns the event stream at once, resolves auth and dispatches to the API module, which posts to the vendor and forwards one event per SSE event until the final message.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+          <marker id="arrow-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" fill="none" stroke="#4f5d75" stroke-width="1.2"/></marker>
+        </defs>
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+<line x1="100" y1="104" x2="100" y2="616" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="340" y1="104" x2="340" y2="616" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="580" y1="104" x2="580" y2="616" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="820" y1="104" x2="820" y2="616" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<rect x="68" y="424" width="784" height="104" rx="4" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.22)" stroke-width="1"/>
+<rect x="68" y="424" width="40" height="16" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,0.22)" stroke-width="1"/>
+<text x="88" y="436" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">LOOP</text>
+<text x="116" y="436" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.04em">[per SSE event]</text>
+<rect x="336" y="128" width="8" height="112" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+<rect x="576" y="224" width="8" height="352" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+<line x1="104" y1="136" x2="336" y2="136" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="188.0" y="116" width="64" height="12" rx="2" fill="#f5f5f5"/>
+<text x="220.0" y="125" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">STREAM(CTX)</text>
+<line x1="336" y1="168" x2="104" y2="168" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="186.0" y="148" width="68" height="12" rx="2" fill="#f5f5f5"/>
+<text x="220.0" y="157" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">EVENT STREAM</text>
+<path d="M 344,192 H 380 V 212 H 348" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="388" y="196" width="68" height="12" rx="2" fill="#f5f5f5"/>
+<text x="422.0" y="205" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">RESOLVE AUTH</text>
+<line x1="344" y1="232" x2="576" y2="232" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="418.0" y="212" width="84" height="12" rx="2" fill="#f5f5f5"/>
+<text x="460.0" y="221" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">PROVIDER.STREAM</text>
+<line x1="584" y1="296" x2="816" y2="296" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+<rect x="664.0" y="276" width="72" height="12" rx="2" fill="#f5f5f5"/>
+<text x="700.0" y="285" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">POST · STREAM</text>
+<line x1="816" y1="336" x2="584" y2="336" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="664.0" y="316" width="72" height="12" rx="2" fill="#f5f5f5"/>
+<text x="700.0" y="325" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">200 + HEADERS</text>
+<line x1="576" y1="376" x2="104" y2="376" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow-open)"/>
+<rect x="324.0" y="356" width="32" height="12" rx="2" fill="#f5f5f5"/>
+<text x="340.0" y="365" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">START</text>
+<line x1="816" y1="472" x2="584" y2="472" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="674.0" y="452" width="52" height="12" rx="2" fill="#f5f5f5"/>
+<text x="700.0" y="461" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">SSE EVENT</text>
+<line x1="576" y1="508" x2="104" y2="508" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow-open)"/>
+<rect x="308.0" y="488" width="64" height="12" rx="2" fill="#f5f5f5"/>
+<text x="340.0" y="497" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">DELTA EVENT</text>
+<line x1="576" y1="568" x2="104" y2="568" stroke="#bf4520" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+<rect x="304.0" y="548" width="72" height="12" rx="2" fill="#f5f5f5"/>
+<text x="340.0" y="557" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">DONE(MESSAGE)</text>
+<g>
+<rect x="28" y="40" width="144" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="28" y="40" width="144" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+<rect x="36" y="46" width="24" height="12" rx="2" fill="transparent" stroke="#5a6580" stroke-opacity="0.4" stroke-width="0.8"/>
+<text x="48.0" y="55" fill="#5a6580" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">APP</text>
+<text x="100.0" y="78.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" text-anchor="middle">Application</text>
+<text x="100.0" y="92.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">caller</text>
+</g>
+<g>
+<rect x="268" y="40" width="144" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="268" y="40" width="144" height="64" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<rect x="276" y="46" width="28" height="12" rx="2" fill="transparent" stroke="#bf4520" stroke-opacity="0.4" stroke-width="0.8"/>
+<text x="290.0" y="55" fill="#bf4520" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">CORE</text>
+<text x="340.0" y="78.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" text-anchor="middle">Models</text>
+<text x="340.0" y="92.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">lazy_stream task</text>
+</g>
+<g>
+<rect x="508" y="40" width="144" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="508" y="40" width="144" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="516" y="46" width="24" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.4" stroke-width="0.8"/>
+<text x="528.0" y="55" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
+<text x="580.0" y="78.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" text-anchor="middle">API module</text>
+<text x="580.0" y="92.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">spawn_stream task</text>
+</g>
+<g>
+<rect x="748" y="40" width="144" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="748" y="40" width="144" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+<rect x="756" y="46" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)" stroke-opacity="0.4" stroke-width="0.8"/>
+<text x="768.0" y="55" fill="rgba(45,49,66,0.30)" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+<text x="820.0" y="78.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" text-anchor="middle">Vendor API</text>
+<text x="820.0" y="92.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">HTTPS SSE</text>
+</g>
+<text x="116" y="600" fill="#4f5d75" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', serif">Models forwards each event; partial() updates as it is yielded.</text>
+<line x1="30" y1="644" x2="930" y2="644" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<text x="30" y="664" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.14em">LEGEND</text>
+<line x1="110" y1="660" x2="134" y2="660" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="142" y="664" fill="#4f5d75" font-size="9" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif">Call</text>
+<line x1="192.0" y1="660" x2="216.0" y2="660" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow-open)"/>
+<text x="224.0" y="664" fill="#4f5d75" font-size="9" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif">Event (async)</text>
+<line x1="324.0" y1="660" x2="348.0" y2="660" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+<text x="356.0" y="664" fill="#4f5d75" font-size="9" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif">Vendor call</text>
+<line x1="445.0" y1="660" x2="469.0" y2="660" stroke="#bf4520" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+<text x="477.0" y="664" fill="#4f5d75" font-size="9" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif">Final message</text>
+      </svg>
+    </div>
+  </div>
+</body>
+</html>
