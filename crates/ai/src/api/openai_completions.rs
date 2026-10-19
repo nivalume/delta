@@ -1,13 +1,16 @@
 //! OpenAI Chat Completions (`openai-completions`) and every OpenAI-compatible endpoint.
 //!
-//! Port of upstream `api/openai-completions.ts` (plus `openai-prompt-cache.ts` and
-//! `constrained-sampling.ts`). Requests go to `{baseUrl}/chat/completions` with a bearer
+//! Port of upstream `api/openai-completions.ts` (plus `openai-prompt-cache.ts`; the
+//! constrained-sampling helpers live in [`crate::api::constrained_sampling`]). Requests go to `{baseUrl}/chat/completions` with a bearer
 //! key. Server differences are described by [`OpenAICompletionsCompat`] on the model; unset
 //! fields are auto-detected from the provider id and base URL ([`detect_compat`]).
 //!
 //! Design notes: `docs/design/api-openai-completions.md`.
 
-pub mod constrained_sampling;
+/// Re-exported from its old home here (upstream `utils/hash.ts`).
+pub use crate::api::common::short_hash;
+/// Re-exported from its old home here; the module is shared by every API.
+pub use crate::api::constrained_sampling;
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -16,13 +19,13 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
-use self::constrained_sampling::{
+use crate::api::common::{
+    apply_on_payload, finalize_usage, join_url, notify_response, observe_provider_event, spawn_stream,
+};
+use crate::api::constrained_sampling::{
     GrammarToolInputJsonBuffer, append_grammar_tool_input_json_delta, create_grammar_tool_input_properties,
     get_grammar_tool_input, get_json_schema_tool_parameters, js_truthy, resolve_grammar_constrained_sampling,
     resolve_json_schema_strict_sampling,
-};
-use crate::api::common::{
-    apply_on_payload, finalize_usage, join_url, notify_response, observe_provider_event, spawn_stream,
 };
 use crate::compat::{
     ChatTemplateKwargValue, MaxTokensField, ModelCompat, OpenAICompletionsCompat, SessionAffinityFormat,
@@ -986,35 +989,6 @@ fn utf16_len(text: &str) -> usize {
     text.chars().map(char::len_utf16).sum()
 }
 
-/// Fast deterministic hash used to shorten long ids (upstream `shortHash`, over UTF-16
-/// code units).
-pub fn short_hash(text: &str) -> String {
-    let mut h1: u32 = 0xdead_beef;
-    let mut h2: u32 = 0x41c6_ce57;
-    for unit in text.encode_utf16() {
-        let unit = u32::from(unit);
-        h1 = (h1 ^ unit).wrapping_mul(2_654_435_761);
-        h2 = (h2 ^ unit).wrapping_mul(1_597_334_677);
-    }
-    h1 = (h1 ^ (h1 >> 16)).wrapping_mul(2_246_822_507) ^ (h2 ^ (h2 >> 13)).wrapping_mul(3_266_489_909);
-    h2 = (h2 ^ (h2 >> 16)).wrapping_mul(2_246_822_507) ^ (h1 ^ (h1 >> 13)).wrapping_mul(3_266_489_909);
-    format!("{}{}", to_base36(h2), to_base36(h1))
-}
-
-fn to_base36(mut value: u32) -> String {
-    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut digits = Vec::new();
-    loop {
-        digits.push(DIGITS[(value % 36) as usize]);
-        value /= 36;
-        if value == 0 {
-            break;
-        }
-    }
-    digits.reverse();
-    String::from_utf8(digits).unwrap_or_default()
-}
-
 /// Replace every character outside `[a-zA-Z0-9_-]` with `_` per UTF-16 code unit.
 fn sanitize_id_part(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -1398,7 +1372,7 @@ pub fn convert_tools(tools: &[Tool], compat: &ResolvedOpenAICompletionsCompat) -
             }));
             continue;
         }
-        let strict = resolve_json_schema_strict_sampling(tool, compat.supports_strict_mode)?;
+        let strict = resolve_json_schema_strict_sampling(tool, compat.supports_strict_mode, None)?;
         let mut function = Map::new();
         function.insert("name".into(), Value::String(tool.name.clone()));
         function.insert("description".into(), Value::String(tool.description.clone()));

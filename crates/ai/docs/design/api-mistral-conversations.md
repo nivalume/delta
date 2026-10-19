@@ -15,8 +15,8 @@ API 专属选项来自 `options.api` 中的 `ApiOptions::MistralConversations(Mi
 ## 上游源文件
 
 - `packages/ai/src/api/mistral-conversations.ts`（主体）
-- `packages/ai/src/api/constrained-sampling.ts`（严格 JSON Schema，本 API 用到的部分）
-- `packages/ai/src/utils/hash.ts`（`shortHash`）
+- `packages/ai/src/api/constrained-sampling.ts`（严格 JSON Schema，在共享模块 `api::constrained_sampling` 中）
+- `packages/ai/src/utils/hash.ts`（`shortHash`，在 `api::common::short_hash` 中）
 - 测试：`test/mistral-http-transport.test.ts`、`test/mistral-raw-stop-reason.test.ts`、`test/mistral-reasoning-mode.test.ts`、`test/mistral-tool-schema.test.ts`
 - 参考：pi-py `pi_ai/api/mistral_conversations.py` 与 `tests/test_mistral_conversations.py`
 
@@ -161,7 +161,6 @@ Mistral 只接受 9 位字母数字 id。移植上游的规范化函数：
 - 以下两条来自 `docs/research/provider-references.md`，只让客户端更健壮，对合法输入结果不变，已实现：
   - 同一个 `index` 上出现另一个真实 id 时视为新的工具调用（上游会把两个调用的参数拼在一起，得到无效 JSON）；
   - 工具调用名称只在非空时设置：首块名称为空、后续块给出名称时补上。
-- 严格 JSON Schema 转换和 `shortHash` 暂时作为私有函数放在本模块中（见“待确认的改进”）。
 - 测试中每个用例使用自己的 `reqwest::Client`：共享默认客户端的连接池属于打开连接的那个 Tokio 运行时，`#[tokio::test]` 每个用例一个运行时，复用连接会失败。
 
 ## 待确认的改进
@@ -171,4 +170,3 @@ Mistral 只接受 9 位字母数字 id。移植上游的规范化函数：
 3. 匿名工具调用（先无 id、后有真实 id）沿用生成的 id；可考虑改用后到的真实 id。
 4. 响应体空闲超时：上游把卡住的响应体交给 HTTP 客户端的空闲超时，tau 的默认客户端没有读取超时。
 5. 块中的 `model` 字段可写入 `response_model`（上游未写）。
-6. 严格 JSON Schema 转换（上游 `constrained-sampling.ts`）和 `shortHash`（上游 `utils/hash.ts`）其他 API 也会用到，建议移到共享模块。

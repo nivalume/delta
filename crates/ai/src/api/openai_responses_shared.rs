@@ -2,8 +2,9 @@
 //! (`openai-responses`, `azure-openai-responses`).
 //!
 //! Port of upstream `src/api/openai-responses-shared.ts`, plus the parts of
-//! `constrained-sampling.ts`, `openai-prompt-cache.ts` and `utils/hash.ts` it needs. Request
-//! items and stream events are plain JSON values in the Responses wire format.
+//! `openai-prompt-cache.ts` it needs; constrained sampling and `shortHash` come from
+//! [`crate::api::constrained_sampling`] and [`crate::api::common`]. Request items and stream
+//! events are plain JSON values in the Responses wire format.
 
 use futures::{Stream, StreamExt};
 use serde::Serialize;
@@ -11,6 +12,10 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
 use crate::api::common::observe_provider_event;
+use crate::api::constrained_sampling::{
+    GrammarToolInputJsonBuffer, append_grammar_tool_input_json_delta, get_grammar_tool_input,
+    get_json_schema_tool_parameters, resolve_grammar_constrained_sampling, resolve_json_schema_strict_sampling,
+};
 use crate::compat::{ModelCompat, OpenAIResponsesCompat};
 use crate::error::{Error, Result};
 use crate::events::MessageBuilder;
@@ -23,42 +28,16 @@ use crate::transcript::{
 };
 use crate::transform::transform_messages;
 use crate::types::{
-    AssistantBlock, AssistantMessage, ConstrainedSampling, JsonObject, Message, StopReason, StrictMode, SystemMessage,
-    Tool, TranscriptContext, Usage, UserBlock, UserContent,
+    AssistantBlock, AssistantMessage, JsonObject, Message, StopReason, SystemMessage, Tool, TranscriptContext, Usage,
+    UserBlock, UserContent,
 };
 
 // =============================================================================
 // Utilities
 // =============================================================================
 
-/// Upstream `shortHash`: a fast deterministic hash used to shorten long ids. Bit-identical to
-/// the TypeScript version (UTF-16 code units, `Math.imul`, base-36 output).
-pub fn short_hash(text: &str) -> String {
-    let mut h1: u32 = 0xdead_beef;
-    let mut h2: u32 = 0x41c6_ce57;
-    for unit in text.encode_utf16() {
-        let unit = u32::from(unit);
-        h1 = (h1 ^ unit).wrapping_mul(2_654_435_761);
-        h2 = (h2 ^ unit).wrapping_mul(1_597_334_677);
-    }
-    h1 = (h1 ^ (h1 >> 16)).wrapping_mul(2_246_822_507) ^ (h2 ^ (h2 >> 13)).wrapping_mul(3_266_489_909);
-    h2 = (h2 ^ (h2 >> 16)).wrapping_mul(2_246_822_507) ^ (h1 ^ (h1 >> 13)).wrapping_mul(3_266_489_909);
-    format!("{}{}", to_base36(h2), to_base36(h1))
-}
-
-fn to_base36(mut value: u32) -> String {
-    if value == 0 {
-        return "0".into();
-    }
-    let mut digits = Vec::new();
-    while value > 0 {
-        let digit = (value % 36) as u8;
-        digits.push(if digit < 10 { b'0' + digit } else { b'a' + digit - 10 });
-        value /= 36;
-    }
-    digits.reverse();
-    String::from_utf8(digits).unwrap_or_default()
-}
+/// Re-exported from its old home here (upstream `utils/hash.ts`).
+pub use crate::api::common::short_hash;
 
 /// OpenAI's limit on `prompt_cache_key`.
 pub const OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH: usize = 64;
@@ -170,339 +149,14 @@ fn parse_text_signature(signature: Option<&str>) -> Option<(String, Option<Strin
 }
 
 // =============================================================================
-// Constrained sampling (port of the parts of `constrained-sampling.ts` used here)
+// Constrained sampling (shared logic in `api::constrained_sampling`)
 // =============================================================================
 
-/// A schema keyword that strict JSON-schema sampling cannot express.
-struct UnsupportedStrictSchema(String);
-
-const UNSUPPORTED_STRICT_SCHEMA_KEYS: [&str; 16] = [
-    "$ref",
-    "$defs",
-    "definitions",
-    "allOf",
-    "oneOf",
-    "patternProperties",
-    "dependentSchemas",
-    "dependencies",
-    "unevaluatedProperties",
-    "propertyNames",
-    "contains",
-    "prefixItems",
-    "not",
-    "if",
-    "then",
-    "else",
-];
-
-fn is_structured_schema(schema: &Value) -> bool {
-    let Some(object) = schema.as_object() else {
-        return false;
-    };
-    let types: Vec<&Value> = match object.get("type") {
-        Some(Value::String(_)) => object.get("type").into_iter().collect(),
-        Some(Value::Array(types)) => types.iter().collect(),
-        _ => Vec::new(),
-    };
-    types
-        .iter()
-        .any(|kind| kind.as_str() == Some("object") || kind.as_str() == Some("array"))
-        || object.contains_key("properties")
-        || object.contains_key("items")
-}
-
-fn schema_allows_null(schema: &Value) -> bool {
-    let Some(object) = schema.as_object() else {
-        return false;
-    };
-    let kind = object.get("type");
-    if kind.and_then(Value::as_str) == Some("null")
-        || kind
-            .and_then(Value::as_array)
-            .is_some_and(|types| types.iter().any(|t| t.as_str() == Some("null")))
-    {
-        return true;
-    }
-    if object.get("const") == Some(&Value::Null)
-        || object
-            .get("enum")
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.contains(&Value::Null))
-    {
-        return true;
-    }
-    object
-        .get("anyOf")
-        .and_then(Value::as_array)
-        .is_some_and(|variants| variants.iter().any(schema_allows_null))
-}
-
-fn make_schema_node_strict(schema: &mut Value) -> std::result::Result<(), UnsupportedStrictSchema> {
-    let unsupported = |message: &str| UnsupportedStrictSchema(message.to_owned());
-    let Some(object) = schema.as_object_mut() else {
-        return Err(unsupported("boolean schemas are unsupported"));
-    };
-    for key in UNSUPPORTED_STRICT_SCHEMA_KEYS {
-        if object.contains_key(key) {
-            return Err(UnsupportedStrictSchema(format!("{key} schemas are unsupported")));
-        }
-    }
-    if let Some(any_of) = object.get_mut("anyOf") {
-        let Some(variants) = any_of.as_array_mut().filter(|variants| !variants.is_empty()) else {
-            return Err(unsupported("anyOf must contain at least one schema"));
-        };
-        for variant in variants {
-            if is_structured_schema(variant) {
-                return Err(unsupported("object and array unions are unsupported"));
-            }
-            make_schema_node_strict(variant)?;
-        }
-    }
-    if let Some(items) = object.get_mut("items") {
-        if items.is_array() {
-            return Err(unsupported("tuple schemas are unsupported"));
-        }
-        make_schema_node_strict(items)?;
-    }
-    let is_object_schema = object.get("type").and_then(Value::as_str) == Some("object");
-    if object.contains_key("properties") && !is_object_schema {
-        return Err(unsupported("properties require type object"));
-    }
-    if !is_object_schema {
-        return Ok(());
-    }
-    if object
-        .get("additionalProperties")
-        .is_some_and(|value| *value != Value::Bool(false))
-    {
-        return Err(unsupported("schema-valued or true additionalProperties is unsupported"));
-    }
-    if object.get("properties").is_some_and(|value| !value.is_object()) {
-        return Err(unsupported("object properties must be a schema map"));
-    }
-    let required: Vec<String> = match object.get("required") {
-        None => Vec::new(),
-        Some(Value::Array(keys)) if keys.iter().all(Value::is_string) => {
-            keys.iter().filter_map(Value::as_str).map(str::to_owned).collect()
-        }
-        Some(_) => return Err(unsupported("object required must be a string array")),
-    };
-    let mut empty = Map::new();
-    let properties = match object.get_mut("properties") {
-        Some(Value::Object(properties)) => properties,
-        _ => &mut empty,
-    };
-    let names: Vec<String> = properties.keys().cloned().collect();
-    if required.iter().any(|key| !names.contains(key)) {
-        return Err(unsupported("required contains an unknown property"));
-    }
-    for name in &names {
-        let Some(property) = properties.get_mut(name) else {
-            continue;
-        };
-        make_schema_node_strict(property)?;
-        if !required.contains(name) && !schema_allows_null(property) {
-            let original = property.take();
-            *property = json!({"anyOf": [original, {"type": "null"}]});
-        }
-    }
-    object.insert(
-        "required".into(),
-        Value::Array(names.into_iter().map(Value::String).collect()),
-    );
-    object.insert("additionalProperties".into(), Value::Bool(false));
-    Ok(())
-}
-
-/// Convert a tool schema to the strict subset expected by provider constrained sampling.
-fn make_strict_json_schema(schema: &Value) -> std::result::Result<Value, UnsupportedStrictSchema> {
-    let mut cloned = schema.clone();
-    if !cloned.is_object() {
-        return Err(UnsupportedStrictSchema("root schema must have type object".into()));
-    }
-    make_schema_node_strict(&mut cloned)?;
-    if cloned.get("type").and_then(Value::as_str) != Some("object") {
-        return Err(UnsupportedStrictSchema("root schema must have type object".into()));
-    }
-    Ok(cloned)
-}
-
-fn get_json_schema_tool_parameters(tool: &Tool, strict: bool) -> Result<Value> {
-    if strict {
-        make_strict_json_schema(&tool.parameters).map_err(|UnsupportedStrictSchema(message)| Error::msg(message))
-    } else {
-        Ok(tool.parameters.clone())
-    }
-}
-
-/// Whether a JSON-schema tool is sent in strict mode: `Some(true)` when the schema can be made
-/// strict, `None` to fall back to the default. `require` fails when it cannot be honored.
-fn resolve_json_schema_strict_sampling(tool: &Tool, supports_strict_mode: bool) -> Result<Option<bool>> {
-    let Some(ConstrainedSampling::JsonSchema { strict }) = &tool.constrained_sampling else {
-        return Ok(None);
-    };
-    if supports_strict_mode {
-        return match make_strict_json_schema(&tool.parameters) {
-            Ok(_) => Ok(Some(true)),
-            Err(_) if *strict != StrictMode::Require => Ok(None),
-            Err(UnsupportedStrictSchema(message)) => Err(Error::msg(format!(
-                "Tool \"{}\" requires JSON-schema constrained sampling, but {message}.",
-                tool.name
-            ))),
-        };
-    }
-    if *strict == StrictMode::Require {
-        return Err(Error::msg(format!(
-            "Tool \"{}\" requires JSON-schema constrained sampling, but strict tools are unsupported.",
-            tool.name
-        )));
-    }
-    Ok(None)
-}
-
-/// Grammar of a tool sent as an OpenAI custom tool.
-struct GrammarConstrainedSampling {
-    format: &'static str,
-    definition: String,
-    input_property: String,
-}
-
-fn infer_grammar_input_property(tool: &Tool) -> std::result::Result<String, String> {
-    let schema = &tool.parameters;
-    if schema.get("type").and_then(Value::as_str) != Some("object") {
-        return Err("grammar constrained sampling requires an object parameter schema".into());
-    }
-    let required = schema.get("required").and_then(Value::as_array);
-    let Some(property) = required
-        .filter(|required| required.len() == 1)
-        .and_then(|required| required[0].as_str())
-    else {
-        return Err("grammar constrained sampling requires exactly one required string property".into());
-    };
-    let definition = schema.get("properties").and_then(|properties| properties.get(property));
-    let Some(definition) = definition.filter(|definition| truthy(Some(definition))) else {
-        return Err(format!(
-            "grammar constrained sampling requires a properties entry for {property}"
-        ));
-    };
-    if definition.get("type").and_then(Value::as_str) != Some("string") {
-        return Err(format!(
-            "grammar constrained sampling property {property} must have type string"
-        ));
-    }
-    Ok(property.to_owned())
-}
-
-fn resolve_grammar_constrained_sampling(
-    tool: &Tool,
-    supports_openai_grammar_tools: bool,
-) -> Result<Option<GrammarConstrainedSampling>> {
-    let Some(ConstrainedSampling::Grammar { variants }) = &tool.constrained_sampling else {
-        return Ok(None);
-    };
-    if !supports_openai_grammar_tools {
-        return Ok(None);
-    }
-    let usable = |definition: &Option<String>| definition.clone().filter(|text| !text.trim().is_empty());
-    let (format, definition) = match (usable(&variants.openai_lark), usable(&variants.openai_regex)) {
-        (Some(lark), _) => ("lark", lark),
-        (None, Some(regex)) => ("regex", regex),
-        (None, None) => {
-            return Err(Error::msg(format!(
-                "Tool \"{}\" cannot use grammar constrained sampling: no supported grammar variant was provided.",
-                tool.name
-            )));
-        }
-    };
-    let input_property = infer_grammar_input_property(tool).map_err(|message| {
-        Error::msg(format!(
-            "Tool \"{}\" cannot use grammar constrained sampling: {message}.",
-            tool.name
-        ))
-    })?;
-    Ok(Some(GrammarConstrainedSampling {
-        format,
-        definition,
-        input_property,
-    }))
-}
+/// Re-exported from its old home here.
+pub use crate::api::constrained_sampling::create_grammar_tool_input_properties;
 
 /// Tool name to the argument property that carries a grammar tool's raw input.
 pub type GrammarToolInputProperties = HashMap<String, String>;
-
-/// The input property of every tool sent as a grammar (custom) tool.
-pub fn create_grammar_tool_input_properties(
-    tools: &[Tool],
-    supports_openai_grammar_tools: bool,
-) -> Result<GrammarToolInputProperties> {
-    let mut properties = HashMap::new();
-    for tool in tools {
-        if let Some(grammar) = resolve_grammar_constrained_sampling(tool, supports_openai_grammar_tools)? {
-            properties.insert(tool.name.clone(), grammar.input_property);
-        }
-    }
-    Ok(properties)
-}
-
-fn get_grammar_tool_input(tool_name: &str, arguments: &JsonObject, input_property: &str) -> Result<String> {
-    match arguments.get(input_property) {
-        Some(Value::String(input)) => Ok(input.clone()),
-        _ => Err(Error::msg(format!(
-            "Grammar tool call \"{tool_name}\" requires argument \"{input_property}\" to be a string."
-        ))),
-    }
-}
-
-/// Re-encodes a grammar tool's raw input as JSON argument deltas (`{"<property>":"...`).
-#[derive(Clone, Debug, Default)]
-struct GrammarToolInputJsonBuffer {
-    input: String,
-    started: bool,
-    closed: bool,
-}
-
-fn json_string_body(text: &str) -> String {
-    let encoded = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
-    encoded[1..encoded.len() - 1].to_owned()
-}
-
-fn append_grammar_tool_input_json_delta(
-    buffer: &mut GrammarToolInputJsonBuffer,
-    input_property: &str,
-    next_input: &str,
-    close: bool,
-) -> Result<Option<String>> {
-    if buffer.closed {
-        if close && next_input == buffer.input {
-            return Ok(None);
-        }
-        return Err(Error::msg(format!(
-            "grammar tool input for property \"{input_property}\" changed after it was closed"
-        )));
-    }
-    let Some(input_delta) = next_input.strip_prefix(buffer.input.as_str()) else {
-        return Err(Error::msg(format!(
-            "grammar tool input for property \"{input_property}\" changed non-monotonically"
-        )));
-    };
-    if !close && input_delta.is_empty() {
-        return Ok(None);
-    }
-    let mut delta = String::new();
-    if !buffer.started {
-        delta.push('{');
-        delta.push_str(&serde_json::to_string(input_property).unwrap_or_default());
-        delta.push_str(":\"");
-        buffer.started = true;
-    }
-    delta.push_str(&json_string_body(input_delta));
-    next_input.clone_into(&mut buffer.input);
-    if close {
-        delta.push_str("\"}");
-        buffer.closed = true;
-    }
-    Ok(Some(delta))
-}
 
 // =============================================================================
 // Tool conversion
@@ -534,19 +188,20 @@ pub fn convert_responses_tools(tools: &[Tool], options: &ConvertResponsesToolsOp
                     "type": "custom",
                     "name": tool.name,
                     "description": tool.description,
-                    "format": {"type": "grammar", "syntax": grammar.format, "definition": grammar.definition},
+                    "format": {"type": "grammar", "syntax": grammar.format.as_str(), "definition": grammar.definition},
                 });
                 if options.tool_search_result {
                     custom["defer_loading"] = Value::Bool(true);
                 }
                 return Ok(custom);
             }
-            let strict = resolve_json_schema_strict_sampling(tool, supports_strict_mode)?.map_or(default_strict, Some);
+            let strict =
+                resolve_json_schema_strict_sampling(tool, supports_strict_mode, None)?.map_or(default_strict, Some);
             let mut function = json!({
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
-                "parameters": get_json_schema_tool_parameters(tool, strict == Some(true))?,
+                "parameters": get_json_schema_tool_parameters(tool, strict)?,
             });
             if options.tool_search_result {
                 function["defer_loading"] = Value::Bool(true);
@@ -1504,6 +1159,7 @@ mod tests {
     use super::*;
     use crate::events::{AssistantMessageEvent, AssistantMessageEventStream};
     use crate::transcript::normalize_context;
+    use crate::types::{ConstrainedSampling, StrictMode};
     use crate::types::{
         Context, GrammarVariants, ImageContent, TextContent, ThinkingContent, ToolCall, ToolResultMessage,
     };
@@ -1555,20 +1211,6 @@ mod tests {
             }
         }
         (output, result, kinds)
-    }
-
-    #[test]
-    fn short_hash_matches_typescript() {
-        for (text, expected) in [
-            ("", "k4n83c7h0j2b"),
-            ("a", "m8735310ae7sx"),
-            ("call_abc|fc_123", "jp01dsxufnom"),
-            ("toolu_01ABCDEFGHIJKLMNOPQRSTUVWX", "gdi2ks8d0w8m"),
-            ("emoji \u{1F648} ok", "yd82u41hv4qe6"),
-        ] {
-            assert_eq!(short_hash(text), expected, "{text}");
-        }
-        assert_eq!(short_hash(&"x".repeat(500)), "130aesn1aldl4j");
     }
 
     #[test]

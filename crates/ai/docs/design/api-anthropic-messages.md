@@ -16,7 +16,7 @@
 ## 上游源文件
 
 - `packages/ai/src/api/anthropic-messages.ts`（主体：选项、请求构建、SSE 解析、事件映射、`streamSimple`）
-- `packages/ai/src/api/constrained-sampling.ts`（严格 JSON schema 转换，`resolveJsonSchemaStrictSampling`）
+- `packages/ai/src/api/constrained-sampling.ts`（严格 JSON schema 转换，`resolveJsonSchemaStrictSampling`；Rust 里是共享模块 `api::constrained_sampling`）
 - `packages/ai/src/api/simple-options.ts`（`buildBaseOptions`、`adjustMaxTokensForThinking`、`clampMaxTokensToContext`，已在 `simple_options.rs`）
 - `packages/ai/src/api/transform-messages.ts`（`transformMessages`、`splitErrorToolResultImages`，已在 `transform.rs`）
 - `packages/ai/src/utils/provider-retry.ts`（重试策略，已在 `http.rs`）
@@ -73,7 +73,7 @@
 - **中途系统消息**（模型支持时）：渲染为 `role: "system"` 消息（`render_system_message_update`），并推迟到下一条助手消息之前（或末尾）发送，因为 `tool_result` 必须紧跟 `tool_use`。
 - **原生工具变更**：`supportsMidConvoSystemMessages && supportsMidConvoToolChanges` 且首条系统消息有工具时启用。顶层 `tools` 固定为初始工具（最后一个带缓存断点）加 `__pi_deferred_placeholder__`（`defer_loading: true`）；之后的变更以 `tool_removal` / `tool_addition` 块放在系统消息里，同名重定义只发 addition。否则顶层 `tools` 是当前工具全集。
 - **工具定义**：`name`（OAuth 时改写）、`description`、`eager_input_streaming: true`（`supportsEagerToolInputStreaming`，默认真）、`strict: true`（严格模式时）、`input_schema`、最后一个工具的 `cache_control`（`supportsCacheControlOnTools`，默认真）。非严格时 `input_schema` 只保留 `type/properties/required`；严格时为严格化后的完整 schema 再覆盖这三个键。
-- **严格工具**：`constrainedSampling: {type: json_schema}` 的工具在 `compat.supportsStrictTools` 时尝试严格化（移植 `makeStrictJsonSchema`，外加 Anthropic 不支持的关键字检查：`minimum`、`maxItems`、非 0/1 的 `minItems`、不在白名单内的 `format` 等）。`prefer` 无法严格化时退回非严格，`require` 则请求失败。
+- **严格工具**：`constrainedSampling: {type: json_schema}` 的工具在 `compat.supportsStrictTools` 时尝试严格化（调用共享模块 `api::constrained_sampling` 的 `resolve_json_schema_strict_sampling`，传入 Anthropic 的关键字检查 `is_strict_unsupported_keyword`：`minimum`、`maxItems`、非 0/1 的 `minItems`、不在白名单内的 `format` 等）。`prefer` 无法严格化时退回非严格，`require` 则请求失败。
 - **缓存**：保留策略为 `options.cache_retention`，否则 `PI_CACHE_RETENTION=long`（先查 `options.env`，再查进程环境）为 long，否则 short。`none` 不发 `cache_control`；long 且 `supportsLongCacheRetention`（默认真）时为 `{"type":"ephemeral","ttl":"1h"}`。断点位置：系统块、最后一个工具、最后一条 user/system 消息的最后一个 text/image/tool_result/tool_addition/tool_removal 块（字符串内容改写为带 `cache_control` 的文本块）。
 - **thinking**：
   - `model.reasoning`、`thinking_enabled == false`、且 `thinkingLevelMap.off` 不是 `null`：`{"type":"disabled"}`。
@@ -148,7 +148,6 @@
 ## 需要的核心改动（未在本模块内实现）
 
 - `error.rs` 的 `Error::Status` 增加原始响应体（如 `body: Option<String>`）或解析出的 `error_type: Option<String>`，由 `http::send_with_retry` 填写。这样严格工具降级可以与上游一样检查 `invalid_request_error`，也能在需要时还原 SDK 风格的错误消息。
-- 严格 JSON schema 转换（`makeStrictJsonSchema`、`resolveJsonSchemaStrictSampling`）目前是本模块的私有实现，OpenAI Completions/Responses、Bedrock 也需要；建议移到共享的 `constrained_sampling.rs`。
 
 ## 待确认的改进
 

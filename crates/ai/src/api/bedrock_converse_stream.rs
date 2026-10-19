@@ -36,6 +36,7 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::common::{apply_on_payload, observe_provider_event, spawn_stream};
+use crate::api::constrained_sampling::{get_json_schema_tool_parameters, resolve_json_schema_strict_sampling};
 use crate::compat::ModelCompat;
 use crate::error::{Error, Result};
 use crate::events::{AssistantMessageEventStream, MessageBuilder};
@@ -56,8 +57,8 @@ use crate::transcript::{
 };
 use crate::transform::{split_error_tool_result_images, transform_messages};
 use crate::types::{
-    AssistantBlock, AssistantMessageDiagnostic, ConstrainedSampling, JsonObject, Message, ProviderEnv, ProviderHeaders,
-    StopReason, StrictMode, Tool, TranscriptContext, UserBlock, UserContent,
+    AssistantBlock, AssistantMessageDiagnostic, JsonObject, Message, ProviderEnv, ProviderHeaders, StopReason, Tool,
+    TranscriptContext, UserBlock, UserContent,
 };
 
 const EMPTY_TEXT_PLACEHOLDER: &str = "<empty>";
@@ -670,174 +671,6 @@ fn build_additional_model_request_fields(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Constrained sampling (strict tools)
-// ---------------------------------------------------------------------------------------------
-
-const UNSUPPORTED_STRICT_SCHEMA_KEYS: [&str; 16] = [
-    "$ref",
-    "$defs",
-    "definitions",
-    "allOf",
-    "oneOf",
-    "patternProperties",
-    "dependentSchemas",
-    "dependencies",
-    "unevaluatedProperties",
-    "propertyNames",
-    "contains",
-    "prefixItems",
-    "not",
-    "if",
-    "then",
-    "else",
-];
-
-fn is_structured_schema(schema: &Value) -> bool {
-    let Value::Object(object) = schema else {
-        return false;
-    };
-    let types: Vec<&str> = match object.get("type") {
-        Some(Value::String(kind)) => vec![kind.as_str()],
-        Some(Value::Array(kinds)) => kinds.iter().filter_map(Value::as_str).collect(),
-        _ => Vec::new(),
-    };
-    types.contains(&"object")
-        || types.contains(&"array")
-        || object.contains_key("properties")
-        || object.contains_key("items")
-}
-
-fn schema_allows_null(schema: &Value) -> bool {
-    let Value::Object(object) = schema else {
-        return false;
-    };
-    match object.get("type") {
-        Some(Value::String(kind)) if kind == "null" => return true,
-        Some(Value::Array(kinds)) if kinds.iter().any(|kind| kind == "null") => return true,
-        _ => {}
-    }
-    if object.get("const") == Some(&Value::Null) {
-        return true;
-    }
-    if let Some(Value::Array(values)) = object.get("enum")
-        && values.contains(&Value::Null)
-    {
-        return true;
-    }
-    matches!(object.get("anyOf"), Some(Value::Array(variants)) if variants.iter().any(schema_allows_null))
-}
-
-fn make_json_schema_node_strict(schema: &mut Value) -> std::result::Result<(), String> {
-    let Value::Object(object) = schema else {
-        return Err("boolean schemas are unsupported".into());
-    };
-    for key in UNSUPPORTED_STRICT_SCHEMA_KEYS {
-        if object.contains_key(key) {
-            return Err(format!("{key} schemas are unsupported"));
-        }
-    }
-    if let Some(any_of) = object.get_mut("anyOf") {
-        let Value::Array(variants) = any_of else {
-            return Err("anyOf must contain at least one schema".into());
-        };
-        if variants.is_empty() {
-            return Err("anyOf must contain at least one schema".into());
-        }
-        for variant in variants {
-            if is_structured_schema(variant) {
-                return Err("object and array unions are unsupported".into());
-            }
-            make_json_schema_node_strict(variant)?;
-        }
-    }
-    if let Some(items) = object.get_mut("items") {
-        if items.is_array() {
-            return Err("tuple schemas are unsupported".into());
-        }
-        make_json_schema_node_strict(items)?;
-    }
-    let is_object_schema = object.get("type").and_then(Value::as_str) == Some("object");
-    if object.contains_key("properties") && !is_object_schema {
-        return Err("properties require type object".into());
-    }
-    if !is_object_schema {
-        return Ok(());
-    }
-    if object
-        .get("additionalProperties")
-        .is_some_and(|value| *value != Value::Bool(false))
-    {
-        return Err("schema-valued or true additionalProperties is unsupported".into());
-    }
-    if object.get("properties").is_some_and(|value| !value.is_object()) {
-        return Err("object properties must be a schema map".into());
-    }
-    let required: Vec<String> = match object.get("required") {
-        None => Vec::new(),
-        Some(Value::Array(keys)) if keys.iter().all(Value::is_string) => {
-            keys.iter().filter_map(Value::as_str).map(str::to_owned).collect()
-        }
-        Some(_) => return Err("object required must be a string array".into()),
-    };
-    let mut names = Vec::new();
-    if let Some(Value::Object(properties)) = object.get_mut("properties") {
-        names = properties.keys().cloned().collect();
-        if required.iter().any(|key| !names.contains(key)) {
-            return Err("required contains an unknown property".into());
-        }
-        for (key, property) in properties.iter_mut() {
-            make_json_schema_node_strict(property)?;
-            if !required.contains(key) && !schema_allows_null(property) {
-                let inner = property.take();
-                *property = json!({"anyOf": [inner, {"type": "null"}]});
-            }
-        }
-    } else if !required.is_empty() {
-        return Err("required contains an unknown property".into());
-    }
-    object.insert("required".into(), json!(names));
-    object.insert("additionalProperties".into(), Value::Bool(false));
-    Ok(())
-}
-
-/// Convert a tool schema to the strict subset expected by provider constrained sampling.
-fn make_strict_json_schema(schema: &Value) -> std::result::Result<Value, String> {
-    let mut cloned = schema.clone();
-    if !cloned.is_object() {
-        return Err("root schema must have type object".into());
-    }
-    make_json_schema_node_strict(&mut cloned)?;
-    if cloned.get("type").and_then(Value::as_str) != Some("object") {
-        return Err("root schema must have type object".into());
-    }
-    Ok(cloned)
-}
-
-/// Whether a JSON-schema tool is sent in strict mode (`Some(true)`), or plainly (`None`).
-fn resolve_json_schema_strict_sampling(tool: &Tool, supports_strict: bool) -> Result<Option<bool>> {
-    let Some(ConstrainedSampling::JsonSchema { strict }) = &tool.constrained_sampling else {
-        return Ok(None);
-    };
-    if supports_strict {
-        return match make_strict_json_schema(&tool.parameters) {
-            Ok(_) => Ok(Some(true)),
-            Err(_) if *strict != StrictMode::Require => Ok(None),
-            Err(reason) => Err(Error::msg(format!(
-                "Tool \"{}\" requires JSON-schema constrained sampling, but {reason}.",
-                tool.name
-            ))),
-        };
-    }
-    if *strict == StrictMode::Require {
-        return Err(Error::msg(format!(
-            "Tool \"{}\" requires JSON-schema constrained sampling, but strict tools are unsupported.",
-            tool.name
-        )));
-    }
-    Ok(None)
-}
-
-// ---------------------------------------------------------------------------------------------
 // Request payload (upstream `ConverseStreamCommand` input as JSON)
 // ---------------------------------------------------------------------------------------------
 
@@ -1120,12 +953,8 @@ fn convert_tool_config(
     }
     let mut specs = Vec::with_capacity(tools.len());
     for tool in tools {
-        let strict = resolve_json_schema_strict_sampling(tool, supports_strict)?;
-        let schema = if strict == Some(true) {
-            make_strict_json_schema(&tool.parameters).map_err(Error::msg)?
-        } else {
-            tool.parameters.clone()
-        };
+        let strict = resolve_json_schema_strict_sampling(tool, supports_strict, None)?;
+        let schema = get_json_schema_tool_parameters(tool, strict)?;
         let mut spec = Map::new();
         spec.insert("name".into(), json!(tool.name));
         spec.insert("description".into(), json!(tool.description));

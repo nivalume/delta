@@ -8,8 +8,9 @@ vLLM、llama.cpp、SGLang 等）。服务端之间的差异由模型上的 `Open
 未设置的字段按 provider id 和 base URL 自动探测。
 
 模块：`crates/ai/src/api/openai_completions.rs`（单元结构体 `OpenAICompletionsApi`，实现
-`ProviderStreams`），子模块 `openai_completions/constrained_sampling.rs`（严格 JSON schema 工具和
-OpenAI grammar 自定义工具，Responses API 也可复用）。选项为
+`ProviderStreams`）。严格 JSON schema 工具和 OpenAI grammar 自定义工具在共享模块
+`api/constrained_sampling.rs`，`shortHash` 在 `api::common::short_hash`；为兼容旧路径，本模块重新导出
+`openai_completions::constrained_sampling` 和 `openai_completions::short_hash`。选项为
 `ApiOptions::OpenAICompletions(OpenAICompletionsOptions)`。
 
 ## 上游源文件
@@ -206,4 +207,3 @@ toolUse，否则 stop；stop reason 为 error → 以其消息失败；`supports
 - 流内 `overloaded`/`529` 类错误是否按可重试处理（上游不重试）。
 - provider-references 的“同一 index 不同 id 视为新调用”规则是否需要对某些 provider 生效
   （与上游 Kimi 行为冲突，目前未采用）。
-- `constrained_sampling` 子模块可移到 `api/` 下作为共享模块，供 `openai-responses` 使用。

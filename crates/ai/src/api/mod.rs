@@ -2,6 +2,7 @@
 //! implements [`crate::ProviderStreams`], plus `stream` and `stream_simple` functions.
 
 pub mod common;
+pub mod constrained_sampling;
 
 pub mod anthropic_messages;
 pub mod azure_openai_responses;

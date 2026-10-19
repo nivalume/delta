@@ -9,10 +9,11 @@ use futures::StreamExt;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Map, Value, json};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::api::common;
+use crate::api::common::{self, short_hash};
+use crate::api::constrained_sampling::{get_json_schema_tool_parameters, resolve_json_schema_strict_sampling};
 use crate::error::{Error, Result};
 use crate::events::{AssistantMessageEventStream, MessageBuilder};
 use crate::http;
@@ -24,8 +25,8 @@ use crate::simple_options::build_base_options;
 use crate::transcript::{get_current_tools, get_system_message_text, render_system_message_update, resolve_transcript};
 use crate::transform::transform_messages;
 use crate::types::{
-    AssistantBlock, AssistantMessage, ConstrainedSampling, ImageContent, JsonObject, Message, ProviderHeaders,
-    StopReason, StrictMode, Tool, TranscriptContext, UserBlock, UserContent,
+    AssistantBlock, AssistantMessage, ImageContent, JsonObject, Message, ProviderHeaders, StopReason, Tool,
+    TranscriptContext, UserBlock, UserContent,
 };
 
 const MISTRAL_TOOL_CALL_ID_LENGTH: usize = 9;
@@ -140,34 +141,6 @@ async fn run(
 // ---------------------------------------------------------------------------------------------
 // Tool call ids
 // ---------------------------------------------------------------------------------------------
-
-/// Upstream `shortHash`: a cyrb53-style hash over UTF-16 code units, printed in base 36.
-fn short_hash(text: &str) -> String {
-    let mut h1: u32 = 0xdead_beef;
-    let mut h2: u32 = 0x41c6_ce57;
-    for unit in text.encode_utf16() {
-        let unit = u32::from(unit);
-        h1 = (h1 ^ unit).wrapping_mul(2_654_435_761);
-        h2 = (h2 ^ unit).wrapping_mul(1_597_334_677);
-    }
-    h1 = (h1 ^ (h1 >> 16)).wrapping_mul(2_246_822_507) ^ (h2 ^ (h2 >> 13)).wrapping_mul(3_266_489_909);
-    h2 = (h2 ^ (h2 >> 16)).wrapping_mul(2_246_822_507) ^ (h1 ^ (h1 >> 13)).wrapping_mul(3_266_489_909);
-    format!("{}{}", base36(h2), base36(h1))
-}
-
-fn base36(mut value: u32) -> String {
-    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut out = Vec::new();
-    loop {
-        out.push(DIGITS[(value % 36) as usize]);
-        value /= 36;
-        if value == 0 {
-            break;
-        }
-    }
-    out.reverse();
-    String::from_utf8(out).unwrap_or_default()
-}
 
 /// Mistral accepts only 9-character alphanumeric tool call ids.
 fn derive_mistral_tool_call_id(id: &str, attempt: u32) -> String {
@@ -435,9 +408,11 @@ fn to_function_tools(tools: &[Tool]) -> Result<Vec<Value>> {
     tools
         .iter()
         .map(|tool| {
-            let strict_parameters = resolve_json_schema_strict_parameters(tool)?;
-            let strict = strict_parameters.is_some();
-            let parameters = strict_parameters.unwrap_or_else(|| tool.parameters.clone());
+            // Mistral supports strict mode, so a `require` tool fails only when its schema is
+            // outside the strict subset.
+            let strict = resolve_json_schema_strict_sampling(tool, true, None)?;
+            let parameters = get_json_schema_tool_parameters(tool, strict)?;
+            let strict = strict.unwrap_or(false);
             Ok(json!({
                 "type": "function",
                 "function": {
@@ -449,169 +424,6 @@ fn to_function_tools(tools: &[Tool]) -> Result<Vec<Value>> {
             }))
         })
         .collect()
-}
-
-// ---------------------------------------------------------------------------------------------
-// Strict JSON schema (upstream `api/constrained-sampling.ts`, the parts this API uses)
-// ---------------------------------------------------------------------------------------------
-
-const UNSUPPORTED_STRICT_SCHEMA_KEYS: [&str; 16] = [
-    "$ref",
-    "$defs",
-    "definitions",
-    "allOf",
-    "oneOf",
-    "patternProperties",
-    "dependentSchemas",
-    "dependencies",
-    "unevaluatedProperties",
-    "propertyNames",
-    "contains",
-    "prefixItems",
-    "not",
-    "if",
-    "then",
-    "else",
-];
-
-/// The strict parameters of a tool that asks for JSON-schema constrained sampling, `None`
-/// when the tool is sent non-strict. Mistral supports strict mode, so a `require` tool fails
-/// only when its schema is outside the strict subset.
-fn resolve_json_schema_strict_parameters(tool: &Tool) -> Result<Option<Value>> {
-    let Some(ConstrainedSampling::JsonSchema { strict }) = &tool.constrained_sampling else {
-        return Ok(None);
-    };
-    match make_strict_json_schema(&tool.parameters) {
-        Ok(schema) => Ok(Some(schema)),
-        Err(_) if *strict != StrictMode::Require => Ok(None),
-        Err(reason) => Err(Error::msg(format!(
-            "Tool \"{}\" requires JSON-schema constrained sampling, but {reason}.",
-            tool.name
-        ))),
-    }
-}
-
-/// Convert a tool schema to the strict subset: every property required (optional ones become
-/// nullable) and `additionalProperties: false` on every object.
-fn make_strict_json_schema(schema: &Value) -> std::result::Result<Value, String> {
-    const ROOT_ERROR: &str = "root schema must have type object";
-    let mut cloned = schema.clone();
-    if !cloned.is_object() {
-        return Err(ROOT_ERROR.into());
-    }
-    make_json_schema_node_strict(&mut cloned)?;
-    if cloned.get("type") != Some(&Value::from("object")) {
-        return Err(ROOT_ERROR.into());
-    }
-    Ok(cloned)
-}
-
-fn is_structured_schema(schema: &Value) -> bool {
-    let Value::Object(object) = schema else { return false };
-    let has_type = |name: &str| match object.get("type") {
-        Some(Value::String(kind)) => kind == name,
-        Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind.as_str() == Some(name)),
-        _ => false,
-    };
-    has_type("object") || has_type("array") || object.contains_key("properties") || object.contains_key("items")
-}
-
-fn schema_allows_null(schema: &Value) -> bool {
-    let Value::Object(object) = schema else { return false };
-    match object.get("type") {
-        Some(Value::String(kind)) if kind == "null" => return true,
-        Some(Value::Array(kinds)) if kinds.iter().any(|kind| kind.as_str() == Some("null")) => return true,
-        _ => {}
-    }
-    if object.get("const") == Some(&Value::Null) {
-        return true;
-    }
-    if let Some(Value::Array(values)) = object.get("enum")
-        && values.contains(&Value::Null)
-    {
-        return true;
-    }
-    matches!(object.get("anyOf"), Some(Value::Array(variants)) if variants.iter().any(schema_allows_null))
-}
-
-fn make_json_schema_node_strict(schema: &mut Value) -> std::result::Result<(), String> {
-    let Value::Object(object) = schema else {
-        return Err("boolean schemas are unsupported".into());
-    };
-    for key in UNSUPPORTED_STRICT_SCHEMA_KEYS {
-        if object.contains_key(key) {
-            return Err(format!("{key} schemas are unsupported"));
-        }
-    }
-
-    if let Some(any_of) = object.get_mut("anyOf") {
-        let Value::Array(variants) = any_of else {
-            return Err("anyOf must contain at least one schema".into());
-        };
-        if variants.is_empty() {
-            return Err("anyOf must contain at least one schema".into());
-        }
-        for variant in variants {
-            if is_structured_schema(variant) {
-                return Err("object and array unions are unsupported".into());
-            }
-            make_json_schema_node_strict(variant)?;
-        }
-    }
-
-    if let Some(items) = object.get_mut("items") {
-        if items.is_array() {
-            return Err("tuple schemas are unsupported".into());
-        }
-        make_json_schema_node_strict(items)?;
-    }
-
-    let is_object_schema = object.get("type") == Some(&Value::from("object"));
-    if object.contains_key("properties") && !is_object_schema {
-        return Err("properties require type object".into());
-    }
-    if !is_object_schema {
-        return Ok(());
-    }
-    if object
-        .get("additionalProperties")
-        .is_some_and(|value| *value != Value::Bool(false))
-    {
-        return Err("schema-valued or true additionalProperties is unsupported".into());
-    }
-    if object.get("properties").is_some_and(|value| !value.is_object()) {
-        return Err("object properties must be a schema map".into());
-    }
-    let required: HashSet<String> = match object.get("required") {
-        None => HashSet::new(),
-        Some(Value::Array(keys)) if keys.iter().all(Value::is_string) => {
-            keys.iter().filter_map(|key| key.as_str().map(str::to_owned)).collect()
-        }
-        Some(_) => return Err("object required must be a string array".into()),
-    };
-
-    let mut property_names = Vec::new();
-    if let Some(Value::Object(properties)) = object.get_mut("properties") {
-        property_names = properties.keys().cloned().collect();
-        if required.iter().any(|key| !properties.contains_key(key)) {
-            return Err("required contains an unknown property".into());
-        }
-        for (key, property) in properties.iter_mut() {
-            make_json_schema_node_strict(property)?;
-            if !required.contains(key) && !schema_allows_null(property) {
-                let original = property.take();
-                *property = json!({"anyOf": [original, {"type": "null"}]});
-            }
-        }
-    } else if !required.is_empty() {
-        return Err("required contains an unknown property".into());
-    }
-    object.insert(
-        "required".into(),
-        Value::Array(property_names.into_iter().map(Value::String).collect()),
-    );
-    object.insert("additionalProperties".into(), Value::Bool(false));
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1091,19 +903,17 @@ async fn consume_chat_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{ConstrainedSampling, StrictMode};
     use crate::types::{TextContent, ThinkingContent, ToolCall, ToolResultMessage, UserMessage};
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn short_hash_matches_upstream() {
+    fn tool_call_ids_match_upstream() {
         // Vector from pi-py's port of the upstream normalizer test.
         assert_eq!(derive_mistral_tool_call_id("call_abc123|fc_xyz", 0), "nrregu2qr");
         assert_eq!(derive_mistral_tool_call_id("abc123456", 0), "abc123456");
         assert_eq!(derive_mistral_tool_call_id("a-b-c-1-2-3-4-5-6", 0), "abc123456");
         assert!(derive_mistral_tool_call_id("x", 0).len() <= MISTRAL_TOOL_CALL_ID_LENGTH);
-        assert_eq!(base36(0), "0");
-        assert_eq!(base36(35), "z");
-        assert_eq!(base36(36), "10");
     }
 
     #[test]
@@ -1212,74 +1022,6 @@ mod tests {
             "https://proxy.example/mistral/v1/chat/completions"
         );
         assert!(chat_completions_url("not a url").is_err());
-    }
-
-    #[test]
-    fn strict_schema_matches_upstream() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "nested": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]},
-                "maybe": {"type": "string"},
-                "nullable": {"type": ["string", "null"]},
-                "list": {"type": "array", "items": {"type": "object", "properties": {"a": {"type": "number"}}}},
-            },
-            "required": ["nested"],
-        });
-        assert_eq!(
-            make_strict_json_schema(&schema).unwrap(),
-            json!({
-                "type": "object",
-                "properties": {
-                    "nested": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"], "additionalProperties": false},
-                    "maybe": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                    "nullable": {"type": ["string", "null"]},
-                    "list": {"anyOf": [
-                        {"type": "array", "items": {"type": "object", "properties": {"a": {"anyOf": [{"type": "number"}, {"type": "null"}]}}, "required": ["a"], "additionalProperties": false}},
-                        {"type": "null"},
-                    ]},
-                },
-                "required": ["nested", "maybe", "nullable", "list"],
-                "additionalProperties": false,
-            })
-        );
-        let cases = [
-            (json!(true), "root schema must have type object"),
-            (json!({"type": "string"}), "root schema must have type object"),
-            (json!({"type": "object", "$defs": {}}), "$defs schemas are unsupported"),
-            (
-                json!({"type": "object", "properties": {"a": {"anyOf": [{"type": "object"}]}}}),
-                "object and array unions are unsupported",
-            ),
-            (json!({"type": "array", "items": [{}]}), "tuple schemas are unsupported"),
-            (
-                json!({"type": "string", "properties": {}}),
-                "properties require type object",
-            ),
-            (
-                json!({"type": "object", "additionalProperties": true}),
-                "schema-valued or true additionalProperties is unsupported",
-            ),
-            (
-                json!({"type": "object", "required": ["x"]}),
-                "required contains an unknown property",
-            ),
-            (
-                json!({"type": "object", "required": [1]}),
-                "object required must be a string array",
-            ),
-            (
-                json!({"type": "object", "properties": {"a": false}}),
-                "boolean schemas are unsupported",
-            ),
-            (
-                json!({"type": "object", "anyOf": []}),
-                "anyOf must contain at least one schema",
-            ),
-        ];
-        for (schema, expected) in cases {
-            assert_eq!(make_strict_json_schema(&schema).unwrap_err(), expected, "{schema}");
-        }
     }
 
     #[test]

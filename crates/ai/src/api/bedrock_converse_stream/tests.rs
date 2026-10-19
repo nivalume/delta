@@ -5,6 +5,7 @@ use crate::types::{
     AssistantMessage, Context, ImageContent, SystemMessage, TextContent, ThinkingContent, ToolCall, ToolResultMessage,
     Usage, UserMessage,
 };
+use crate::types::{ConstrainedSampling, StrictMode};
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
@@ -368,37 +369,6 @@ fn strict_tool_use_is_gated_by_model_capability() {
     let context = Context::new(vec![Message::user("Use the tool")]).with_tools(vec![tool]);
     let sent = payload_with(&nova(), &context, &options);
     assert_eq!(sent["toolConfig"]["tools"][0]["toolSpec"].get("strict"), None);
-}
-
-#[test]
-fn strict_schema_conversion() {
-    let schema = json!({"type": "object", "properties": {
-        "a": {"type": "string"},
-        "b": {"type": "array", "items": {"type": "object", "properties": {"c": {"type": ["number", "null"]}}}}
-    }, "required": ["a"]});
-    assert_eq!(
-        make_strict_json_schema(&schema).unwrap(),
-        json!({"type": "object", "properties": {
-            "a": {"type": "string"},
-            "b": {"anyOf": [
-                {"type": "array", "items": {"type": "object", "properties": {"c": {"type": ["number", "null"]}},
-                    "required": ["c"], "additionalProperties": false}},
-                {"type": "null"}
-            ]}
-        }, "required": ["a", "b"], "additionalProperties": false})
-    );
-    assert_eq!(
-        make_strict_json_schema(&json!({"type": "object", "properties": {"x": {"$ref": "#/a"}}})).unwrap_err(),
-        "$ref schemas are unsupported"
-    );
-    assert_eq!(
-        make_strict_json_schema(&json!({"type": "string"})).unwrap_err(),
-        "root schema must have type object"
-    );
-    assert_eq!(
-        make_strict_json_schema(&json!({"type": "object", "required": ["x"]})).unwrap_err(),
-        "required contains an unknown property"
-    );
 }
 
 #[test]

@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::api::common::{self, spawn_stream};
+use crate::api::constrained_sampling::{get_json_schema_tool_parameters, resolve_json_schema_strict_sampling};
 use crate::compat::{AnthropicAllowedFallbackModel, ModelCompat, SessionAffinityFormat};
 use crate::error::{Error, Result};
 use crate::events::{AssistantMessageEventStream, MessageBuilder};
@@ -288,29 +289,11 @@ pub fn normalize_tool_call_id(id: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Strict tool schemas (upstream `constrained-sampling.ts`)
+// Strict tool schemas (shared logic in `api::constrained_sampling`)
 // ---------------------------------------------------------------------------
 
-const UNSUPPORTED_STRICT_SCHEMA_KEYS: [&str; 16] = [
-    "$ref",
-    "$defs",
-    "definitions",
-    "allOf",
-    "oneOf",
-    "patternProperties",
-    "dependentSchemas",
-    "dependencies",
-    "unevaluatedProperties",
-    "propertyNames",
-    "contains",
-    "prefixItems",
-    "not",
-    "if",
-    "then",
-    "else",
-];
-
-/// Whether Anthropic's strict mode rejects this schema keyword with this value.
+/// Whether Anthropic's strict mode rejects this schema keyword with this value (upstream
+/// `isAnthropicStrictUnsupportedKeyword`).
 #[allow(clippy::float_cmp)] // Exact, like upstream's `value !== 0 && value !== 1`.
 fn is_strict_unsupported_keyword(key: &str, value: &Value) -> bool {
     if STRICT_UNSUPPORTED_KEYWORDS.contains(&key) {
@@ -325,144 +308,6 @@ fn is_strict_unsupported_keyword(key: &str, value: &Value) -> bool {
     }
 }
 
-fn schema_types(schema: &Map<String, Value>) -> Vec<&str> {
-    match schema.get("type") {
-        Some(Value::String(kind)) => vec![kind.as_str()],
-        Some(Value::Array(kinds)) => kinds.iter().filter_map(Value::as_str).collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn is_structured_schema(schema: &Value) -> bool {
-    let Some(schema) = schema.as_object() else { return false };
-    let types = schema_types(schema);
-    types.contains(&"object")
-        || types.contains(&"array")
-        || schema.contains_key("properties")
-        || schema.contains_key("items")
-}
-
-fn schema_allows_null(schema: &Value) -> bool {
-    let Some(schema) = schema.as_object() else { return false };
-    if schema_types(schema).contains(&"null") {
-        return true;
-    }
-    if schema.get("const") == Some(&Value::Null) {
-        return true;
-    }
-    if schema
-        .get("enum")
-        .and_then(Value::as_array)
-        .is_some_and(|values| values.contains(&Value::Null))
-    {
-        return true;
-    }
-    schema
-        .get("anyOf")
-        .and_then(Value::as_array)
-        .is_some_and(|variants| variants.iter().any(schema_allows_null))
-}
-
-type KeywordCheck = fn(&str, &Value) -> bool;
-
-fn make_node_strict(schema: &mut Value, check: Option<KeywordCheck>) -> std::result::Result<(), String> {
-    let Some(node) = schema.as_object_mut() else {
-        return Err("boolean schemas are unsupported".into());
-    };
-    for key in UNSUPPORTED_STRICT_SCHEMA_KEYS {
-        if node.contains_key(key) {
-            return Err(format!("{key} schemas are unsupported"));
-        }
-    }
-    if let Some(check) = check {
-        for (key, value) in node.iter() {
-            if check(key, value) {
-                return Err(format!("{key}: {value} is unsupported"));
-            }
-        }
-    }
-    if let Some(any_of) = node.get_mut("anyOf") {
-        let Some(variants) = any_of.as_array_mut().filter(|variants| !variants.is_empty()) else {
-            return Err("anyOf must contain at least one schema".into());
-        };
-        for variant in variants {
-            if is_structured_schema(variant) {
-                return Err("object and array unions are unsupported".into());
-            }
-            make_node_strict(variant, check)?;
-        }
-    }
-    if let Some(items) = node.get_mut("items") {
-        if items.is_array() {
-            return Err("tuple schemas are unsupported".into());
-        }
-        make_node_strict(items, check)?;
-    }
-    let is_object = node.get("type").and_then(Value::as_str) == Some("object");
-    if node.contains_key("properties") && !is_object {
-        return Err("properties require type object".into());
-    }
-    if !is_object {
-        return Ok(());
-    }
-    if node
-        .get("additionalProperties")
-        .is_some_and(|value| value != &Value::Bool(false))
-    {
-        return Err("schema-valued or true additionalProperties is unsupported".into());
-    }
-    if node.get("properties").is_some_and(|value| !value.is_object()) {
-        return Err("object properties must be a schema map".into());
-    }
-    if let Some(required) = node.get("required")
-        && !required
-            .as_array()
-            .is_some_and(|keys| keys.iter().all(Value::is_string))
-    {
-        return Err("object required must be a string array".into());
-    }
-    let required: HashSet<String> = node
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|keys| keys.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-        .unwrap_or_default();
-    let mut properties = match node.get_mut("properties") {
-        Some(Value::Object(properties)) => std::mem::take(properties),
-        _ => Map::new(),
-    };
-    if required.iter().any(|key| !properties.contains_key(key)) {
-        return Err("required contains an unknown property".into());
-    }
-    let names: Vec<Value> = properties.keys().cloned().map(Value::String).collect();
-    for (key, property) in &mut properties {
-        make_node_strict(property, check)?;
-        if !required.contains(key) && !schema_allows_null(property) {
-            let original = std::mem::take(property);
-            *property = json!({"anyOf": [original, {"type": "null"}]});
-        }
-    }
-    if let Some(slot) = node.get_mut("properties") {
-        *slot = Value::Object(properties);
-    }
-    node.insert("required".into(), Value::Array(names));
-    node.insert("additionalProperties".into(), Value::Bool(false));
-    Ok(())
-}
-
-/// Convert a tool schema to the strict subset expected by constrained sampling.
-fn make_strict_json_schema(schema: &Value, check: Option<KeywordCheck>) -> std::result::Result<Value, String> {
-    const ROOT_ERROR: &str = "root schema must have type object";
-    let mut cloned = schema.clone();
-    if !cloned.is_object() {
-        return Err(ROOT_ERROR.into());
-    }
-    make_node_strict(&mut cloned, check)?;
-    if cloned.get("type").and_then(Value::as_str) != Some("object") {
-        return Err(ROOT_ERROR.into());
-    }
-    Ok(cloned)
-}
-
 fn json_schema_strict_mode(tool: &Tool) -> Option<StrictMode> {
     match &tool.constrained_sampling {
         Some(ConstrainedSampling::JsonSchema { strict }) => Some(*strict),
@@ -472,30 +317,6 @@ fn json_schema_strict_mode(tool: &Tool) -> Option<StrictMode> {
 
 fn is_preferred_strict(tool: &Tool) -> bool {
     json_schema_strict_mode(tool) == Some(StrictMode::Prefer)
-}
-
-/// Whether a JSON-schema tool is sent in strict mode (`resolveJsonSchemaStrictSampling`).
-fn resolve_json_schema_strict_sampling(tool: &Tool, supports_strict_mode: bool) -> Result<Option<bool>> {
-    let Some(mode) = json_schema_strict_mode(tool) else {
-        return Ok(None);
-    };
-    if supports_strict_mode {
-        return match make_strict_json_schema(&tool.parameters, Some(is_strict_unsupported_keyword)) {
-            Ok(_) => Ok(Some(true)),
-            Err(_) if mode != StrictMode::Require => Ok(None),
-            Err(reason) => Err(Error::msg(format!(
-                "Tool \"{}\" requires JSON-schema constrained sampling, but {reason}.",
-                tool.name
-            ))),
-        };
-    }
-    if mode == StrictMode::Require {
-        return Err(Error::msg(format!(
-            "Tool \"{}\" requires JSON-schema constrained sampling, but strict tools are unsupported.",
-            tool.name
-        )));
-    }
-    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -519,14 +340,14 @@ impl ToolConverter {
             let strict = if self.disable_preferred_strict_tools && is_preferred_strict(tool) {
                 None
             } else {
-                resolve_json_schema_strict_sampling(tool, self.supports_strict_tools)?
+                resolve_json_schema_strict_sampling(
+                    tool,
+                    self.supports_strict_tools,
+                    Some(is_strict_unsupported_keyword),
+                )?
             };
+            let parameters = get_json_schema_tool_parameters(tool, strict)?;
             let strict = strict == Some(true);
-            let parameters = if strict {
-                make_strict_json_schema(&tool.parameters, None).map_err(Error::msg)?
-            } else {
-                tool.parameters.clone()
-            };
             let non_null = |key: &str, default: Value| match parameters.get(key) {
                 Some(value) if !value.is_null() => value.clone(),
                 _ => default,
@@ -1765,6 +1586,7 @@ pub fn stream_simple(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::constrained_sampling::{UnsupportedStrictSchemaKeywordCheck, make_strict_json_schema};
     use crate::types::{TextContent, ThinkingContent, ToolCall};
     use pretty_assertions::assert_eq;
 
@@ -1822,8 +1644,8 @@ mod tests {
 
     #[test]
     fn strict_schema_rejections() {
-        let check = Some(is_strict_unsupported_keyword as KeywordCheck);
-        let reject = |schema: Value| make_strict_json_schema(&schema, check).unwrap_err();
+        let check = Some(is_strict_unsupported_keyword as UnsupportedStrictSchemaKeywordCheck);
+        let reject = |schema: Value| make_strict_json_schema(&schema, check).unwrap_err().0;
         assert_eq!(
             reject(json!({"type": "object", "properties": {"a": {"type": "integer", "minimum": 1}}})),
             "minimum: 1 is unsupported"
@@ -1868,33 +1690,32 @@ mod tests {
 
     #[test]
     fn strict_resolution_by_mode() {
+        let resolve = |tool: &Tool, supported: bool| {
+            resolve_json_schema_strict_sampling(tool, supported, Some(is_strict_unsupported_keyword))
+        };
         let params = json!({"type": "object", "properties": {"v": {"type": "string"}}});
         let unsupported = json!({"type": "object", "properties": {"v": {"type": "number", "minimum": 1}}});
         assert_eq!(
-            resolve_json_schema_strict_sampling(&tool("t", params.clone(), Some(StrictMode::Prefer)), true).unwrap(),
+            resolve(&tool("t", params.clone(), Some(StrictMode::Prefer)), true).unwrap(),
             Some(true)
         );
         assert_eq!(
-            resolve_json_schema_strict_sampling(&tool("t", unsupported.clone(), Some(StrictMode::Prefer)), true)
-                .unwrap(),
+            resolve(&tool("t", unsupported.clone(), Some(StrictMode::Prefer)), true).unwrap(),
             None
         );
         assert_eq!(
-            resolve_json_schema_strict_sampling(&tool("t", params.clone(), Some(StrictMode::Prefer)), false).unwrap(),
+            resolve(&tool("t", params.clone(), Some(StrictMode::Prefer)), false).unwrap(),
             None
         );
-        assert_eq!(
-            resolve_json_schema_strict_sampling(&tool("t", params.clone(), None), true).unwrap(),
-            None
-        );
-        let error = resolve_json_schema_strict_sampling(&tool("t", unsupported, Some(StrictMode::Require)), true)
+        assert_eq!(resolve(&tool("t", params.clone(), None), true).unwrap(), None);
+        let error = resolve(&tool("t", unsupported, Some(StrictMode::Require)), true)
             .unwrap_err()
             .to_string();
         assert_eq!(
             error,
             "Tool \"t\" requires JSON-schema constrained sampling, but minimum: 1 is unsupported."
         );
-        let error = resolve_json_schema_strict_sampling(&tool("t", params, Some(StrictMode::Require)), false)
+        let error = resolve(&tool("t", params, Some(StrictMode::Require)), false)
             .unwrap_err()
             .to_string();
         assert!(error.ends_with("but strict tools are unsupported."));

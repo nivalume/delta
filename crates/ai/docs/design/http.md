@@ -52,4 +52,6 @@
 - 否则补齐未结束的工具调用后发 `Done`。
 - 消费者已丢弃流：什么都不发。
 
-另有回调包装（`apply_on_payload`、`notify_response`、`observe_provider_event`）、`finalize_usage`（重算 total 和费用）、`require_auth`、`join_url`。
+另有回调包装（`apply_on_payload`、`notify_response`、`observe_provider_event`）、`finalize_usage`（重算 total 和费用）、`require_auth`、`join_url`、`short_hash`（上游 `utils/hash.ts` 的 `shortHash`，按 UTF-16 码元计算，输出与 TypeScript 逐位一致）。
+
+各 API 共用的约束采样逻辑（上游 `api/constrained-sampling.ts`：严格 JSON schema 转换、grammar 工具）在 `api::constrained_sampling`。`make_strict_json_schema` 和 `resolve_json_schema_strict_sampling` 与上游一样接受可选的关键字检查（`Option<fn(&str, &Value) -> bool>`），provider 用它拒绝自己的严格模式不支持的关键字，错误文本为 `<key>: <值的 JSON> is unsupported`；目前只有 Anthropic 传入检查。

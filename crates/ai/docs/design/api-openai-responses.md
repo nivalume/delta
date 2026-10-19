@@ -13,9 +13,9 @@
 
 - `packages/ai/src/api/openai-responses-shared.ts`：`convertResponsesMessages`、`convertResponsesTools`、`processResponsesStream`、`mapStopReason`。
 - `packages/ai/src/api/openai-responses.ts`：`getCompat`、`buildParams`、`createClient`、`stream`、`streamSimple`、服务等级计价。
-- `packages/ai/src/api/constrained-sampling.ts`：严格 JSON Schema 与语法（grammar）工具。只移植了本 API 用到的部分，放在共享模块内部。
+- `packages/ai/src/api/constrained-sampling.ts`：严格 JSON Schema 与语法（grammar）工具，在共享模块 `api::constrained_sampling` 中。
 - `packages/ai/src/api/openai-prompt-cache.ts`：`prompt_cache_key` 截断到 64 个码点。
-- `packages/ai/src/utils/hash.ts`：`shortHash`，与 TypeScript 逐位一致（按 UTF-16 码元、`Math.imul` 语义、36 进制输出）。
+- `packages/ai/src/utils/hash.ts`：`shortHash`，在 `api::common::short_hash`，与 TypeScript 逐位一致（按 UTF-16 码元、`Math.imul` 语义、36 进制输出）。
 - 测试参照：`test/openai-responses-*.test.ts`、`test/cache-retention.test.ts`（Responses 部分）、`test/xai-responses.test.ts`（请求部分），以及 pi-py 的 `tests/test_openai_responses.py`。
 
 ## 请求映射
@@ -173,7 +173,7 @@ SSE 层先模拟 OpenAI SDK：`data: [DONE]` 结束读取；无法解析为 JSON
 6. HTTP 错误的正文：上游打印 SDK 解析出的 `error` 对象 JSON，这里用核心 `Error::Status` 提取的消息（`error.message` 等字段）。
 7. `sanitizeSurrogates` 不需要：Rust 字符串不会含孤立代理项。
 8. `stream_simple` 缺少 API key 时上游同步抛错，这里返回以同样消息结束的错误流。
-9. 约束采样、`shortHash`、prompt cache key 截断目前作为共享模块的私有/公开辅助函数存在（核心里还没有对应模块）。
+9. 约束采样在 `api::constrained_sampling`，`shortHash` 在 `api::common`；`openai_responses_shared` 重新导出 `short_hash` 和 `create_grammar_tool_input_properties`。prompt cache key 截断仍是本模块的公开辅助函数。
 10. SSE 数据不是 JSON 时的错误消息格式为 `Could not parse message into JSON: <原因>: <数据>`（SDK 抛出的是 JSON 解析异常本身）。
 11. 用量字段接受浮点数并取整，负数按 0 处理。
 
@@ -186,7 +186,6 @@ SSE 层先模拟 OpenAI SDK：`data: [DONE]` 结束读取；无法解析为 JSON
 ## 需要的核心改动（未在本次实现）
 
 - `events.rs`：给 `MessageBuilder` 增加 `end_tool_call_with(index: usize, arguments: JsonObject, arguments_error: Option<String>)`（或替换已累积 JSON 的方法），让 `toolcall_end` 事件直接带上 API 给出的最终参数，消除差异 2。
-- 新增共享模块（例如 `crates/ai/src/constrained_sampling.rs` 和 `hash.rs`）：`openai-completions` 也需要严格 schema、语法工具和 `shortHash`，目前放在本模块里。
 
 ## 待确认的改进
 

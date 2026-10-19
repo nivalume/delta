@@ -23,7 +23,7 @@ API 专属选项取自 `options.api` 中的 `ApiOptions::BedrockConverseStream(B
 ## 上游源文件
 
 - `packages/ai/src/api/bedrock-converse-stream.ts`（主体，1416 行）。
-- `packages/ai/src/api/constrained-sampling.ts`（严格工具 schema 转换，本模块私有移植了用到的部分）。
+- `packages/ai/src/api/constrained-sampling.ts`（严格工具 schema 转换，在共享模块 `api::constrained_sampling` 中）。
 - `packages/ai/src/api/bedrock-converse-stream.lazy.ts`、`src/bedrock-provider.ts`：只负责懒加载 Node 专用模块，
   Rust 里由 feature 开关代替，没有对应代码。
 - 测试：`packages/ai/test/bedrock-*.test.ts`；Python 移植 `pi_ai/api/bedrock_converse_stream.py` 作为第二参考。
@@ -177,6 +177,5 @@ Claude 预算模型用 `adjust_max_tokens_for_thinking` 计算 `max_tokens`，�
 
 - 缓存 `SdkConfig`/`Client`：上游每次请求新建客户端（这里保持一致），凭证链（SSO、assume role、IMDS）每次都会重新解析；pi-py 按配置缓存客户端。
 - `Document` 键顺序不稳定可能影响 Bedrock 端的提示缓存命中（工具定义位于缓存前缀中）。可选方案：在签名前用保持顺序的 JSON 重写请求体，或等待 SDK 支持有序文档。
-- 将严格 schema 转换（`make_strict_json_schema` / `resolve_json_schema_strict_sampling`）移到共享模块，供 Anthropic、OpenAI 等 API 复用。
 - 支持 `options.env` 中的代理设置（需要直接依赖 `aws-smithy-http-client` 构造 HTTP 客户端）。
 - 把更多 `ConverseStream` 成员（`guardrailConfig`、`performanceConfig`、`serviceTier` 等）纳入 `on_payload` 的 JSON→SDK 转换。

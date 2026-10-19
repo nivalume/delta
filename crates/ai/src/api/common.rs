@@ -133,6 +133,37 @@ pub fn join_url(base: &str, path: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
 }
 
+/// Fast deterministic hash used to shorten long ids (upstream `utils/hash.ts` `shortHash`).
+/// Bit-identical to the TypeScript version: it hashes UTF-16 code units with `Math.imul`
+/// arithmetic and prints both halves in base 36.
+pub fn short_hash(text: &str) -> String {
+    let mut h1: u32 = 0xdead_beef;
+    let mut h2: u32 = 0x41c6_ce57;
+    for unit in text.encode_utf16() {
+        let unit = u32::from(unit);
+        h1 = (h1 ^ unit).wrapping_mul(2_654_435_761);
+        h2 = (h2 ^ unit).wrapping_mul(1_597_334_677);
+    }
+    h1 = (h1 ^ (h1 >> 16)).wrapping_mul(2_246_822_507) ^ (h2 ^ (h2 >> 13)).wrapping_mul(3_266_489_909);
+    h2 = (h2 ^ (h2 >> 16)).wrapping_mul(2_246_822_507) ^ (h1 ^ (h1 >> 13)).wrapping_mul(3_266_489_909);
+    format!("{}{}", to_base36(h2), to_base36(h1))
+}
+
+/// `Number.prototype.toString(36)` of an unsigned 32-bit value.
+fn to_base36(mut value: u32) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut digits = Vec::new();
+    loop {
+        digits.push(DIGITS[(value % 36) as usize]);
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    digits.reverse();
+    String::from_utf8(digits).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +172,24 @@ mod tests {
     fn joins_urls() {
         assert_eq!(join_url("https://a/v1/", "/chat"), "https://a/v1/chat");
         assert_eq!(join_url("https://a/v1", "chat"), "https://a/v1/chat");
+    }
+
+    #[test]
+    fn short_hash_matches_upstream() {
+        for (text, expected) in [
+            ("", "k4n83c7h0j2b"),
+            ("a", "m8735310ae7sx"),
+            ("call_abc|fc_123", "jp01dsxufnom"),
+            ("toolu_01ABCDEFGHIJKLMNOPQRSTUVWX", "gdi2ks8d0w8m"),
+            ("emoji \u{1F648} ok", "yd82u41hv4qe6"),
+            ("h\u{e9}llo\u{1F600}", "1olj6nu1frhbfw"),
+        ] {
+            assert_eq!(short_hash(text), expected, "{text}");
+        }
+        assert_eq!(short_hash(&format!("call_abc|fc_{}", "x".repeat(60))), "sbtd1t3g86n");
+        assert_eq!(short_hash(&"x".repeat(500)), "130aesn1aldl4j");
+        assert_eq!(to_base36(0), "0");
+        assert_eq!(to_base36(35), "z");
+        assert_eq!(to_base36(36), "10");
     }
 }

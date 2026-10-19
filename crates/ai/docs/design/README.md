@@ -11,7 +11,7 @@
 | [models-and-providers.md](models-and-providers.md) | `models`、`provider` | `Models` 集合、`Provider` trait、`create_provider`、动态模型刷新 |
 | [auth.md](auth.md) | `auth` | 凭据、凭据存储、API key 与 OAuth、解析顺序与加锁刷新 |
 | [transcript.md](transcript.md) | `transcript`、`transform`、`estimate`、`simple_options` | system 消息重放、跨 provider 切换、token 估算、思考预算 |
-| [http.md](http.md) | `http`、`json`、`api::common` | SSE 解码、重试、错误体、流式 JSON 解析、API 任务框架 |
+| [http.md](http.md) | `http`、`json`、`api::common`、`api::constrained_sampling` | SSE 解码、重试、错误体、流式 JSON 解析、API 任务框架、共享的约束采样 |
 | [catalog-and-faux.md](catalog-and-faux.md) | `providers::catalog`、`providers::faux` | 内置模型目录、测试用 faux provider |
 | `api-*.md` | `api::*` | 各 wire 协议的实现，每个 API 一篇 |
 

@@ -8,7 +8,7 @@
 
 - `packages/ai/src/api/google-shared.ts`：消息/工具转换、思考配置、思考签名、结束原因、重试。
 - `packages/ai/src/api/google-generative-ai.ts`：`stream`、`streamSimple`、`buildParams`、`getGoogleBudget`。
-- `packages/ai/src/api/constrained-sampling.ts`：严格 JSON Schema（`google-shared` 依赖它，Rust 核心里还没有，见“需要的核心改动”）。
+- `packages/ai/src/api/constrained-sampling.ts`：严格 JSON Schema（`google-shared` 依赖它，Rust 里是共享模块 `api::constrained_sampling`）。
 - 测试：`test/google-raw-stop-reason.test.ts`、`google-shared-convert-tools.test.ts`、`google-shared-gemini3-unsigned-tool-call.test.ts`、`google-shared-image-tool-result-routing.test.ts`、`google-shared-retry.test.ts`、`google-shared-signed-empty-blocks.test.ts`、`google-thinking-level-map.test.ts`、`google-thinking-signature.test.ts`；另参考 pi-py 的 `test_google_shared.py`、`test_google_streams.py`。
 
 ## 模块划分
@@ -135,7 +135,7 @@ Vertex 模块要做的只有：把 `GenerateRequest` 转成 proto 请求，把 p
 - 用量只在含 `promptTokenCount` 时更新，减法饱和（provider-references 的要求；对正常流结果不变）。
 - 跳过 `[DONE]`、宽松解析 part（结构体加可选字段，而不是标签枚举）、未知 part 类型忽略（provider-references 的要求）。
 - 工具调用 id 计数器是进程级 `AtomicU64`，上游是模块级计数器。
-- 严格 JSON Schema（上游 `constrained-sampling.ts`）暂时实现在 `google_shared` 里（核心没有），见下。
+- 严格 JSON Schema（上游 `constrained-sampling.ts`）在共享模块 `api::constrained_sampling` 里。`google_shared` 保留 `make_strict_json_schema(&schema)`、`resolve_json_schema_strict_sampling(tool, supports)` 两个包装函数（不带关键字检查），并重新导出 `get_json_schema_tool_parameters` 和 `UnsupportedStrictSchema`，原有调用不用改。
 
 ## 未移植
 
@@ -158,7 +158,6 @@ Vertex 模块要做的只有：把 `GenerateRequest` 转成 proto 请求，把 p
 
 ## 需要的核心改动（未做，留给维护者）
 
-- 把 `make_strict_json_schema`、`resolve_json_schema_strict_sampling`、`get_json_schema_tool_parameters`（上游 `constrained-sampling.ts`）移到核心的共享模块（如 `crates/ai/src/constrained_sampling.rs`），OpenAI、Anthropic、Bedrock 也要用；目前在 `google_shared` 里。
 - 可选：`http` 暴露一个通用的 `retry(options, f)`（或公开 `backoff`），`retry_google_request` 就不必复制退避计算。
 - 可选：`options::GoogleThinkingLevel` 加 `as_str()` 返回线上枚举名；目前用 `google_shared::google_thinking_level_name`。
 

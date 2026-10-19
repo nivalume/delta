@@ -995,13 +995,6 @@ fn mid_conversation_system_messages_and_tool_additions() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn short_hash_matches_upstream() {
-    assert_eq!(short_hash(""), "k4n83c7h0j2b");
-    assert_eq!(short_hash(&format!("call_abc|fc_{}", "x".repeat(60))), "sbtd1t3g86n");
-    assert_eq!(short_hash("héllo😀"), "1olj6nu1frhbfw");
-}
-
-#[test]
 fn usage_and_stop_reasons() {
     let model = openai();
     let usage = parse_chunk_usage(
