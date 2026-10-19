@@ -13,7 +13,8 @@
 //! - [`oauth_callback_host`]: `PI_OAUTH_CALLBACK_HOST` or `127.0.0.1`.
 //!
 //! Flows: [`anthropic`] (Claude Pro/Max), [`openrouter`] (PKCE that mints an API key),
-//! [`xai`], [`kimi_coding`] and [`meta`] (device code). Each flow is a struct implementing [`crate::auth::OAuthAuth`];
+//! [`xai`], [`kimi_coding`] and [`meta`] (device code), and [`github_copilot`] (GitHub device code
+//! plus the Copilot token exchange). Each flow is a struct implementing [`crate::auth::OAuthAuth`];
 //! `Default` uses upstream's endpoints, and the endpoint fields are public so tests (and
 //! proxies) can point them elsewhere.
 //!
@@ -24,6 +25,7 @@
 pub mod anthropic;
 pub mod callback_server;
 pub mod device_code;
+pub mod github_copilot;
 pub mod kimi_coding;
 pub mod meta;
 pub mod openrouter;
@@ -40,6 +42,7 @@ pub use device_code::{
     CANCEL_MESSAGE, OAuthDeviceCodePollOptions, OAuthDeviceCodePollResult, SLOW_DOWN_TIMEOUT_MESSAGE, TIMEOUT_MESSAGE,
     abortable_sleep, poll_oauth_device_code_flow,
 };
+pub use github_copilot::GitHubCopilotOAuth;
 pub use kimi_coding::KimiCodingOAuth;
 pub use meta::MetaOAuth;
 pub use openrouter::OpenRouterOAuth;

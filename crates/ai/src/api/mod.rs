@@ -9,6 +9,7 @@ pub mod azure_openai_responses;
 #[cfg(feature = "bedrock")]
 pub mod bedrock_converse_stream;
 pub mod cloudflare;
+pub mod github_copilot_headers;
 pub mod google_generative_ai;
 pub mod google_shared;
 #[cfg(feature = "vertex")]

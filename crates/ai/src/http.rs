@@ -185,7 +185,7 @@ pub fn retry_after(headers: &HeaderMap) -> Option<Duration> {
 }
 
 /// Parse an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) to Unix seconds.
-fn httpdate_to_unix(value: &str) -> Option<f64> {
+pub(crate) fn httpdate_to_unix(value: &str) -> Option<f64> {
     let parts: Vec<&str> = value.split_whitespace().collect();
     if parts.len() != 6 || parts[5] != "GMT" {
         return None;

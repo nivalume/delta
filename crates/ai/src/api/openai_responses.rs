@@ -4,11 +4,12 @@
 //! [`super::openai_responses_shared`].
 //!
 //! Not ported: Sign in with ChatGPT specifics (request fields it rejects, the usage-limit
-//! hint), GitHub Copilot dynamic headers, and the OpenAI Codex (ChatGPT subscription) API.
+//! hint) and the OpenAI Codex (ChatGPT subscription) API.
 
 use serde_json::{Map, Value, json};
 
 use crate::api::common::{self, apply_on_payload, join_url, notify_response, require_auth, spawn_stream};
+use crate::api::github_copilot_headers::copilot_dynamic_headers;
 use crate::api::openai_responses_shared::{
     ConvertResponsesMessagesOptions, ConvertResponsesToolsOptions, GrammarToolInputProperties, ResponsesStreamOptions,
     clamp_openai_prompt_cache_key, convert_responses_messages, convert_responses_tools,
@@ -25,7 +26,7 @@ use crate::options::{
 use crate::provider::ProviderStreams;
 use crate::simple_options::{build_base_options, resolve_sampling_params};
 use crate::transcript::{get_declared_tools, resolve_transcript, resolve_transcript_tools};
-use crate::types::{ProviderHeaders, StopReason, TranscriptContext, Usage};
+use crate::types::{Message, ProviderHeaders, StopReason, TranscriptContext, Usage};
 
 /// Providers whose tool call ids are already in the Responses `call_id|item_id` shape.
 const OPENAI_TOOL_CALL_PROVIDERS: [&str; 3] = ["openai", "openai-codex", "opencode"];
@@ -351,6 +352,7 @@ fn build_params(
 
 fn build_request_headers(
     model: &Model,
+    messages: &[Message],
     options: &StreamOptions,
     api_key: &str,
     session_id: Option<&str>,
@@ -367,7 +369,7 @@ fn build_request_headers(
     for (name, value) in model.headers.iter().flatten() {
         defaults.insert(name.clone(), Some(value.clone()));
     }
-    // Not ported: GitHub Copilot dynamic headers.
+    defaults.extend(copilot_dynamic_headers(&model.provider, messages).into_iter().flatten());
     if let Some(session_id) = session_id {
         let mut set = |name: &str| {
             defaults.insert(name.to_owned(), Some(session_id.to_owned()));
@@ -433,7 +435,7 @@ async fn run(
         &get_declared_tools(context.messages()),
         compat.supports_openai_grammar_tools,
     )?;
-    let headers = build_request_headers(model, options, &api_key, cache_session_id)?;
+    let headers = build_request_headers(model, context.messages(), options, &api_key, cache_session_id)?;
     let params = build_params(
         model,
         context,

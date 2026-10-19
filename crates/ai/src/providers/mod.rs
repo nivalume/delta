@@ -5,3 +5,4 @@ pub mod builtin;
 pub mod catalog;
 pub mod cloudflare;
 pub mod faux;
+pub mod github_copilot;

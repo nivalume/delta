@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::api::common::{self, spawn_stream};
 use crate::api::constrained_sampling::{get_json_schema_tool_parameters, resolve_json_schema_strict_sampling};
+use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input};
 use crate::compat::{AnthropicAllowedFallbackModel, ModelCompat, SessionAffinityFormat};
 use crate::error::{Error, Result};
 use crate::events::{AssistantMessageEventStream, MessageBuilder};
@@ -943,7 +944,8 @@ enum AuthMode {
     ApiKey,
     /// Claude Code OAuth token: `Authorization: Bearer`, Claude Code identity.
     OAuth,
-    /// GitHub Copilot: `Authorization: Bearer`.
+    /// GitHub Copilot: `Authorization: Bearer` and the dynamic headers of
+    /// [`crate::api::github_copilot_headers`].
     Copilot,
 }
 
@@ -958,9 +960,11 @@ fn auth_mode(model: &Model, api_key: Option<&str>) -> AuthMode {
 }
 
 /// Header sources in the order the Anthropic SDK applies them: SDK defaults, auth, the
-/// client's default headers (pi's User-Agent, then model and request headers).
+/// client's default headers (pi's User-Agent, then model headers, GitHub Copilot's dynamic
+/// headers for `messages`, and request headers).
 fn base_header_sources(
     model: &Model,
+    messages: &[Message],
     compat: &Compat,
     mode: AuthMode,
     api_key: Option<&str>,
@@ -1000,7 +1004,6 @@ fn base_header_sources(
                 sources.push(http::headers_of([(name, session_id)]));
             }
         }
-        // Not ported: Copilot dynamic headers (`X-Initiator`, `Openai-Intent`, vision flag).
         AuthMode::Copilot => {}
     }
     if let Some(headers) = &model.headers {
@@ -1010,6 +1013,13 @@ fn base_header_sources(
                 .map(|(name, value)| (name.clone(), Some(value.clone())))
                 .collect(),
         );
+    }
+    // Copilot's dynamic headers come after the model's headers and before the request's.
+    if mode == AuthMode::Copilot {
+        sources.push(build_copilot_dynamic_headers(
+            messages,
+            has_copilot_vision_input(messages),
+        ));
     }
     if let Some(headers) = &options.headers {
         sources.push(headers.clone());
@@ -1133,7 +1143,7 @@ async fn run(
         .session_id
         .as_deref()
         .filter(|_| retention != CacheRetention::None);
-    let header_sources = base_header_sources(model, &compat, mode, api_key, session_id, options);
+    let header_sources = base_header_sources(model, context.messages(), &compat, mode, api_key, session_id, options);
     let base_url = if model.base_url.is_empty() {
         DEFAULT_BASE_URL
     } else {

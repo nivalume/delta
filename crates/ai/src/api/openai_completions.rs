@@ -27,6 +27,7 @@ use crate::api::constrained_sampling::{
     get_grammar_tool_input, get_json_schema_tool_parameters, js_truthy, resolve_grammar_constrained_sampling,
     resolve_json_schema_strict_sampling,
 };
+use crate::api::github_copilot_headers::copilot_dynamic_headers;
 use crate::compat::{
     ChatTemplateKwargValue, MaxTokensField, ModelCompat, OpenAICompletionsCompat, SessionAffinityFormat,
     ThinkingFormat, ThinkingTokenBudgetField, ThinkingVariable,
@@ -383,10 +384,11 @@ pub fn clamp_openai_prompt_cache_key(key: &str) -> String {
     key.chars().take(OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH).collect()
 }
 
-/// Request headers: JSON and bearer defaults, the user agent, model headers, session
-/// affinity headers, then `options.headers` (where `None` deletes a default).
+/// Request headers: JSON and bearer defaults, the user agent, model headers, GitHub Copilot's
+/// dynamic headers, session affinity headers, then `options.headers` (where `None` deletes a default).
 fn request_headers(
     model: &Model,
+    messages: &[Message],
     options: &StreamOptions,
     api_key: &str,
     session_id: Option<&str>,
@@ -401,7 +403,7 @@ fn request_headers(
     for (name, value) in model.headers.iter().flatten() {
         defaults.insert(name.clone(), Some(value.clone()));
     }
-    // Not ported: GitHub Copilot dynamic headers (`x-initiator`, `openai-intent`, vision).
+    defaults.extend(copilot_dynamic_headers(&model.provider, messages).into_iter().flatten());
     if let Some(session_id) = session_id.filter(|_| compat.send_session_affinity_headers) {
         let mut set = |name: &str| {
             defaults.insert(name.to_owned(), Some(session_id.to_owned()));
@@ -439,7 +441,7 @@ async fn run(
         .session_id
         .as_deref()
         .filter(|_| cache_retention != CacheRetention::None);
-    let headers = request_headers(model, options, &api_key, session_id, compat)?;
+    let headers = request_headers(model, context.messages(), options, &api_key, session_id, compat)?;
     let params = build_params_with(model, context, options, &api, compat, cache_retention, &state.grammar)?;
     let params = apply_on_payload(options, model, params).await?;
     let body = Bytes::from(serde_json::to_vec(&params)?);

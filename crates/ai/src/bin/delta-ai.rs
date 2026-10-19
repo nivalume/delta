@@ -287,6 +287,7 @@ mod tests {
         assert!(ids.contains(&"anthropic".to_owned()));
         assert!(ids.contains(&"openrouter".to_owned()));
         assert!(ids.contains(&"xai".to_owned()));
+        assert!(ids.contains(&"github-copilot".to_owned()));
         assert!(!ids.contains(&"groq".to_owned()));
     }
 }
