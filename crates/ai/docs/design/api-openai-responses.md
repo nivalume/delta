@@ -26,8 +26,9 @@ The client is hand-written on `reqwest` + `delta_ai::http` and does not depend o
 - Header merge order (later entries override earlier ones, names are case-insensitive, `None` deletes):
   1. API defaults: `Authorization: Bearer <api_key>` (`unused` when there is no key but there is an `authorization` / `cf-aig-authorization` header), `Accept`, `Content-Type: application/json`, `User-Agent: delta/...`;
   2. `model.headers`;
-  3. Session affinity headers (see below);
-  4. `options.headers`.
+  3. For `provider == "github-copilot"`, Copilot's dynamic headers: `X-Initiator`, `Openai-Intent: conversation-edits`, and `Copilot-Vision-Request: true` when the transcript has an image (see [github-copilot.md](github-copilot.md));
+  4. Session affinity headers (see below);
+  5. `options.headers`.
 - With no API key and no `authorization` / `cf-aig-authorization` header, the error is `No API key for provider: <provider>`.
 - Session affinity: sent only when `session_id` is present and cache retention is not `none`. The format comes from `compat.sessionAffinityFormat`. When it is not set, `openrouter` is used if the provider is `openrouter` or the baseUrl contains `openrouter.ai`; otherwise `openai`.
   - `openai`: `session_id` and `x-client-request-id`;
@@ -180,7 +181,6 @@ At stream end: if no terminal event was received, error `OpenAI Responses stream
 ## Not ported
 
 - Sign in with ChatGPT: for requests with `provider = openai`, `baseUrl = https://api.openai.com/v1` and a key that does not start with `sk-`, upstream omits `prompt_cache_retention`, `prompt_cache_options`, `max_output_tokens` and `temperature`, does not send `configuration_update`, and appends a ChatGPT usage link after a `subscription_sharing_usage_limit_exceeded` error. Not ported because it is out of scope for this work; the code has a `// Not ported` comment.
-- GitHub Copilot dynamic request headers (`X-Initiator`, `Copilot-Vision-Request`).
 - The OpenAI Codex (ChatGPT subscription) API `openai-codex-responses`, WebSocket transport, telemetry, the `fetch` option (replaced by `StreamOptions::http_client`).
 
 ## Core changes needed

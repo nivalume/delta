@@ -92,6 +92,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 | Hugging Face | `huggingface` | `openai-completions` | |
 | Moonshot AI (Global, China) | `moonshotai`, `moonshotai-cn` | `openai-completions` | |
 | Amazon Bedrock | `amazon-bedrock` | `bedrock-converse-stream` | `bedrock` |
+| GitHub Copilot (OAuth, see [OAuth Providers](#oauth-providers)) | `github-copilot` | `anthropic-messages`, `openai-completions`, `openai-responses` | |
 | OpenCode Zen | `opencode` | `anthropic-messages`, `openai-completions`, `openai-responses`, `google-generative-ai` | |
 | OpenCode Go | `opencode-go` | same as OpenCode Zen | |
 | Fireworks | `fireworks` | `openai-completions`, `anthropic-messages` | |
@@ -102,7 +103,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 
 Any OpenAI-compatible API (Ollama, vLLM, LM Studio, and so on) works through [`create_provider()`](#create_provider).
 
-Not built in yet: OpenAI Codex, Radius, TypeSafe and GitHub Copilot. Their catalogs ship with the crate, but their APIs or auth flows are not ported.
+Not built in yet: OpenAI Codex, Radius and TypeSafe. Their catalogs ship with the crate, but their APIs or auth flows are not ported.
 
 ## Installation
 
@@ -241,7 +242,7 @@ Snippets in the rest of this README assume a `models` collection set up like thi
 
 A **provider** is the runtime unit: it owns its model catalog, its auth (API key resolution, OAuth refresh) and its request behavior. It implements the `Provider` trait. A `Models` collection holds providers and routes every request to the provider that owns the model. `Models` is cheap to clone; clones share state.
 
-Providers share **API implementations** (the wire protocols, `ProviderStreams`): Anthropic models use `anthropic-messages`, OpenAI uses `openai-responses`, while Groq, Cerebras, OpenRouter and most others share `openai-completions`. Mixed-API providers (OpenRouter, OpenCode Zen, Fireworks, Azure, Cloudflare AI Gateway) dispatch per model on `model.api`.
+Providers share **API implementations** (the wire protocols, `ProviderStreams`): Anthropic models use `anthropic-messages`, OpenAI uses `openai-responses`, while Groq, Cerebras, OpenRouter and most others share `openai-completions`. Mixed-API providers (GitHub Copilot, OpenRouter, OpenCode Zen, Fireworks, Azure, Cloudflare AI Gateway) dispatch per model on `model.api`.
 
 ### Provider Factories
 
@@ -526,6 +527,7 @@ Built-in providers resolve these environment variables:
 | Cerebras | `CEREBRAS_API_KEY` |
 | Cloudflare AI Gateway | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
 | Cloudflare Workers AI | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` |
+| GitHub Copilot | `COPILOT_GITHUB_TOKEN` |
 | xAI | `XAI_API_KEY` |
 | Fireworks | `FIREWORKS_API_KEY` |
 | Together AI | `TOGETHER_API_KEY` |
@@ -2045,12 +2047,13 @@ Several providers support OAuth authentication instead of static API keys:
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenRouter** (OAuth PKCE that mints a user-controlled API key)
 - **xAI** (SuperGrok or X Premium subscription, device-code login)
+- **GitHub Copilot** (Copilot subscription, device-code login, GitHub Enterprise supported)
 - **Kimi For Coding** (Kimi Code subscription, device-code login)
 - **Meta** (Muse subscription, device-code login that mints a Model API key)
 
-Upstream also offers OAuth for OpenAI (Sign in with ChatGPT), OpenAI Codex, GitHub Copilot and Radius. Those flows are being ported; until then the built-in providers among them authenticate with API keys.
+Upstream also offers OAuth for OpenAI (Sign in with ChatGPT), OpenAI Codex and Radius. Those flows are being ported; until then the built-in providers among them authenticate with API keys.
 
-Each of these providers carries an `OAuthAuth` in `provider.auth().oauth` with three operations: `login(interaction, options)` uses the provider-neutral `AuthInteraction::prompt()`/`notify()` protocol and returns a credential, `refresh(credential)` refreshes expiring credentials, and `to_auth(credential)` derives request auth. Login is cancelled through `AuthInteraction::cancel()`. Refresh is automatic: `models.get_auth(provider_id, ..)` and request paths refresh expired tokens inside `CredentialStore::modify`, so concurrent requests cannot double-refresh. OpenRouter's flow returns a permanent API key, so its refresh is a no-op. An Anthropic OAuth access token is used as the API key; the `anthropic-messages` API recognizes it and sends it as a bearer token with Claude Code's identity and beta headers. A Kimi Code access token is sent as an `Authorization: Bearer` header. Meta's login exchanges its identity token for a Model API key that lives about a day; refresh mints a new key from the stored identity token.
+Each of these providers carries an `OAuthAuth` in `provider.auth().oauth` with three operations: `login(interaction, options)` uses the provider-neutral `AuthInteraction::prompt()`/`notify()` protocol and returns a credential, `refresh(credential)` refreshes expiring credentials, and `to_auth(credential)` derives request auth (GitHub Copilot's per-account base URL comes from here). Login is cancelled through `AuthInteraction::cancel()`. Refresh is automatic: `models.get_auth(provider_id, ..)` and request paths refresh expired tokens inside `CredentialStore::modify`, so concurrent requests cannot double-refresh. OpenRouter's flow returns a permanent API key, so its refresh is a no-op. An Anthropic OAuth access token is used as the API key; the `anthropic-messages` API recognizes it and sends it as a bearer token with Claude Code's identity and beta headers. A Kimi Code access token is sent as an `Authorization: Bearer` header. Meta's login exchanges its identity token for a Model API key that lives about a day; refresh mints a new key from the stored identity token.
 
 ```rust,no_run
 # #[tokio::main(flavor = "current_thread")]
@@ -2208,7 +2211,7 @@ Credentials are saved to `auth.json` in the current directory, in the same JSON 
 
 ### Programmatic OAuth
 
-Use the provider-owned `OAuthAuth` through `Models::login`, as above; it composes with `CredentialStore` and gets locked automatic refresh through `Models`. The flows are also public in `delta_ai::oauth` (`AnthropicOAuth`, `OpenRouterOAuth`, `XaiOAuth`, `KimiCodingOAuth`, `MetaOAuth`), with their endpoints as public fields. To add OAuth to a custom provider, implement `OAuthAuth` and attach it with `ProviderAuth::with_oauth`. The building blocks of the built-in flows are public too:
+Use the provider-owned `OAuthAuth` through `Models::login`, as above; it composes with `CredentialStore` and gets locked automatic refresh through `Models`. The flows are also public in `delta_ai::oauth` (`AnthropicOAuth`, `OpenRouterOAuth`, `XaiOAuth`, `KimiCodingOAuth`, `MetaOAuth`, `GitHubCopilotOAuth`), with their endpoints as public fields (`GitHubCopilotOAuth` derives its URLs from the enterprise domain and the Copilot token and offers `rewrite_url` instead). To add OAuth to a custom provider, implement `OAuthAuth` and attach it with `ProviderAuth::with_oauth`. The building blocks of the built-in flows are public too:
 
 - `generate_pkce()`: PKCE verifier and S256 challenge;
 - `start_oauth_callback_server(options)` and `wait_for_callback_or_manual_input(..)`: a loopback redirect server raced against a pasted code or redirect URL;
@@ -2220,7 +2223,9 @@ Provider notes:
 
 **Azure OpenAI (Responses)**: Uses the Responses API, plus Chat Completions for the catalog's one `openai-completions` model. Set `AZURE_OPENAI_API_KEY` and either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`. `AZURE_OPENAI_BASE_URL` accepts `https://<resource>.openai.azure.com` and `https://<resource>.cognitiveservices.azure.com`; root endpoints are normalized to `.../openai/v1`. `AZURE_OPENAI_API_VERSION` (default `v1`) overrides the API version. Deployment names default to the model ids; override them with `AzureOpenAIResponsesOptions::azure_deployment_name` or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`, which holds comma-separated `model-id=deployment` pairs (for example `gpt-4o-mini=my-deployment,gpt-4o=prod`). Legacy deployment-based URLs are not supported.
 
-OpenAI Codex and GitHub Copilot are not ported.
+**GitHub Copilot**: Log in with `delta-ai login github-copilot` (or `Models::login`). Leave the GitHub Enterprise prompt blank for github.com, or enter the enterprise domain (`company.ghe.com`). Login enables models whose account policy is still unconfigured, and the stored credential lists the models the account may use; `models.get_available(Some("github-copilot"))` returns only those. Requests go to the account's own Copilot API host, taken from the Copilot token. Each request carries Copilot's `X-Initiator`, `Openai-Intent` and, for images, `Copilot-Vision-Request` headers. If you get "The requested model is not supported" error, enable the model manually in VS Code: open Copilot Chat, click the model selector, select the model (warning icon), and click "Enable".
+
+OpenAI Codex is not ported.
 
 ## Migrating from the Old Global API
 

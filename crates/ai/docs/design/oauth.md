@@ -5,10 +5,10 @@
 `delta_ai::oauth` holds the OAuth login flows of the built-in providers and the helpers they share. The framework (the `OAuthAuth` trait, `AuthInteraction`, `Models::login`, locked refresh) lives in `auth` and is described in [auth.md](auth.md). This module adds:
 
 - shared helpers: PKCE, the loopback callback server, the race between the callback and a pasted code, device-code polling, the browser pages;
-- five flows: Anthropic (Claude Pro/Max), OpenRouter (PKCE that mints an API key), and the device-code flows of xAI, Kimi Code and Meta;
+- six flows: Anthropic (Claude Pro/Max), OpenRouter (PKCE that mints an API key), the device-code flows of xAI, Kimi Code and Meta, and GitHub Copilot (device code plus a Copilot token; described in [github-copilot.md](github-copilot.md));
 - the `delta-ai` login CLI (`src/bin/delta-ai.rs`, feature `cli`).
 
-The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Codex, OpenAI ChatGPT, GitHub Copilot, Radius) can be ported one-to-one.
+The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Codex, OpenAI ChatGPT, Radius) can be ported one-to-one.
 
 ## Upstream source files
 
@@ -32,6 +32,7 @@ The helpers keep upstream's names and shapes, so the remaining flows (OpenAI Cod
 | `auth/oauth/xai.ts` | `oauth::xai` (`XaiOAuth`) |
 | `auth/oauth/kimi-coding.ts` | `oauth::kimi_coding` (`KimiCodingOAuth`) |
 | `auth/oauth/meta.ts` | `oauth::meta` (`MetaOAuth`) |
+| `auth/oauth/github-copilot.ts` | `oauth::github_copilot` (`GitHubCopilotOAuth`), see [github-copilot.md](github-copilot.md) |
 | `auth/oauth/load.ts`, `lazyOAuth` | Not needed: the flows are plain structs compiled into the crate |
 
 The helpers are re-exported from `delta_ai::oauth`.
@@ -172,6 +173,10 @@ Each flow is a struct implementing `OAuthAuth`. `Default` uses upstream's endpoi
 - Refresh: the mint request with the stored identity token.
 - `to_auth`: `api_key = access`. The `openai-responses` request does not change otherwise.
 
+### GitHub Copilot (`GitHubCopilotOAuth`)
+
+Name `GitHub Copilot`, subscription, no login label. Login asks a `Text` prompt for a GitHub Enterprise URL or domain (blank for github.com), runs the GitHub device flow with `poll_oauth_device_code_flow` (`wait_before_first_poll`), exchanges the GitHub token for a Copilot token, reads the account's model catalog and enables `unconfigured` model policies. Refresh repeats the token exchange and the catalog read. `to_auth` gives the Copilot token as `api_key` and the credential's own API `base_url`. Endpoints are derived from the enterprise domain and the token, so the struct has no endpoint fields; tests set `rewrite_url` instead. Details: [github-copilot.md](github-copilot.md).
+
 ### Provider wiring
 
 | Provider | Upstream | Rust |
@@ -181,6 +186,7 @@ Each flow is a struct implementing `OAuthAuth`. `Default` uses upstream's endpoi
 | `xai` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(xai) }` | `builtin_oauth("xai")` |
 | `kimi-coding` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(kimiCoding) }` | `builtin_oauth("kimi-coding")` |
 | `meta` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(meta) }` | `builtin_oauth("meta")` |
+| `github-copilot` | `auth: { apiKey: envApiKeyAuth(..), oauth: lazyOAuth(githubCopilot) }` | `github_copilot_provider()`: `ProviderAuth::api_key(..).with_oauth(GitHubCopilotOAuth::default())` |
 
 `builtin_oauth(id)` adds the OAuth method to a table-driven provider. Later flows add their entries there.
 
@@ -214,7 +220,7 @@ Each flow is a struct implementing `OAuthAuth`. `Default` uses upstream's endpoi
 
 ## Not ported
 
-- The other flows: OpenAI Codex, OpenAI ChatGPT, GitHub Copilot, Radius. They are ported separately on top of these helpers.
+- The other flows: OpenAI Codex, OpenAI ChatGPT, Radius. They are ported separately on top of these helpers.
 - `src/oauth.ts` (type-only compatibility exports for coding-agent extensions).
 - `registerBundledOAuthFlowLoaders` (Bun standalone binaries).
 

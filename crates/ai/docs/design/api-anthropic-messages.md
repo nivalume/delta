@@ -32,7 +32,7 @@ The ported test cases come from upstream `test/anthropic-*.test.ts`, `cache-rete
 - `POST {baseUrl}/v1/messages?beta=true`. `?beta=true` is a query parameter built into the SDK's `beta.messages` path; requests from both pi and pi-py carry it. When `baseUrl` is an empty string, `https://api.anthropic.com` is used (same as the JS SDK's `baseURL || default`).
 - The authentication check matches upstream `assertRequestAuth`: there must be a non-empty `api_key`, or a non-blank `authorization` / `x-api-key` / `cf-aig-authorization` in `options.headers`. Otherwise the request fails with `No API key for provider: <provider>` (the stream contains a single `error` event).
 - Three authentication modes:
-  - `provider == "github-copilot"`: `Authorization: Bearer <key>`, no OAuth rewriting.
+  - `provider == "github-copilot"`: `Authorization: Bearer <key>`, no OAuth rewriting, plus Copilot's dynamic headers (see [github-copilot.md](github-copilot.md)).
   - `api_key` contains `sk-ant-oat`: OAuth (Claude Code) mode. `Authorization: Bearer <token>`, plus `user-agent: claude-cli/2.1.280` and `x-app: cli`. The betas get `claude-code-20250219` and `oauth-2025-04-20`. The system prompt is prefixed with `You are Claude Code, Anthropic's official CLI for Claude.`. Tool names are rewritten to Claude Code's canonical casing, and tool names in the response are mapped back to the caller's names.
   - Otherwise: send `X-Api-Key` when there is a key. Without a key, the request headers carry the authentication (for example `Authorization: Bearer <ANTHROPIC_AUTH_TOKEN>`, or Cloudflare's `cf-aig-authorization`).
 
@@ -42,7 +42,7 @@ The merge order matches the SDK. Later entries override earlier ones, names are 
 
 1. SDK defaults: `Accept: application/json`, `anthropic-version: 2023-06-01`
 2. Authentication header (`X-Api-Key` or `Authorization`)
-3. Client default headers (upstream `mergeClientHeaders`): `User-Agent: delta/...`, `accept`, `anthropic-dangerous-direct-browser-access: true`; `user-agent`/`x-app` in OAuth mode; session affinity headers in API key mode; `model.headers`; `options.headers`
+3. Client default headers (upstream `mergeClientHeaders`): `User-Agent: delta/...`, `accept`, `anthropic-dangerous-direct-browser-access: true`; `user-agent`/`x-app` in OAuth mode; session affinity headers in API key mode; `model.headers`; for `github-copilot`, the dynamic headers `X-Initiator` (`agent` when the last message of the resolved transcript is not a user message, else `user`), `Openai-Intent: conversation-edits` and, when a user or tool result message carries an image, `Copilot-Vision-Request: true`; `options.headers`
 4. `Content-Type: application/json`
 5. Headers generated from request body fields: `betas` → `anthropic-beta` (comma-joined), `user_profile_id` → `anthropic-user-profile-id`. These two fields are taken out of the request body after `on_payload`, same as the SDK.
 
@@ -142,7 +142,6 @@ After the stream ends, these checks run in order: `message_start` seen but no `m
 ## Not ported
 
 - **Workload identity federation** (`ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_IDENTITY_TOKEN_FILE`, `ANTHROPIC_WORKSPACE_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`): upstream leaves OIDC token exchange and caching to the SDK. This is out of scope for now; without a key or authentication header the result is always `No API key for provider: ...`. If needed, this module can implement the `POST /v1/oauth/token` (jwt-bearer) exchange, cache tokens per configuration, invalidate and re-exchange on 401, and make the authentication check in `stream_simple`/`stream` accept that configuration.
-- **GitHub Copilot dynamic headers** (`X-Initiator`, `Openai-Intent`, vision input marker): only Copilot's Bearer authentication is kept; the code has a `// Not ported` comment.
 - Telemetry, the OAuth login flow, deferred responses, WebSocket transport: out of scope per the task description.
 
 ## Improvements pending confirmation

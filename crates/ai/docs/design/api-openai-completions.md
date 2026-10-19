@@ -48,7 +48,10 @@ same as the OpenAI SDK).
 
 Request headers are merged in order (later entries override earlier ones, `None` deletes):
 `Accept`/`Content-Type: application/json`, `Authorization: Bearer <key>`, `User-Agent`,
-`model.headers`, session affinity headers, `options.headers`. When there is no API key but the
+`model.headers`, GitHub Copilot's dynamic headers (only for `provider == "github-copilot"`:
+`X-Initiator`, `Openai-Intent: conversation-edits`, `Copilot-Vision-Request: true` when the
+transcript has an image; see [github-copilot.md](github-copilot.md)), session affinity headers,
+`options.headers`. When there is no API key but the
 `authorization` or `cf-aig-authorization` header is non-empty, the key is recorded as `unused` (same
 as upstream; the default header can be deleted with `Authorization: None`). Otherwise the stream
 fails with `No API key for provider: <p>`.
@@ -226,8 +229,7 @@ calls are emitted whatever the finish reason is.
   looked up in `thinkingLevelMap`, names that are not levels get no thinking budget, and sampling
   parameters resolve at the `off` level. This is the same as upstream when given a non-standard
   string.
-- Not ported: GitHub Copilot dynamic headers (`x-initiator`, `openai-intent`, vision request
-  header), telemetry.
+- Not ported: telemetry.
 
 The following behaviors come from `docs/research/provider-references.md`. They only make the client
 more tolerant of invalid input or give clearer errors, and do not change the result for valid input:
