@@ -26,7 +26,7 @@ API 专属选项取自 `ApiOptions::GoogleVertex(GoogleVertexOptions)`（`tool_c
 
 - `packages/ai/src/api/google-vertex.ts`：`stream`、`streamSimple`、客户端创建、`getGoogleBudget`。
 - `packages/ai/src/api/google-shared.ts`：消息/工具转换、思考配置、签名、结束原因、重试。Rust 侧已移植为 `api::google_shared`（见 `api-google-generative-ai.md`），本模块直接复用，不修改。
-- `packages/ai/src/providers/google-vertex.ts`：provider 工厂和认证解析（`GOOGLE_CLOUD_API_KEY`、ADC 文件检查）。不在本模块范围内；本模块只做上游 API 模块自己做的解析。
+- `packages/ai/src/providers/google-vertex.ts`：provider 工厂和认证解析（`GOOGLE_CLOUD_API_KEY`、ADC 文件检查），移植在 `providers/builtin.rs` 的 `vertex` 模块（`VertexAuth`，含登录流程）。本模块只做上游 API 模块自己做的解析。
 - 测试：`test/google-vertex-api-key-resolution.test.ts`、`google-raw-stop-reason.test.ts`、`google-thinking-level-map.test.ts` 中的 Vertex 部分；pi-py 的 `google_vertex.py` 和 `test_google_streams.py` 作为第二参考。
 
 ## 与 google_shared 的分工
@@ -178,7 +178,6 @@ gRPC 的路径是固定的（`/google.cloud.aiplatform.v1.PredictionService/Stre
 ## 未移植
 
 - 上游拒绝自定义 `fetch` 的检查（见上）。
-- provider 工厂（`providers/google-vertex.ts`）的认证解析和登录流程：不在本模块范围。
 - 遥测：上游 Vertex 适配器没有。
 
 ## provider-references 检查

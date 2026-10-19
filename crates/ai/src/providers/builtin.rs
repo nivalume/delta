@@ -305,6 +305,8 @@ pub fn builtin_provider(id: &str) -> Option<Arc<dyn Provider>> {
         "opencode-go" => Arc::new(opencode_provider("opencode-go", "OpenCode Go")),
         #[cfg(feature = "bedrock")]
         "amazon-bedrock" => Arc::new(cloud::amazon_bedrock_provider()),
+        #[cfg(feature = "vertex")]
+        "google-vertex" => Arc::new(vertex::google_vertex_provider()),
         _ => return None,
     };
     Some(provider)
@@ -745,6 +747,259 @@ mod cloud {
             ProviderAuth::api_key(BedrockAuth),
             ProviderApi::single(BedrockConverseStreamApi),
         )
+    }
+}
+
+#[cfg(feature = "vertex")]
+mod vertex {
+    use super::{BoxFuture, ProviderApi, catalog_provider};
+    use crate::api::google_vertex::GoogleVertexApi;
+    use crate::auth::{
+        ApiKeyAuth, ApiKeyCredential, ApiKeyInput, AuthEvent, AuthInfoLink, AuthInteraction, AuthPrompt, AuthResult,
+        AuthSelectOption, ModelAuth, ProviderAuth,
+    };
+    use crate::error::{ModelsError, ModelsErrorCode};
+    use crate::provider::BuiltProvider;
+    use crate::types::ProviderEnv;
+
+    const VERTEX_ADC_PATH: &str = "~/.config/gcloud/application_default_credentials.json";
+
+    /// Vertex accepts an API key or Application Default Credentials. ADC also needs a project
+    /// and a location, which the API implementation reads from the environment.
+    #[derive(Debug)]
+    struct VertexAuth;
+
+    impl ApiKeyAuth for VertexAuth {
+        fn name(&self) -> &'static str {
+            "Google Cloud credentials"
+        }
+
+        fn resolve<'a>(&'a self, input: ApiKeyInput<'a>) -> BoxFuture<'a, Result<Option<AuthResult>, ModelsError>> {
+            Box::pin(async move {
+                let credential = input.credential;
+                let stored = |name: &str| {
+                    credential
+                        .and_then(|credential| credential.env.as_ref())
+                        .and_then(|env| env.get(name).cloned())
+                };
+                let env = |name: &str| stored(name).or_else(|| input.ctx.env(name));
+
+                let stored_key = credential.and_then(|credential| credential.key.clone());
+                let (key, source) = match stored_key {
+                    Some(key) => (Some(key), "stored credential"),
+                    None => (input.ctx.env("GOOGLE_CLOUD_API_KEY"), "GOOGLE_CLOUD_API_KEY"),
+                };
+                if let Some(key) = key.filter(|key| !key.is_empty()) {
+                    return Ok(Some(AuthResult {
+                        auth: ModelAuth {
+                            api_key: Some(key),
+                            ..ModelAuth::default()
+                        },
+                        env: None,
+                        source: Some(source.into()),
+                    }));
+                }
+
+                let credentials_path = env("GOOGLE_APPLICATION_CREDENTIALS");
+                let has_credentials = input
+                    .ctx
+                    .file_exists(credentials_path.as_deref().unwrap_or(VERTEX_ADC_PATH));
+                let project = env("GOOGLE_CLOUD_PROJECT").or_else(|| env("GCLOUD_PROJECT"));
+                let location = env("GOOGLE_CLOUD_LOCATION");
+                if has_credentials && project.is_some() && location.is_some() {
+                    return Ok(Some(AuthResult {
+                        auth: ModelAuth::default(),
+                        env: credential.and_then(|credential| credential.env.clone()),
+                        source: Some(
+                            if credential.is_some() {
+                                "stored credential"
+                            } else {
+                                "gcloud application default credentials"
+                            }
+                            .into(),
+                        ),
+                    }));
+                }
+                Ok(None)
+            })
+        }
+
+        fn supports_login(&self) -> bool {
+            true
+        }
+
+        fn login<'a>(
+            &'a self,
+            interaction: &'a dyn AuthInteraction,
+        ) -> BoxFuture<'a, Result<ApiKeyCredential, ModelsError>> {
+            Box::pin(async move {
+                let option = |id: &str, label: &str| AuthSelectOption {
+                    id: id.into(),
+                    label: label.into(),
+                    description: None,
+                };
+                let text = |message: &str| AuthPrompt::Text {
+                    message: message.into(),
+                    placeholder: None,
+                };
+                let method = interaction
+                    .prompt(AuthPrompt::Select {
+                        message: "Select Google Vertex AI authentication method:".into(),
+                        options: vec![
+                            option("api-key", "Google Cloud API key"),
+                            option("adc", "Application Default Credentials"),
+                            option("service-account", "Service account credentials file"),
+                        ],
+                    })
+                    .await?;
+                if method == "api-key" {
+                    let key = interaction
+                        .prompt(AuthPrompt::Secret {
+                            message: "Enter Google Cloud API key".into(),
+                            placeholder: None,
+                        })
+                        .await?;
+                    return Ok(ApiKeyCredential {
+                        key: Some(key),
+                        env: None,
+                    });
+                }
+                if method != "adc" && method != "service-account" {
+                    return Err(ModelsError::new(
+                        ModelsErrorCode::Auth,
+                        format!("Unknown Google Vertex AI auth method: {method}"),
+                    ));
+                }
+                interaction.notify(AuthEvent::Info {
+                    message: if method == "adc" {
+                        "Run `gcloud auth application-default login`, then provide the project and location."
+                    } else {
+                        "Provide a service account credentials file, project, and location."
+                    }
+                    .into(),
+                    links: vec![AuthInfoLink {
+                        url: "https://cloud.google.com/docs/authentication/provide-credentials-adc".into(),
+                        label: Some("Application Default Credentials".into()),
+                    }],
+                });
+                let project = interaction.prompt(text("Enter Google Cloud project ID")).await?;
+                let location = interaction.prompt(text("Enter Google Cloud location")).await?;
+                let mut env = ProviderEnv::new();
+                env.insert("GOOGLE_CLOUD_PROJECT".into(), project);
+                env.insert("GOOGLE_CLOUD_LOCATION".into(), location);
+                if method == "service-account" {
+                    let path = interaction
+                        .prompt(text("Enter service account credentials file path"))
+                        .await?;
+                    env.insert("GOOGLE_APPLICATION_CREDENTIALS".into(), path);
+                }
+                Ok(ApiKeyCredential {
+                    key: None,
+                    env: Some(env),
+                })
+            })
+        }
+    }
+
+    pub(super) fn google_vertex_provider() -> BuiltProvider {
+        catalog_provider(
+            "google-vertex",
+            "Google Vertex AI",
+            None,
+            ProviderAuth::api_key(VertexAuth),
+            ProviderApi::single(GoogleVertexApi),
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::auth::AuthContext;
+        use std::collections::BTreeMap;
+
+        #[derive(Default)]
+        struct Ctx {
+            env: BTreeMap<&'static str, &'static str>,
+            files: Vec<&'static str>,
+        }
+
+        impl AuthContext for Ctx {
+            fn env(&self, name: &str) -> Option<String> {
+                self.env.get(name).map(|value| (*value).to_owned())
+            }
+
+            fn file_exists(&self, path: &str) -> bool {
+                self.files.contains(&path)
+            }
+        }
+
+        async fn resolve(ctx: &Ctx, credential: Option<&ApiKeyCredential>) -> Option<AuthResult> {
+            VertexAuth.resolve(ApiKeyInput { ctx, credential }).await.unwrap()
+        }
+
+        #[tokio::test]
+        async fn api_key_from_store_or_env() {
+            let stored = ApiKeyCredential {
+                key: Some("stored".into()),
+                env: None,
+            };
+            let ctx = Ctx {
+                env: [("GOOGLE_CLOUD_API_KEY", "env-key")].into(),
+                ..Ctx::default()
+            };
+            let result = resolve(&ctx, Some(&stored)).await.unwrap();
+            assert_eq!(result.auth.api_key.as_deref(), Some("stored"));
+            assert_eq!(result.source.as_deref(), Some("stored credential"));
+
+            let result = resolve(&ctx, None).await.unwrap();
+            assert_eq!(result.auth.api_key.as_deref(), Some("env-key"));
+            assert_eq!(result.source.as_deref(), Some("GOOGLE_CLOUD_API_KEY"));
+        }
+
+        #[tokio::test]
+        async fn adc_needs_credentials_project_and_location() {
+            let mut ctx = Ctx {
+                env: [("GOOGLE_CLOUD_PROJECT", "p")].into(),
+                files: vec![VERTEX_ADC_PATH],
+            };
+            assert!(resolve(&ctx, None).await.is_none());
+
+            ctx.env.insert("GOOGLE_CLOUD_LOCATION", "us-central1");
+            let result = resolve(&ctx, None).await.unwrap();
+            assert_eq!(result.auth.api_key, None);
+            assert_eq!(result.source.as_deref(), Some("gcloud application default credentials"));
+
+            ctx.files.clear();
+            assert!(resolve(&ctx, None).await.is_none());
+        }
+
+        #[tokio::test]
+        async fn stored_service_account_env() {
+            let stored = ApiKeyCredential {
+                key: None,
+                env: Some(
+                    [
+                        ("GOOGLE_CLOUD_PROJECT".to_owned(), "p".to_owned()),
+                        ("GOOGLE_CLOUD_LOCATION".to_owned(), "global".to_owned()),
+                        ("GOOGLE_APPLICATION_CREDENTIALS".to_owned(), "/keys/sa.json".to_owned()),
+                    ]
+                    .into(),
+                ),
+            };
+            let ctx = Ctx {
+                files: vec!["/keys/sa.json"],
+                ..Ctx::default()
+            };
+            let result = resolve(&ctx, Some(&stored)).await.unwrap();
+            assert_eq!(result.env, stored.env);
+            assert_eq!(result.source.as_deref(), Some("stored credential"));
+        }
+
+        #[test]
+        fn provider_serves_the_vertex_catalog() {
+            let provider = google_vertex_provider();
+            assert_eq!(crate::provider::Provider::id(&provider), "google-vertex");
+        }
     }
 }
 
