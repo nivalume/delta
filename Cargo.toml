@@ -17,6 +17,9 @@ delta-ai = { path = "crates/ai", version = "0.1.0" }
 aws-config = { version = "1.12", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client", "credentials-process", "sso"] }
 aws-sdk-bedrockruntime = { version = "1.148", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 aws-smithy-types = "1.8"
+# Bedrock transports: proxies from `options.env` and `AWS_BEDROCK_FORCE_HTTP1`.
+aws-smithy-http-client = { version = "1.5", default-features = false, features = ["rustls-aws-lc"] }
+aws-smithy-runtime-api = { version = "1.19", default-features = false, features = ["client", "http-1x"] }
 base64 = "0.23"
 bytes = "1.12"
 futures = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }

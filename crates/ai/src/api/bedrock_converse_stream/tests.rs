@@ -333,6 +333,104 @@ fn endpoint_region_parsing() {
     assert_eq!(standard_endpoint_region(""), None);
 }
 
+fn transport_for(base_url: &str, scoped: &[(&str, &str)], process: &[(&str, &str)]) -> Result<Transport> {
+    let mut model = nova();
+    model.base_url = base_url.into();
+    let scoped = env_of(scoped);
+    let process: BTreeMap<String, String> = env_of(process);
+    let process_fn = move |name: &str| process.get(name).cloned();
+    resolve_transport(&model, &lookup(Some(&scoped), &process_fn))
+}
+
+fn proxied(url: &str) -> Transport {
+    Transport::Http1(Http1Client::new(Some(url::Url::parse(url).unwrap())))
+}
+
+#[test]
+fn transport_selection_follows_proxy_then_force_http1() {
+    const BEDROCK: &str = "https://bedrock-runtime.us-east-1.amazonaws.com";
+    let proxy = [("HTTPS_PROXY", "http://proxy.example:8080")];
+    let force = [("AWS_BEDROCK_FORCE_HTTP1", "1")];
+
+    assert_eq!(transport_for(BEDROCK, &[], &[]).unwrap(), Transport::Default);
+    // A proxy from the scoped env or the process env selects the HTTP/1.1 client through it.
+    assert_eq!(
+        transport_for(BEDROCK, &proxy, &[]).unwrap(),
+        proxied("http://proxy.example:8080")
+    );
+    assert_eq!(
+        transport_for(BEDROCK, &[], &proxy).unwrap(),
+        proxied("http://proxy.example:8080")
+    );
+    // The proxy wins over AWS_BEDROCK_FORCE_HTTP1.
+    assert_eq!(
+        transport_for(BEDROCK, &[proxy[0], force[0]], &[]).unwrap(),
+        proxied("http://proxy.example:8080")
+    );
+    // AWS_BEDROCK_FORCE_HTTP1=1 alone, from either source, selects HTTP/1.1 without a proxy.
+    let direct_http1 = Transport::Http1(Http1Client::new(None));
+    assert_eq!(transport_for(BEDROCK, &force, &[]).unwrap(), direct_http1);
+    assert_eq!(transport_for(BEDROCK, &[], &force).unwrap(), direct_http1);
+    assert_eq!(
+        transport_for(BEDROCK, &[force[0], ("NO_PROXY", "amazonaws.com")], &proxy).unwrap(),
+        direct_http1
+    );
+    assert_eq!(
+        transport_for(BEDROCK, &[("AWS_BEDROCK_FORCE_HTTP1", "true")], &[]).unwrap(),
+        Transport::Default
+    );
+}
+
+#[test]
+fn proxies_are_matched_against_the_model_base_url() {
+    // `HTTP_PROXY` does not apply to an https base URL, `ALL_PROXY` does.
+    let http_only = [("HTTP_PROXY", "http://proxy.example:8080")];
+    assert_eq!(
+        transport_for("https://bedrock.internal", &http_only, &[]).unwrap(),
+        Transport::Default
+    );
+    assert_eq!(
+        transport_for("http://bedrock.internal", &http_only, &[]).unwrap(),
+        proxied("http://proxy.example:8080")
+    );
+    assert_eq!(
+        transport_for(
+            "https://bedrock.internal",
+            &[("ALL_PROXY", "http://all.example:3128")],
+            &[]
+        )
+        .unwrap(),
+        proxied("http://all.example:3128")
+    );
+    // No base URL: no target to match, so no proxy.
+    assert_eq!(
+        transport_for("", &[("ALL_PROXY", "http://all.example:3128")], &[]).unwrap(),
+        Transport::Default
+    );
+}
+
+#[test]
+fn invalid_proxies_fail_before_the_request() {
+    let error = transport_for(
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        &[("HTTPS_PROXY", "socks5://proxy.example:1080")],
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!("{} Got socks5:", proxy::UNSUPPORTED_PROXY_PROTOCOL_MESSAGE)
+    );
+}
+
+#[test]
+fn transport_debug_redacts_proxy_credentials() {
+    let transport = proxied("http://user:secret@proxy.example:8080/path");
+    let debug = format!("{transport:?}");
+    assert!(debug.contains("http://proxy.example:8080"), "{debug}");
+    assert!(!debug.contains("secret"), "{debug}");
+}
+
 // ---------------------------------------------------------------------------------------------
 // Request payload
 // ---------------------------------------------------------------------------------------------

@@ -22,6 +22,9 @@ use delta_ai::{
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -759,4 +762,259 @@ async fn timeouts_fail_the_request() {
     let error = message.error_message.unwrap();
     assert!(error.contains("operation timeout"), "{error}");
     assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Transports: proxies from `options.env` and `AWS_BEDROCK_FORCE_HTTP1`
+// ---------------------------------------------------------------------------------------------
+
+/// `options()` with extra scoped environment values.
+fn options_with_env(extra: &[(&str, &str)]) -> StreamOptions {
+    let mut env = env();
+    env.extend(
+        extra
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+    );
+    StreamOptions {
+        env: Some(env),
+        ..options()
+    }
+}
+
+/// Read one HTTP request head, up to and including the blank line.
+async fn read_head(stream: &mut TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).await.unwrap() == 1 {
+        head.push(byte[0]);
+    }
+    String::from_utf8(head).unwrap()
+}
+
+fn u16_at(bytes: &[u8], at: usize) -> usize {
+    usize::from(u16::from_be_bytes([bytes[at], bytes[at + 1]]))
+}
+
+/// Read one TLS ClientHello record and return the protocol names of its ALPN extension.
+async fn read_client_hello_alpn(stream: &mut TcpStream) -> Vec<String> {
+    let mut header = [0_u8; 5];
+    stream.read_exact(&mut header).await.unwrap();
+    assert_eq!(header[0], 0x16, "expected a TLS handshake record");
+    let mut hello = vec![0_u8; u16_at(&header, 3)];
+    stream.read_exact(&mut hello).await.unwrap();
+    assert_eq!(hello[0], 1, "expected a ClientHello");
+
+    // Handshake header, legacy version and random; then session id, cipher suites and
+    // compression methods.
+    let mut at = 4 + 2 + 32;
+    at += 1 + usize::from(hello[at]);
+    at += 2 + u16_at(&hello, at);
+    at += 1 + usize::from(hello[at]);
+    let end = at + 2 + u16_at(&hello, at);
+    at += 2;
+    while at < end {
+        let (kind, len) = (u16_at(&hello, at), u16_at(&hello, at + 2));
+        let data = &hello[at + 4..at + 4 + len];
+        if kind == 0x0010 {
+            let mut names = Vec::new();
+            let mut index = 2;
+            while index < data.len() {
+                let name_len = usize::from(data[index]);
+                names.push(String::from_utf8(data[index + 1..index + 1 + name_len].to_vec()).unwrap());
+                index += 1 + name_len;
+            }
+            return names;
+        }
+        at += 4 + len;
+    }
+    Vec::new()
+}
+
+/// A TLS endpoint that records the ALPN offer of the first ClientHello, then hangs up.
+async fn alpn_probe() -> (String, JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("https://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let probe = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_client_hello_alpn(&mut stream).await
+    });
+    (url, probe)
+}
+
+/// An HTTP proxy that accepts the first `CONNECT`, records the request head and the ALPN offer
+/// of the tunnelled ClientHello, then hangs up.
+async fn connect_proxy() -> (String, JoinHandle<(String, Vec<String>)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let proxy = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let head = read_head(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            .await
+            .unwrap();
+        (head, read_client_hello_alpn(&mut stream).await)
+    });
+    (url, proxy)
+}
+
+async fn joined<T>(task: JoinHandle<T>) -> T {
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// Port of `bedrock-response-headers.test.ts`.
+#[tokio::test]
+async fn force_http1_forwards_raw_response_headers_to_on_response() {
+    const MODEL_ID: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+    let server = MockServer::start().await;
+    // An intentionally empty event stream: the header callback still fires.
+    mount(
+        &server,
+        eventstream(&[]).insert_header("x-bifrost-resolved-model", MODEL_ID),
+    )
+    .await;
+    let model = model(&server.uri(), MODEL_ID, "Claude Haiku 4.5 (US)");
+    let responses: Arc<Mutex<Vec<ProviderResponse>>> = Arc::default();
+    let sink = responses.clone();
+    let options = StreamOptions {
+        env: Some(
+            [
+                ("AWS_BEDROCK_FORCE_HTTP1", "1"),
+                ("AWS_BEDROCK_SKIP_AUTH", "1"),
+                ("AWS_REGION", "us-east-1"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        ),
+        on_response: Some(Arc::new(move |response: &ProviderResponse, _: &Model| {
+            sink.lock().unwrap().push(response.clone());
+            Box::pin(async { Ok(()) })
+        })),
+        ..options()
+    };
+    let message = stream(&model, &hello(), options).result().await;
+    assert_eq!(message.stop_reason, StopReason::Error);
+    let responses = responses.lock().unwrap().clone();
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].status, 200);
+    assert_eq!(responses[0].headers["x-amzn-requestid"], "req-123");
+    assert_eq!(responses[0].headers["x-bifrost-provider"], "bedrock");
+    assert_eq!(responses[0].headers["x-bifrost-resolved-model"], MODEL_ID);
+}
+
+#[tokio::test]
+async fn http_targets_go_through_the_scoped_proxy() {
+    // wiremock plays the proxy and answers the absolute-form request itself.
+    let proxy = MockServer::start().await;
+    mount(
+        &proxy,
+        eventstream(&[message_start(), text_delta(0, "proxied"), message_stop("end_turn")]),
+    )
+    .await;
+    let proxy_url = proxy.uri().replace("http://", "http://user:secret@");
+    let model = model("http://bedrock.proxy.test", "amazon.nova-lite-v1:0", "Nova Lite");
+    let options = options_with_env(&[("HTTP_PROXY", &proxy_url), ("NO_PROXY", "unrelated.example")]);
+    let message = stream(&model, &hello(), options).result().await;
+    assert_eq!(message.stop_reason, StopReason::Stop, "{:?}", message.error_message);
+    assert_eq!(message.text(), "proxied");
+
+    let requests = requests(&proxy).await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.host_str(), Some("bedrock.proxy.test"));
+    assert_eq!(header(&requests[0], "host"), Some("bedrock.proxy.test"));
+    // Basic credentials from the proxy URL: base64("user:secret").
+    assert_eq!(
+        header(&requests[0], "proxy-authorization"),
+        Some("Basic dXNlcjpzZWNyZXQ=")
+    );
+    assert!(
+        header(&requests[0], "authorization")
+            .unwrap()
+            .starts_with("AWS4-HMAC-SHA256")
+    );
+}
+
+#[tokio::test]
+async fn no_proxy_bypasses_the_proxy() {
+    let target = MockServer::start().await;
+    mount(
+        &target,
+        eventstream(&[message_start(), text_delta(0, "direct"), message_stop("end_turn")]),
+    )
+    .await;
+    let proxy = MockServer::start().await;
+    let options = options_with_env(&[("HTTP_PROXY", &proxy.uri()), ("NO_PROXY", "localhost, 127.0.0.1")]);
+    let message = stream(&nova(&target), &hello(), options).result().await;
+    assert_eq!(message.stop_reason, StopReason::Stop, "{:?}", message.error_message);
+    assert_eq!(message.text(), "direct");
+    assert_eq!(requests(&target).await.len(), 1);
+    assert!(requests(&proxy).await.is_empty());
+}
+
+#[tokio::test]
+async fn https_targets_tunnel_through_the_proxy_over_http1() {
+    let (proxy_url, proxy) = connect_proxy().await;
+    let model = model(
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "amazon.nova-lite-v1:0",
+        "Nova Lite",
+    );
+    let options = options_with_env(&[("HTTPS_PROXY", &proxy_url), ("NO_PROXY", "unrelated.example")]);
+    let message = stream(&model, &hello(), options).result().await;
+    // The proxy hangs up after the ClientHello.
+    assert_eq!(message.stop_reason, StopReason::Error);
+
+    let (head, alpn) = joined(proxy).await;
+    assert!(
+        head.starts_with("CONNECT bedrock-runtime.us-east-1.amazonaws.com:443 HTTP/1.1\r\n"),
+        "{head}"
+    );
+    assert_eq!(alpn, ["http/1.1"]);
+}
+
+#[tokio::test]
+async fn force_http1_offers_only_http1() {
+    let (url, probe) = alpn_probe().await;
+    let model = model(&url, "amazon.nova-lite-v1:0", "Nova Lite");
+    let options = options_with_env(&[("AWS_BEDROCK_FORCE_HTTP1", "1"), ("NO_PROXY", "*")]);
+    let message = stream(&model, &hello(), options).result().await;
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(joined(probe).await, ["http/1.1"]);
+}
+
+#[tokio::test]
+async fn the_default_transport_offers_http2() {
+    let (url, probe) = alpn_probe().await;
+    let model = model(&url, "amazon.nova-lite-v1:0", "Nova Lite");
+    let options = options_with_env(&[("NO_PROXY", "*")]);
+    let message = stream(&model, &hello(), options).result().await;
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(joined(probe).await, ["h2", "http/1.1"]);
+}
+
+#[tokio::test]
+async fn unsupported_proxy_protocols_fail_the_request() {
+    let model = model(
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "amazon.nova-lite-v1:0",
+        "Nova Lite",
+    );
+    let options = options_with_env(&[
+        ("HTTPS_PROXY", "socks5://127.0.0.1:1080"),
+        ("NO_PROXY", "unrelated.example"),
+    ]);
+    let message = stream(&model, &hello(), options).result().await;
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some(
+            "Unsupported proxy protocol. SOCKS and PAC proxy URLs are not supported; use an HTTP or HTTPS proxy URL. \
+             Got socks5:"
+        )
+    );
 }

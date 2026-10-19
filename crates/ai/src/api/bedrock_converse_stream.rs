@@ -31,6 +31,7 @@ use aws_smithy_types::{Blob, Document, Number};
 use base64::Engine as _;
 use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
+use http_client::{Http1Client, direct_https_client};
 use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
@@ -362,16 +363,35 @@ fn resolve_client_plan(
     plan
 }
 
+/// The HTTP client of the SDK client (upstream's `requestHandler`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Transport {
+    /// The SDK's default HTTPS client (HTTP/2 through ALPN), without a proxy.
+    Default,
+    /// HTTP/1.1 only, through a proxy when one applies.
+    Http1(Http1Client),
+}
+
+/// A proxy for `model.base_url` (from `options.env`, then the process environment) selects the
+/// HTTP/1.1 client through that proxy; otherwise `AWS_BEDROCK_FORCE_HTTP1=1` selects it without a
+/// proxy. Some custom endpoints require HTTP/1.1.
+fn resolve_transport(model: &Model, env: &EnvLookup<'_>) -> Result<Transport> {
+    if let Some(proxy) = proxy::resolve_http_proxy_url_for_target(&model.base_url, env)? {
+        return Ok(Transport::Http1(Http1Client::new(Some(proxy))));
+    }
+    if env.get("AWS_BEDROCK_FORCE_HTTP1").as_deref() == Some("1") {
+        return Ok(Transport::Http1(Http1Client::new(None)));
+    }
+    Ok(Transport::Default)
+}
+
 /// Build an auth scheme preference without naming `AuthSchemeId`, which the SDK does not
 /// re-export: the element type is inferred from `AuthSchemePreference: From<[AuthSchemeId; N]>`.
 fn scheme_preference<T: From<&'static str>>(scheme: &'static str) -> [T; 1] {
     [T::from(scheme)]
 }
 
-async fn build_client(plan: &ClientPlan, options: &StreamOptions) -> Client {
-    // Not ported: upstream's Node request handlers for proxies from `options.env` and
-    // `AWS_BEDROCK_FORCE_HTTP1`. The SDK's default HTTPS client reads HTTP(S)_PROXY/NO_PROXY from
-    // the process environment and negotiates the HTTP version itself.
+async fn build_client(plan: &ClientPlan, transport: &Transport, options: &StreamOptions) -> Client {
     let mut loader = aws_config::defaults(BehaviorVersion::latest());
     if let Some(profile) = &plan.profile {
         loader = loader.profile_name(profile);
@@ -402,6 +422,10 @@ async fn build_client(plan: &ClientPlan, options: &StreamOptions) -> Client {
         // The event stream is guarded by the idle timeout in `drive` instead; long reasoning
         // pauses must not trip the SDK's throughput check.
         .stalled_stream_protection(StalledStreamProtectionConfig::disabled());
+    config = match transport {
+        Transport::Default => config.http_client(direct_https_client()),
+        Transport::Http1(client) => config.http_client(client.clone()),
+    };
     if let Some(endpoint) = &plan.endpoint {
         config = config.endpoint_url(endpoint);
     }
@@ -2118,12 +2142,13 @@ async fn drive(
         process: &process_env,
     };
     let plan = resolve_client_plan(model, &bedrock, options.api_key.as_deref(), &env);
+    let transport = resolve_transport(model, &env)?;
     let payload = build_payload(model, context, options, &bedrock, &env)?;
     let payload = apply_on_payload(options, model, payload).await?;
     let request = ConverseRequest::from_payload(&payload)?;
     let headers = custom_headers(options.headers.as_ref())?;
 
-    let client = cancellable(cancel, Box::pin(build_client(&plan, options))).await?;
+    let client = cancellable(cancel, Box::pin(build_client(&plan, &transport, options))).await?;
     let capture = ResponseCapture::default();
     let mut operation = client
         .converse_stream()
@@ -2211,5 +2236,7 @@ async fn drive(
     }
 }
 
+mod http_client;
+mod proxy;
 #[cfg(test)]
 mod tests;
