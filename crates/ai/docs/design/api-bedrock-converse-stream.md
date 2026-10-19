@@ -8,8 +8,9 @@ and converts the Bedrock event stream into delta's unified `AssistantMessageEven
 Per `AGENTS.md`, Bedrock uses the official AWS Rust SDK (`aws-sdk-bedrockruntime` + `aws-config`); SigV4 and event stream parsing are not hand-written.
 The whole module is behind the `bedrock` feature (`#[cfg(feature = "bedrock")]`); when it is off, the AWS SDK is not compiled.
 
-Module: `crates/ai/src/api/bedrock_converse_stream.rs`. Unit tests are in `bedrock_converse_stream/tests.rs`, end-to-end tests in
-`crates/ai/tests/bedrock_converse_stream.rs`.
+Module: `crates/ai/src/api/bedrock_converse_stream.rs`, with the submodules `bedrock_converse_stream/proxy.rs` (proxy resolution) and
+`bedrock_converse_stream/http_client.rs` (the HTTP clients handed to the SDK). Unit tests are in `bedrock_converse_stream/tests.rs` and
+`proxy.rs`, end-to-end tests in `crates/ai/tests/bedrock_converse_stream.rs`.
 
 Public interface:
 
@@ -24,9 +25,11 @@ Compat settings come from `ModelCompat::Bedrock` (currently only `supportsStrict
 
 - `packages/ai/src/api/bedrock-converse-stream.ts` (main body, 1416 lines).
 - `packages/ai/src/api/constrained-sampling.ts` (strict tool schema conversion, in the shared module `api::constrained_sampling`).
+- `packages/ai/src/utils/node-http-proxy.ts` (proxy resolution, in `bedrock_converse_stream/proxy.rs`; upstream also uses it for the
+  OpenAI Codex WebSocket under Bun, which delta does not port).
 - `packages/ai/src/api/bedrock-converse-stream.lazy.ts`, `src/bedrock-provider.ts`: only lazy-load Node-only modules.
   In Rust a feature flag replaces them; there is no matching code.
-- Tests: `packages/ai/test/bedrock-*.test.ts`; the Python port `pi_ai/api/bedrock_converse_stream.py` as a second reference.
+- Tests: `packages/ai/test/bedrock-*.test.ts`, `node-http-proxy.test.ts`; the Python port `pi_ai/api/bedrock_converse_stream.py` as a second reference.
 
 ## Request mapping
 
@@ -37,7 +40,8 @@ Compat settings come from `ModelCompat::Bedrock` (currently only `supportsStrict
 3. Build the request body as JSON, in the same shape as the input of upstream `ConverseStreamCommand` (camelCase members; binary members such as image bytes and encrypted reasoning are base64 strings).
 4. Call `on_payload`; the callback can replace the whole JSON.
 5. Convert the JSON into the SDK's strongly typed input (`ConverseRequest::from_payload`). Top-level members the SDK does not know are ignored, matching how the JS SDK serializes commands.
-6. Build the client with `aws_config`, send, and read the event stream.
+6. Build the client with `aws_config` and the HTTP client chosen by the transport rules below, send, and read the event stream.
+   The transport is resolved right after the client configuration, before the payload is built (same order as upstream).
 
 ### Client configuration (matches the upstream Node branch)
 
@@ -51,6 +55,29 @@ Compat settings come from `ModelCompat::Bedrock` (currently only `supportsStrict
 | `AWS_BEDROCK_SKIP_AUTH=1` | Use dummy static credentials, no bearer token, and pin the auth scheme to SigV4 (the SDK also reads `AWS_BEARER_TOKEN_BEDROCK` itself, so it has to be overridden) |
 
 Environment variable lookup: values in `options.env` take precedence, then the process environment; blank values count as unset.
+
+### Transport: proxies and HTTP/1.1
+
+Upstream sets `requestHandler` on the client config; delta sets the SDK's `http_client`:
+
+| Condition (checked in this order) | HTTP client |
+| --- | --- |
+| A proxy applies to `model.base_url` | HTTP/1.1 only, every request through that proxy (upstream: `NodeHttpHandler` with `HttpProxyAgent`/`HttpsProxyAgent`) |
+| `AWS_BEDROCK_FORCE_HTTP1=1` | HTTP/1.1 only, no proxy (upstream: `NodeHttpHandler`); for custom endpoints that require HTTP/1.1 |
+| otherwise | The SDK's default HTTPS client (HTTP/2 or HTTP/1.1 through ALPN), with its process-environment proxy lookup turned off |
+
+Proxy resolution (`resolve_http_proxy_url_for_target`, port of `node-http-proxy.ts`):
+
+- The target is `model.base_url`, also when the SDK derives the endpoint from the region. An empty or unparsable base URL, or one without a host, gets no proxy.
+- Each name is looked up as lowercase in `options.env`, uppercase in `options.env`, lowercase in the process environment, uppercase in the process environment.
+- `NO_PROXY`: `*` disables proxies. Otherwise entries are split on commas and whitespace and compared case-insensitively.
+  An entry matches the host itself and its subdomains; a leading `.`, `*` or `*.` is dropped. `host:port` and `[ipv6]:port` entries match only that port
+  (the target's port defaults to 80/443 by scheme); bare IPv6 addresses (`::1`) and bracketed ones are accepted. CIDR ranges are not supported.
+- The proxy is `<scheme>_proxy` of the target (`HTTPS_PROXY` for `https://`), else `ALL_PROXY`. A value without `://` gets the target's scheme as prefix.
+- An unparsable proxy fails with `Invalid proxy URL "<value>": Invalid URL`; a scheme other than `http`/`https` fails with
+  `Unsupported proxy protocol. SOCKS and PAC proxy URLs are not supported; use an HTTP or HTTPS proxy URL. Got <scheme>:`.
+- `https://` targets go through `CONNECT`; `http://` targets are sent to the proxy in absolute form. Credentials in the proxy URL become
+  `Proxy-Authorization: Basic ...`. `NO_PROXY` is applied once, to the base URL; the chosen proxy then carries every request of the client.
 
 ### Request body fields
 
@@ -157,25 +184,44 @@ On both success and failure, encrypted reasoning still in the buffer is written 
 - Rust strings cannot contain unpaired surrogates, so upstream's `sanitizeSurrogates` is a no-op and is not ported.
 - In-stream modeled exceptions (such as `throttlingException`) are typed errors in the Rust SDK, so diagnostics include `errorCode`; in upstream tests such exceptions are bare objects with only `requestId`.
 - Upstream's region fallback branch outside Node (browsers) does not apply and is not ported.
-- Not ported (see the `// Not ported` comments in the code): proxy settings in `options.env` and `AWS_BEDROCK_FORCE_HTTP1`. The SDK's default HTTPS client reads
-  `HTTP(S)_PROXY`/`NO_PROXY` from the process environment, and the client negotiates the HTTP version itself. `options.http_client` (reqwest) has no effect for this API.
+- The HTTP/1.1 client runs on `reqwest` (`http1_only`, no redirects, the SDK's connect timeout), because the SDK's own HTTP client has no public way to restrict
+  ALPN to `http/1.1`. Differences from the SDK's client: TLS uses delta's `reqwest` stack (rustls with the platform verifier) instead of rustls with aws-lc and the
+  native root store, and `reqwest` adds `Accept: */*` when the request has no `Accept` header. The SDK's read timeout covers the time until the response head, as in
+  the SDK's own connector.
+- The default transport is the SDK's hyper client, which offers HTTP/2 and HTTP/1.1 through ALPN. Upstream's default `NodeHttp2Handler` speaks only HTTP/2
+  (prior knowledge on `http://` endpoints); delta speaks HTTP/1.1 to `http://` endpoints. The SDK client's own `HTTP(S)_PROXY`/`NO_PROXY` lookup is turned off
+  so that only the upstream rules decide about proxies.
+- Upstream throws proxy errors outside its `try` block, so the stream never ends (an unhandled rejection). delta ends the stream with the error message.
+- Whitespace-only proxy variables count as unset, like every other variable of this module; upstream treats them as set and fails on them.
+- `aws-config`'s credential providers (SSO, STS, IMDS) keep the SDK's default HTTP client, which reads proxy settings from the process environment.
+  Upstream's credential providers use Node's default handlers, which do not.
+- `options.http_client` (reqwest) has no effect for this API.
 - `max_retry_delay` is not mapped: the SDK's backoff policy does not read `retry-after` and has no matching concept.
 - When a `thinking` block becomes redacted mid-stream, `MessageBuilder` has no matching event, so the consumer's partial message does not see `redacted: true` until the end event; the final message is correct.
 
 ## Tests
 
-- Unit tests (`bedrock_converse_stream/tests.rs`, 52 of them): client configuration (credential precedence, endpoint/region resolution, ARN, bearer token, skip auth),
+- Unit tests (`bedrock_converse_stream/tests.rs`, 55 of them): client configuration (credential precedence, endpoint/region resolution, ARN, bearer token, skip auth,
+  transport selection, proxy errors, redacted proxy credentials in `Debug`),
   request body (strict tools, tool choice, metadata, placeholder text, splitting images from error results, empty key names, thinking replay, redacted replay, cross-model replay and orphaned tool calls,
   cache points, every branch of the reasoning fields), JSON→SDK conversion, event handling (text, parallel tool calls, signatures, redacted concatenation, no stop event, usage and 1h cache cost),
   error formatting and diagnostics, budget mapping in `stream_simple`.
-- End-to-end tests (`tests/bedrock_converse_stream.rs`, 16 of them): a real SDK client connects to wiremock, and the response body is event stream frames encoded with `aws-smithy-eventstream`.
+- Proxy resolution tests (`bedrock_converse_stream/proxy.rs`, 15 of them): the five cases of `node-http-proxy.test.ts`, plus `NO_PROXY=*`, scoped `NO_PROXY`,
+  lowercase-before-uppercase, `ALL_PROXY` fallback, scheme-less proxies, default ports in `NO_PROXY`, invalid proxy URLs, host-less targets, blank entries and `parseInt`.
+- End-to-end tests (`tests/bedrock_converse_stream.rs`, 23 of them): a real SDK client connects to wiremock, and the response body is event stream frames encoded with `aws-smithy-eventstream`.
   They cover text + usage + response headers, thinking + parallel tool calls, redacted round trip, wire request body shape, `on_payload` replacement,
   custom headers in signing, bearer token, HTTP service errors, gateway errors, 5xx retry, in-stream exceptions, error stop reason, missing stop reason, cancellation, timeout, cross-model replay.
+  Transport tests use local servers only: `AWS_BEDROCK_FORCE_HTTP1` with response headers (port of `bedrock-response-headers.test.ts`), an `http://` target through a
+  scoped proxy (wiremock answers the absolute-form request; `Proxy-Authorization` from the proxy URL), `NO_PROXY` bypass, an `https://` target through a `CONNECT` proxy,
+  and the ALPN offer read from the TLS ClientHello (`http/1.1` only through a proxy and with `AWS_BEDROCK_FORCE_HTTP1`, `h2` + `http/1.1` by default), and an unsupported proxy scheme.
+- Dependencies of the `bedrock` feature for the transports: `aws-smithy-http-client` (the SDK's HTTPS client without the environment proxy lookup) and
+  `aws-smithy-runtime-api` (the `HttpClient`/`HttpConnector` traits for the `reqwest` client); `aws-smithy-types` gains the `http-body-1-x` feature. All were already in `Cargo.lock`.
 - New dev dependency: `aws-smithy-eventstream = "0.61"` (in the dev-dependencies of the workspace and `crates/ai`), used only to encode event stream frames in tests.
 
 ## Improvements pending confirmation
 
 - Cache `SdkConfig`/`Client`: upstream creates a new client for each request (kept the same here), so the credential chain (SSO, assume role, IMDS) is resolved again each time; pi-py caches clients by configuration.
 - Unstable `Document` key order may affect prompt cache hits on the Bedrock side (tool definitions are in the cache prefix). Options: rewrite the request body with order-preserving JSON before signing, or wait for the SDK to support ordered documents.
-- Support proxy settings in `options.env` (needs a direct dependency on `aws-smithy-http-client` to build the HTTP client).
+- Accept CIDR ranges (`10.0.0.0/8`) in `NO_PROXY`, as the SDK's and `reqwest`'s own proxy matchers do. Upstream compares them as host names, so they never match.
+- Move `proxy.rs` to a shared module once another API needs it (upstream also uses it for the OpenAI Codex WebSocket under Bun).
 - Bring more `ConverseStream` members (`guardrailConfig`, `performanceConfig`, `serviceTier`, etc.) into the JSON→SDK conversion for `on_payload`.

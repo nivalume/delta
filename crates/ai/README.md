@@ -576,7 +576,7 @@ OpenAI Codex has no environment variable: it authenticates only with OAuth (`del
 
 `qwen-token-plan-individual` and `qwen-token-plan` share the international endpoint and `QWEN_TOKEN_PLAN_API_KEY`. The Individual provider lists only the models documented for Individual subscriptions. Stored credentials are provider-scoped, so save the key under the provider id you register.
 
-Amazon Bedrock (feature `bedrock`) resolves ambient AWS credentials (`AWS_BEARER_TOKEN_BEDROCK`, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, ECS task roles, web identity tokens); its API-key login flow supports bearer tokens, AWS profiles and the existing credential chain. Vertex AI (feature `vertex`) resolves either an API key or Application Default Credentials plus project and location, with an API-key login flow for API keys, ADC and service-account files.
+Amazon Bedrock (feature `bedrock`) resolves ambient AWS credentials (`AWS_BEARER_TOKEN_BEDROCK`, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, ECS task roles, web identity tokens); its API-key login flow supports bearer tokens, AWS profiles and the existing credential chain. Bedrock requests go through `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` unless `NO_PROXY` matches the model's base URL, and `AWS_BEDROCK_FORCE_HTTP1=1` switches to HTTP/1.1 for custom endpoints that need it. Vertex AI (feature `vertex`) resolves either an API key or Application Default Credentials plus project and location, with an API-key login flow for API keys, ADC and service-account files.
 
 The Cloudflare providers read each value from the stored credential first (the key, and `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_GATEWAY_ID` in its `env`) and fall back to the environment per value, so a stored key can be combined with ids from the environment. Their login flows prompt for the key and the ids. AI Gateway sends the key as `cf-aig-authorization: Bearer <key>` and suppresses `Authorization` and `x-api-key`; an explicit `Authorization` request header passes a provider key through the gateway (BYOK).
 
@@ -2124,7 +2124,7 @@ Rust has no bundler or tree shaking step. Cargo features choose what is compiled
 | Feature | API | Dependencies |
 |---------|-----|--------------|
 | (default) | `anthropic-messages`, `openai-completions`, `openai-responses`, `azure-openai-responses`, `google-generative-ai`, `mistral-conversations` | `reqwest` (hand-written clients) |
-| `bedrock` | `bedrock-converse-stream` (provider `amazon-bedrock`) | `aws-sdk-bedrockruntime`, `aws-config`, `aws-smithy-types` |
+| `bedrock` | `bedrock-converse-stream` (provider `amazon-bedrock`) | `aws-sdk-bedrockruntime`, `aws-config`, `aws-smithy-types`, `aws-smithy-http-client`, `aws-smithy-runtime-api` |
 | `vertex` | `google-vertex` (provider `google-vertex`) | `google-cloud-aiplatform-v1`, `google-cloud-auth`, `google-cloud-gax` |
 | `full` | all of the above | |
 
@@ -2142,7 +2142,7 @@ Rules:
 
 ### Provider-Scoped Environment Overrides
 
-Set `env` in `StreamOptions` to scope provider configuration to a request. Values in `env` are used before process environment variables for provider auth and configuration such as Cloudflare account IDs, Azure OpenAI settings, Vertex project/location, Bedrock settings and `PI_CACHE_RETENTION`.
+Set `env` in `StreamOptions` to scope provider configuration to a request. Values in `env` are used before process environment variables for provider auth and configuration such as Cloudflare account IDs, Azure OpenAI settings, Vertex project/location, Bedrock settings, `PI_CACHE_RETENTION`, and, for Amazon Bedrock, `HTTP_PROXY`/`HTTPS_PROXY`.
 
 ```rust,no_run
 # use delta_ai::{Context, Models};
@@ -2163,7 +2163,9 @@ let response = models.complete(&model, &context, options).await;
 # }
 ```
 
-Use this when one process needs different provider settings per request, or when ambient environment variables should not leak into a provider call. Proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`) are read by the HTTP client from the process environment, not from `env`.
+Use this when one process needs different provider settings per request, or when ambient environment variables should not leak into a provider call.
+
+Amazon Bedrock looks up `HTTPS_PROXY`/`HTTP_PROXY` (by the scheme of the model's base URL), `ALL_PROXY` and `NO_PROXY` in `env` first, then in the process environment; lowercase names win over uppercase ones. When a proxy applies, Bedrock sends every request through it over HTTP/1.1. The HTTP clients of the other providers read proxy settings from the process environment only.
 
 ## OAuth Providers
 
