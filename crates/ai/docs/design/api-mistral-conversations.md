@@ -143,7 +143,7 @@ Mistral 只接受 9 位字母数字 id。移植上游的规范化函数：
 
 - 不做客户端重试（上游直接调用 `fetch`，忽略 `maxRetries`）。`max_retries`、`max_retry_delay` 对本 API 无效。
 - 超时只覆盖等待响应头：默认 60 秒（上游 `timeoutMs ?? 60000`），由 `options.timeout` 覆盖；超时报错 `Mistral response headers timed out after <毫秒>ms`。响应体读取不设总时限，长时间的思考流不会被截断（上游 #10609）。
-- HTTP 错误：先调用 `on_response`，再读响应体，错误信息为 `Mistral API error (<状态码>): <去空白后的原始响应体，最多 4000 字符>`；响应体为空时用状态短语，没有短语时为 `Request failed with status <状态码>`。内部以 `Error::Status` 表示，并记录 `retry-after`。
+- HTTP 错误：先调用 `on_response`，再读响应体，错误信息为 `Mistral API error (<状态码>): <去空白后的原始响应体，最多 4000 字符>`；响应体为空时用状态短语，没有短语时为 `Request failed with status <状态码>`。内部以 `Error::Status` 表示，记录 `retry-after` 和原始响应体（`body`）。
 - 取消：`options.cancel` 在等待响应头、读响应体和读 SSE 时都会生效，流以 `aborted`、`Request was aborted` 结束；消费者丢弃流时生产者停止读取。
 - 请求阶段（发出 `start` 之前）的失败只产生一个 `error` 事件。
 

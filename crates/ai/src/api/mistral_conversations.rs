@@ -588,6 +588,7 @@ async fn request_stream(
     Err(Error::Status {
         status: status.as_u16(),
         message: format!("Mistral API error ({}): {detail}", status.as_u16()),
+        body: http::error_body_text(body),
         retry_after_ms,
     })
 }

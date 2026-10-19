@@ -58,7 +58,7 @@ Azure 模型没有可直接使用的 baseUrl：每个用户一个资源，按请
 ## 错误与重试
 
 - 重试与取消同 `openai-responses`（`http::send_with_retry`）。
-- HTTP 错误格式为 `Azure OpenAI API error (<status>): <消息>`；端点解析、缺少 key、流内错误保留原消息。
+- HTTP 错误格式与 `openai-responses` 相同，前缀为 `Azure OpenAI API error`：`Azure OpenAI API error (<status>): <error JSON>`，正文没有 `error` 对象时为 `Azure OpenAI API error (<status>): <SDK 消息>`；端点解析、缺少 key、流内错误保留原消息。
 - 流结束时停止原因仍为 pending 报错 `Azure OpenAI Responses stream ended without a stop reason`（实际上终止事件总会设置停止原因）。
 
 ## stream_simple

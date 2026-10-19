@@ -730,7 +730,55 @@ async fn http_errors_and_retries() {
     let (message, events) = run(&m, &hi(), options()).await;
     assert_eq!(kinds(&events), ["error"]);
     assert_eq!(message.stop_reason, StopReason::Error);
-    assert_eq!(message.error_message.as_deref(), Some("400 Invalid value for 'model'"));
+    // `formatProviderError` over the SDK error: the status and the body's `error` object.
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some(r#"400: {"message":"Invalid value for 'model'","type":"invalid_request_error"}"#)
+    );
+
+    // Bodies without an `error` object keep the SDK message.
+    for (status, body, expected) in [
+        (502, "Bad Gateway", "502 Bad Gateway"),
+        (
+            403,
+            r#"{"error":"blocked by gateway WAF"}"#,
+            r#"403 "blocked by gateway WAF""#,
+        ),
+        (404, r#"{"detail":"Not Found"}"#, "404 status code (no body)"),
+        (500, "", "500 status code (no body)"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(&server)
+            .await;
+        let m = model(&format!("{}/v1", server.uri()), "openai", "gpt-4o-mini", false, None);
+        let (message, _) = run(&m, &hi(), options()).await;
+        assert_eq!(message.error_message.as_deref(), Some(expected), "{body}");
+    }
+
+    // OpenRouter's `error.metadata.raw` is appended unless the message already contains it.
+    for (raw, expected) in [
+        (
+            "upstream WAF blocked policy XYZ",
+            r#"403: {"message":"Provider returned error","code":403,"metadata":{"raw":"upstream WAF blocked policy XYZ"}}"#,
+        ),
+        (
+            "{\"error\":\"quota\"}",
+            "403: {\"message\":\"Provider returned error\",\"code\":403,\"metadata\":{\"raw\":\"{\\\"error\\\":\\\"quota\\\"}\"}}\n{\"error\":\"quota\"}",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
+                "message": "Provider returned error", "code": 403, "metadata": {"raw": raw}
+            }})))
+            .mount(&server)
+            .await;
+        let m = model(&format!("{}/v1", server.uri()), "openrouter", "m", false, None);
+        let (message, _) = run(&m, &hi(), options()).await;
+        assert_eq!(message.error_message.as_deref(), Some(expected));
+    }
 
     let server = MockServer::start().await;
     Mock::given(method("POST"))

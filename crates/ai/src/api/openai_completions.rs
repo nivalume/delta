@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 
 use crate::api::common::{
-    apply_on_payload, finalize_usage, join_url, notify_response, observe_provider_event, spawn_stream,
+    self, apply_on_payload, finalize_usage, join_url, notify_response, observe_provider_event, spawn_stream,
 };
 use crate::api::constrained_sampling::{
     GrammarToolInputJsonBuffer, append_grammar_tool_input_json_delta, create_grammar_tool_input_properties,
@@ -33,7 +33,7 @@ use crate::compat::{
 };
 use crate::error::{Error, Result};
 use crate::events::{AssistantMessageEventStream, MessageBuilder};
-use crate::http;
+use crate::http::{self, js_trim};
 use crate::model::{CacheRetention, Model, ModelThinkingLevel};
 use crate::options::{
     ApiOptions, OpenAICompletionsOptions, ReasoningEffort, SimpleStreamOptions, StreamOptions, ToolChoice,
@@ -453,7 +453,8 @@ async fn run(
     let response = http::send_with_retry(options, || {
         Ok(client.post(&url).headers(headers.clone()).body(body.clone()))
     })
-    .await?;
+    .await
+    .map_err(format_http_error)?;
     notify_response(options, model, &response).await?;
     builder.start();
 
@@ -509,6 +510,42 @@ async fn run(
         return Err(Error::msg("Stream ended without finish_reason"));
     }
     Ok(())
+}
+
+/// The message upstream builds for an HTTP error: `formatProviderError` over the OpenAI SDK
+/// error (`"<status>: <error JSON>"`, or the SDK message such as `"<status> <text>"` when the
+/// body has no `error` object), plus OpenRouter's `error.metadata.raw` on its own line when
+/// the message does not already contain it.
+fn format_http_error(error: Error) -> Error {
+    let Error::Status {
+        status,
+        body,
+        retry_after_ms,
+        ..
+    } = error
+    else {
+        return error;
+    };
+    let (sdk_message, error_object) = common::openai_sdk_error(status, body.as_deref());
+    let mut message = common::format_provider_error(status, &sdk_message, error_object.as_ref(), None);
+    // Some providers via OpenRouter give additional information in this field.
+    if let Some(raw) = error_object
+        .as_ref()
+        .and_then(|error| error.pointer("/metadata/raw"))
+        .filter(|raw| js_truthy(raw))
+    {
+        let raw = raw.as_str().map_or_else(|| raw.to_string(), str::to_owned);
+        if !message.contains(&raw) {
+            message.push('\n');
+            message.push_str(&raw);
+        }
+    }
+    Error::Status {
+        status,
+        message,
+        body,
+        retry_after_ms,
+    }
 }
 
 /// An error carried inside the stream: a truthy top-level `error` (as the OpenAI SDK
@@ -975,15 +1012,6 @@ fn add_cache_control_to_text_content(message: &mut Value, cache_control: &Value)
 // ---------------------------------------------------------------------------
 // Messages and tools
 // ---------------------------------------------------------------------------
-
-/// Characters removed by JavaScript's `String.prototype.trim`.
-fn is_js_whitespace(c: char) -> bool {
-    (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
-}
-
-fn js_trim(text: &str) -> &str {
-    text.trim_matches(is_js_whitespace)
-}
 
 fn utf16_len(text: &str) -> usize {
     text.chars().map(char::len_utf16).sum()

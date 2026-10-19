@@ -160,7 +160,7 @@ SSE 层先模拟 OpenAI SDK：`data: [DONE]` 结束读取；无法解析为 JSON
 ## 错误与重试
 
 - 发送使用 `http::send_with_retry`：重试 408/409/429/5xx 和连接错误，遵守 `retry-after-ms` / `retry-after` 和 `max_retry_delay`，可被 `options.cancel` 中断。
-- HTTP 错误格式为 `<前缀> API error (<status>): <消息>`，前缀在 provider 为 `openai` 时是 `OpenAI`，否则是 provider id。其他错误（流内错误、配置错误）保留原消息。
+- HTTP 错误格式与上游 `formatProviderError(normalizeProviderError(error), "<前缀> API error")` 一致：正文的 `error` 是非空对象时为 `<前缀> API error (<status>): <error JSON>`，否则为 `<前缀> API error (<status>): <SDK 消息>`（如 `... (502): 502 Bad Gateway`）。前缀在 provider 为 `openai` 时是 `OpenAI`，否则是 provider id。原始正文来自 `Error::Status.body`。其他错误（流内错误、配置错误）保留原消息。
 - `start` 事件在响应被接受、`on_response` 回调之后发出。之后的失败以 `error` 事件结束并带上已收到的内容；取消时停止原因为 `aborted`，消息为 `Request was aborted`；消费方丢弃流时读循环返回 `Error::Aborted` 并停止。
 
 ## Rust 特有差异
@@ -170,7 +170,7 @@ SSE 层先模拟 OpenAI SDK：`data: [DONE]` 结束读取；无法解析为 JSON
 3. `output_item.added` 里已带的函数参数会作为一个 `toolcall_delta` 发出（上游只放进 `partialJson`，不发事件），这样 builder 解析的 JSON 与上游的 `partialJson` 一致。
 4. `MessageBuilder` 跳过空的 text/thinking/toolcall 增量，上游会发出空增量事件。
 5. 停止原因为 `length` 时，`spawn_stream` 会对仍未完成的工具调用调用 `end_open_tool_calls` 发出 `toolcall_end`；上游不发。
-6. HTTP 错误的正文：上游打印 SDK 解析出的 `error` 对象 JSON，这里用核心 `Error::Status` 提取的消息（`error.message` 等字段）。
+6. HTTP 错误正文先去掉首尾空白并截断到 4000 字符（`Error::Status.body`）：超过 4000 字符的 JSON 正文无法解析，按文本处理；`error` 对象由 `serde_json` 重新序列化，浮点数写法可能与 `JSON.stringify` 不同。
 7. `sanitizeSurrogates` 不需要：Rust 字符串不会含孤立代理项。
 8. `stream_simple` 缺少 API key 时上游同步抛错，这里返回以同样消息结束的错误流。
 9. 约束采样在 `api::constrained_sampling`，`shortHash` 在 `api::common`；`openai_responses_shared` 重新导出 `short_hash` 和 `create_grammar_tool_input_properties`。prompt cache key 截断仍是本模块的公开辅助函数。
@@ -190,6 +190,5 @@ SSE 层先模拟 OpenAI SDK：`data: [DONE]` 结束读取；无法解析为 JSON
 ## 待确认的改进
 
 - 未知 `status` 目前按上游报错（`Unhandled stop reason`）。provider-references 建议未知结束原因不应是硬错误，可以改为 `stop` 并保留 `raw_stop_reason`。
-- HTTP 错误可以像上游一样带上原始 `error` 对象 JSON，需要核心 `Error::Status` 保留原始正文。
 - `function_call_arguments.done` / `custom_tool_call_input.done` 缺少参数字段时目前忽略（上游会抛 TypeError）；可以考虑明确报错。
 - 缺少 `item.id` 的工具调用 id 会是 `call_x|undefined`（与上游和 pi-py 一致），可以考虑改为只用 `call_id`。

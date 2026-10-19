@@ -111,6 +111,24 @@ pub fn provider_response(response: &reqwest::Response) -> ProviderResponse {
     }
 }
 
+/// Whether `c` is whitespace for JavaScript's `String.prototype.trim` (Unicode `White_Space`
+/// except U+0085, plus U+FEFF).
+pub fn is_js_whitespace(c: char) -> bool {
+    (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
+}
+
+/// JavaScript's `String.prototype.trim`.
+pub fn js_trim(text: &str) -> &str {
+    text.trim_matches(is_js_whitespace)
+}
+
+/// An error response body as upstream keeps it (`extractBody` in `utils/error-body.ts`):
+/// trimmed, `None` when empty, truncated to [`MAX_PROVIDER_ERROR_BODY_CHARS`].
+pub fn error_body_text(body: &str) -> Option<String> {
+    let trimmed = js_trim(body);
+    (!trimmed.is_empty()).then(|| truncate_error_text(trimmed, MAX_PROVIDER_ERROR_BODY_CHARS))
+}
+
 /// Truncate error text to `max_chars` characters, noting how much was dropped.
 pub fn truncate_error_text(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
@@ -245,7 +263,8 @@ pub async fn or_cancel<T>(cancel: Option<&CancellationToken>, future: impl Futur
 
 /// Send a request built by `build` with the vendor SDK retry policy, interruptible by
 /// `options.cancel`. Returns the first successful response; error responses become
-/// [`Error::Status`] with the parsed body message, prefixed `"<status> "`.
+/// [`Error::Status`] with the parsed body message, prefixed `"<status> "`, and the raw body
+/// ([`error_body_text`]) for APIs that format the message themselves.
 pub async fn send_with_retry(
     options: &StreamOptions,
     mut build: impl FnMut() -> Result<reqwest::RequestBuilder>,
@@ -269,6 +288,7 @@ pub async fn send_with_retry(
                 let error = Error::Status {
                     status,
                     message: format!("{status} {detail}"),
+                    body: error_body_text(&body),
                     retry_after_ms: server_delay.map(|delay| delay.as_millis() as u64),
                 };
                 if retry_index >= max_retries || !is_retryable_status(status, &headers) {
@@ -495,6 +515,17 @@ mod tests {
         );
         assert_eq!(error_body_message("  plain  ").as_deref(), Some("plain"));
         assert_eq!(error_body_message(""), None);
+        // The raw body is kept trimmed (JavaScript whitespace) and capped as upstream does.
+        assert_eq!(error_body_text("\u{feff} {\"a\":1}\n").as_deref(), Some("{\"a\":1}"));
+        assert_eq!(error_body_text(" \n "), None);
+        let long = "x".repeat(MAX_PROVIDER_ERROR_BODY_CHARS + 50);
+        assert_eq!(
+            error_body_text(&long),
+            Some(format!(
+                "{}... [truncated 50 chars]",
+                "x".repeat(MAX_PROVIDER_ERROR_BODY_CHARS)
+            ))
+        );
         let mut headers = HeaderMap::new();
         headers.insert("retry-after", HeaderValue::from_static("2"));
         assert_eq!(retry_after(&headers), Some(Duration::from_secs(2)));

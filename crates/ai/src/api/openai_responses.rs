@@ -8,7 +8,7 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::api::common::{apply_on_payload, join_url, notify_response, require_auth, spawn_stream};
+use crate::api::common::{self, apply_on_payload, join_url, notify_response, require_auth, spawn_stream};
 use crate::api::openai_responses_shared::{
     ConvertResponsesMessagesOptions, ConvertResponsesToolsOptions, GrammarToolInputProperties, ResponsesStreamOptions,
     clamp_openai_prompt_cache_key, convert_responses_messages, convert_responses_tools,
@@ -385,16 +385,21 @@ fn build_request_headers(
     http::build_headers([&defaults, options.headers.as_ref().unwrap_or(&empty)])
 }
 
-/// Format an error like upstream's `formatProviderError(..., "<prefix> API error")`: HTTP
-/// errors become `"<prefix> (<status>): <body message>"`, others keep their message.
+/// Format an error like upstream's `formatProviderError(normalizeProviderError(error),
+/// "<prefix> API error")` over the OpenAI SDK error: HTTP errors become
+/// `"<prefix> (<status>): <error JSON>"` when the body has an `error` object, else
+/// `"<prefix> (<status>): <SDK message>"` (e.g. `"... (502): 502 Bad Gateway"`). Other errors
+/// keep their message.
 pub(crate) fn format_provider_error(error: Error, prefix: &str) -> Error {
     match error {
-        Error::Status { status, message, .. } => {
-            let detail = message
-                .strip_prefix(&format!("{status} "))
-                .unwrap_or(&message)
-                .to_owned();
-            Error::msg(format!("{prefix} ({status}): {detail}"))
+        Error::Status { status, body, .. } => {
+            let (message, error_object) = common::openai_sdk_error(status, body.as_deref());
+            Error::msg(common::format_provider_error(
+                status,
+                &message,
+                error_object.as_ref(),
+                Some(prefix),
+            ))
         }
         other => other,
     }
@@ -775,14 +780,34 @@ mod tests {
 
     #[test]
     fn http_errors_get_the_provider_prefix() {
-        let error = Error::Status {
-            status: 400,
-            message: "400 Invalid model".into(),
+        let status = |status: u16, body: Option<&str>| Error::Status {
+            status,
+            message: String::new(),
+            body: body.map(str::to_owned),
             retry_after_ms: None,
         };
+        // The SDK's `error` object is printed as JSON after the prefix.
+        let body = r#"{"error":{"message":"Invalid model","type":"invalid_request_error","param":null,"code":null}}"#;
         assert_eq!(
-            format_provider_error(error, "OpenAI API error").to_string(),
-            "OpenAI API error (400): Invalid model"
+            format_provider_error(status(400, Some(body)), "OpenAI API error").to_string(),
+            r#"OpenAI API error (400): {"message":"Invalid model","type":"invalid_request_error","param":null,"code":null}"#
+        );
+        // A body without an `error` object keeps the SDK message.
+        assert_eq!(
+            format_provider_error(status(502, Some("Bad Gateway")), "OpenAI API error").to_string(),
+            "OpenAI API error (502): 502 Bad Gateway"
+        );
+        assert_eq!(
+            format_provider_error(
+                status(403, Some(r#"{"error":"blocked by gateway WAF"}"#)),
+                "xai API error"
+            )
+            .to_string(),
+            r#"xai API error (403): 403 "blocked by gateway WAF""#
+        );
+        assert_eq!(
+            format_provider_error(status(500, None), "Azure OpenAI API error").to_string(),
+            "Azure OpenAI API error (500): 500 status code (no body)"
         );
         assert_eq!(
             format_provider_error(Error::msg("boom"), "OpenAI API error").to_string(),

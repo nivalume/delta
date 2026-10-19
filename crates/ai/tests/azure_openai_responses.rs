@@ -229,7 +229,7 @@ async fn http_error_prefix() {
     assert_eq!(message.stop_reason, StopReason::Error);
     assert_eq!(
         message.error_message.as_deref(),
-        Some("Azure OpenAI API error (401): Access denied")
+        Some(r#"Azure OpenAI API error (401): {"code":"401","message":"Access denied"}"#)
     );
 }
 

@@ -270,9 +270,10 @@ async fn http_errors_carry_status_and_body_message() {
     let (events, message) = collect(openai_responses::stream(&model(&base_url(&server)), &hi(), options())).await;
     assert_eq!(events.len(), 1);
     assert_eq!(message.stop_reason, StopReason::Error);
+    // The prefix, the status and the body's `error` object (upstream `formatProviderError`).
     assert_eq!(
         message.error_message.as_deref(),
-        Some("OpenAI API error (400): Invalid model")
+        Some(r#"OpenAI API error (400): {"message":"Invalid model","type":"invalid_request_error"}"#)
     );
 
     let mut proxy = model(&base_url(&server));
@@ -280,7 +281,19 @@ async fn http_errors_carry_status_and_body_message() {
     let (_, message) = collect(openai_responses::stream(&proxy, &hi(), options())).await;
     assert_eq!(
         message.error_message.as_deref(),
-        Some("opencode API error (400): Invalid model")
+        Some(r#"opencode API error (400): {"message":"Invalid model","type":"invalid_request_error"}"#)
+    );
+
+    // A gateway body without an `error` object keeps the SDK message after the prefix.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("blocked by gateway WAF"))
+        .mount(&server)
+        .await;
+    let (_, message) = collect(openai_responses::stream(&model(&base_url(&server)), &hi(), options())).await;
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("OpenAI API error (403): 403 blocked by gateway WAF")
     );
 }
 

@@ -19,7 +19,16 @@
 - 退避期间和请求过程中都响应 `options.cancel`。
 - 请求超时：`timeout`，默认 10 分钟（与 SDK 默认一致）。
 
-错误响应变成 `Error::Status { status, message: "<status> <正文消息>", retry_after_ms }`。正文消息取 JSON 的 `error.message` / `message` / `error` / `detail`，否则取整段文本，截断到 4000 字符（上游 `MAX_PROVIDER_ERROR_BODY_CHARS`）。
+错误响应变成 `Error::Status { status, message: "<status> <正文消息>", body, retry_after_ms }`。正文消息取 JSON 的 `error.message` / `message` / `error` / `detail`，否则取整段文本，截断到 4000 字符（上游 `MAX_PROVIDER_ERROR_BODY_CHARS`）。`body` 是原始正文，按上游 `normalizeProviderError` 的做法去掉首尾空白（JavaScript `trim` 的空白集合）、空正文为 `None`、截断到 4000 字符并注明截掉的字符数（`http::error_body_text`）。
+
+上游的 HTTP 错误文本来自厂商 SDK 的错误对象，各 API 用 `body` 按上游格式重写 `message`：
+
+- `openai-completions`、`openai-responses`、`azure-openai-responses`：OpenAI SDK 的 `APIError` 消息加 `formatProviderError`（`api::common::openai_sdk_error`、`api::common::format_provider_error`）。
+- `anthropic-messages`：Anthropic SDK 的 `APIError` 消息，`"<status> <整个 JSON body>"`（`api::common::sdk_api_error_message`）。
+- `google-generative-ai`：`@google/genai` 的 `ApiError` 消息，即整段 JSON 正文（`google_shared::format_google_http_error`）。
+- `mistral-conversations` 不经过 `send_with_retry`，自己按上游格式 `Mistral API error (<status>): <正文>` 生成消息，也填写 `body`。
+
+截断按字符计数，上游按 UTF-16 码元计数；超过 4000 字符的 JSON 正文截断后无法解析，按文本处理。
 
 ## SSE 解码（`SseDecoder`、`sse_events`）
 

@@ -476,13 +476,21 @@ async fn http_errors_carry_status_and_body_message() {
     let m = model(&base_url(&server), "gemini-2.5-flash");
     let message = stream(&m, &hello(), options("k")).result().await;
     assert_eq!(message.stop_reason, StopReason::Error);
-    assert_eq!(message.error_message.as_deref(), Some("400 API key not valid."));
+    // `@google/genai` puts the JSON body in the message; upstream keeps it as is.
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some(r#"{"error":{"code":400,"message":"API key not valid.","status":"INVALID_ARGUMENT"}}"#)
+    );
     assert!(message.content.is_empty());
 
+    // A body that is not JSON is wrapped the way the SDK does.
     let server = server_html_error().await;
     let m = model(&base_url(&server), "gemini-2.5-flash");
     let message = stream(&m, &hello(), options("k")).result().await;
-    assert_eq!(message.error_message.as_deref(), Some("502 bad gateway"));
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some(r#"{"error":{"message":"bad gateway","code":502,"status":"Bad Gateway"}}"#)
+    );
 }
 
 async fn server_html_error() -> MockServer {

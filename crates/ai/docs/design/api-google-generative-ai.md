@@ -113,7 +113,7 @@ Vertex 模块要做的只有：把 `GenerateRequest` 转成 proto 请求，把 p
 ## 错误与重试
 
 - 缺少密钥：`No API key for provider: <provider>`。`require_auth` 也接受 `options.headers` 里的 `x-goog-api-key`。
-- HTTP 错误：`http::send_with_retry`，消息 `"<status> <error.message>"`（非 JSON 正文取文本），见 `http.md`。可重试：408、409、429、5xx、连接错误，`retry-after-ms`/`retry-after` 生效，超过 `max_retry_delay` 立即失败。
+- HTTP 错误：`http::send_with_retry`，消息与 `@google/genai` 的 `ApiError` 一致（`google_shared::format_google_http_error`）：JSON 正文重新序列化后的整段 JSON（如 `{"error":{"code":400,"message":"API key not valid.","status":"INVALID_ARGUMENT"}}`），非 JSON 正文为 `{"error":{"message":"<文本>","code":<status>,"status":"<状态短语>"}}`；上游的 `formatProviderError` 原样保留它。可重试：408、409、429、5xx、连接错误，`retry-after-ms`/`retry-after` 生效，超过 `max_retry_delay` 立即失败。
 - 流内错误信封：`got status: <error.status>. <整个 chunk 的 JSON>`（SDK 的措辞），不重试，已收到的内容保留在错误消息里。
 - 无法解析的 chunk：`Failed to parse Google stream chunk: <原因>`。
 - 取消：请求前、重试等待中、读流中都响应 `options.cancel`，以 `aborted` 结束，保留部分内容；消费者丢弃流时停止读取。
@@ -124,7 +124,7 @@ Vertex 模块要做的只有：把 `GenerateRequest` 转成 proto 请求，把 p
 
 - `on_payload` 拿到的是 REST 请求体（`contents`、`systemInstruction`、`tools`、`toolConfig`、`generationConfig`），而不是 SDK 的 `{model, contents, config}`；修改要按 REST 字段名写（如 `generationConfig.topK`）。返回值原样作为请求体发送。
 - `on_provider_stream_event` 拿到的是 chunk 的原始 JSON，而不是 SDK 对象（字段名相同）。
-- HTTP 错误消息用核心的 `"<status> <消息>"` 格式；上游是 SDK 拼出的整段 JSON 正文。溢出检测等按消息内容匹配的逻辑不受影响。
+- HTTP 错误消息：SDK 按 `content-type` 是否为 JSON 决定解析还是包装文本，这里按正文能否解析为 JSON 决定（`Error::Status` 不带响应头）；`content-type` 是 JSON 但正文无法解析时上游抛 `SyntaxError`，这里按文本包装。正文先去掉首尾空白并截断到 4000 字符，超过 4000 字符的 JSON 正文按文本包装。状态短语用 `StatusCode::canonical_reason`（fetch 的 `statusText` 是服务器给的原因短语，HTTP/2 下为空）。
 - 重试走核心策略：`max_retries` 默认 2（上游 Google 适配器默认 0），会使用 `retry-after` 头（SDK 的 `ApiError` 没有头，上游从不使用），连接错误也重试（上游不重试）。
 - 预先取消时消息是 "Request was aborted"（上游 `buildParams` 里是 "Request aborted"）。
 - 结束原因：REST 拿到的是字符串，用上游的 `mapStopReasonString` 语义，未知值映射为 `error`，消息 "Provider stopped with: <raw>"；上游 SDK 路径对未知枚举值抛 "Unhandled stop reason: <raw>"。两者结果都是 `error`。
@@ -165,7 +165,6 @@ Vertex 模块要做的只有：把 `GenerateRequest` 转成 proto 请求，把 p
 
 - 按 provider-references 内联 `$defs`/`definitions` 引用（递归引用变 `{}`，无法解析的引用保持原样）。上游原样发送 `parametersJsonSchema`，所以没有实现。
 - 用响应的 `modelVersion` 填 `response_model`（上游不填）。
-- HTTP 错误消息是否改成上游的 JSON 正文格式，以便与 pi 的消息逐字一致。
 - 流内 `UNAVAILABLE`/`RESOURCE_EXHAUSTED` 错误是否像 Anthropic 的 `overloaded_error` 一样可重试（目前与上游一致，不重试）。
 - `toolUsePromptTokenCount` 没有计入 `input`（`total_tokens` 取服务器值，所以可能与各分量之和不等）。
 - Gemini 3 以下的“工具结果图片”回合会打断函数响应的合并，后面的工具结果（包括合成的孤立结果）落到新的用户回合，与上游相同；可以考虑把图片回合放到所有函数响应之后。

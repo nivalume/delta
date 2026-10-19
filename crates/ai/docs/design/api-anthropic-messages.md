@@ -131,8 +131,8 @@
 
 - **事件形状**：tau 的事件不携带共享 `partial`。`content_block_start` 自带非空文本时，额外发一个 `text_delta`，使消费端归约出的部分消息包含这段文本；thinking 的初始文本和签名随 `thinking_start` 给出。上游只发 `text_start`/`thinking_start`。
 - **未结束的工具调用**：成功结束时 `spawn_stream` 会为仍未收到 `content_block_stop` 的工具调用补发 `toolcall_end`（共享契约），上游不补发。
-- **HTTP 错误消息**：核心的 `Error::Status` 消息是 `"<status> <error.message>"`（如 `400 prompt is too long`）；上游 SDK 的消息是 `"<status> <整个 JSON body>"`。连接错误、超时的文字也是 reqwest 的而不是 SDK 的 `Connection error.` / `Request timed out.`。
-- **严格工具降级的判断**：上游还要求错误体的 `error.type == "invalid_request_error"`。`Error::Status` 不保留响应体，所以这里只判断状态码和消息文本（见下方“需要的核心改动”）。
+- **HTTP 错误消息**：与 SDK 的 `APIError.makeMessage` 一样由 `Error::Status` 的原始响应体拼出：JSON 正文是 `"<status> <整个 JSON body>"`（如 `400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long"}}`），否则是 `"<status> <文本>"`，空正文是 `"<status> status code (no body)"`。差异：正文先去掉首尾空白并截断到 4000 字符（`Error::Status.body`），超过 4000 字符的 JSON 正文无法解析，按文本处理；JSON 由 `serde_json` 重新序列化，浮点数写法可能与 `JSON.stringify` 不同（如 `1.0`）。连接错误、超时的文字是 reqwest 的而不是 SDK 的 `Connection error.` / `Request timed out.`。
+- **严格工具降级的判断**：与上游一样要求状态码 400、错误体的 `error.type == "invalid_request_error"`，且消息包含上述限制文本之一。
 - **SSE 解析**：使用共享的 `http::SseDecoder`。只有 `event:` 没有 `data:` 的事件会被它丢弃（上游会以空 data 解析失败）；解析失败消息中的 `raw=` 由事件名和 data 行重建，不含注释/`id:` 行；JSON 错误文字是 serde 的，不是 JS 的 `SyntaxError`。解析结果不是对象时同样报 `Could not parse Anthropic SSE event ...`。
 - **字符串清理**：上游对发送文本调用 `sanitizeSurrogates` 去除孤立代理项。Rust `String` 不可能含孤立代理项，所以无需处理。
 - **用量字段**：`message_start` 缺少 `usage` 时按 0 处理（上游会抛 `TypeError`）。token 数为浮点时截断为整数。
@@ -144,10 +144,6 @@
 - **工作负载身份联合**（`ANTHROPIC_FEDERATION_RULE_ID`、`ANTHROPIC_ORGANIZATION_ID`、`ANTHROPIC_IDENTITY_TOKEN_FILE`、`ANTHROPIC_WORKSPACE_ID`、`ANTHROPIC_SERVICE_ACCOUNT_ID`）：上游把 OIDC 令牌交换与缓存交给 SDK。本次不在范围内，没有 key/认证头时一律报 `No API key for provider: ...`。需要时可在本模块内实现 `POST /v1/oauth/token`（jwt-bearer）交换、按配置缓存令牌、401 时作废重换，并让 `stream_simple`/`stream` 的认证检查接受该配置。
 - **GitHub Copilot 动态头**（`X-Initiator`、`Openai-Intent`、视觉输入标记）：只保留 Copilot 的 Bearer 认证，代码中有 `// Not ported` 注释。
 - 遥测、OAuth 登录流程、延迟响应、WebSocket 传输：按任务说明不在范围内。
-
-## 需要的核心改动（未在本模块内实现）
-
-- `error.rs` 的 `Error::Status` 增加原始响应体（如 `body: Option<String>`）或解析出的 `error_type: Option<String>`，由 `http::send_with_retry` 填写。这样严格工具降级可以与上游一样检查 `invalid_request_error`，也能在需要时还原 SDK 风格的错误消息。
 
 ## 待确认的改进
 

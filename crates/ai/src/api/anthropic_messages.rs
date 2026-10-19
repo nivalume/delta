@@ -1043,11 +1043,47 @@ fn take_request_headers(params: &mut Value) -> ProviderHeaders {
     headers
 }
 
+/// Give an HTTP error the message the Anthropic SDK gives it (`APIError.makeMessage` over
+/// the whole parsed body), which upstream surfaces as is: `400 {"type":"error","error":{...}}`
+/// for a JSON body, `"<status> <text>"` otherwise.
+fn format_http_error(error: Error) -> Error {
+    let Error::Status {
+        status,
+        body,
+        retry_after_ms,
+        ..
+    } = error
+    else {
+        return error;
+    };
+    let (json, text) = common::sdk_error_body(body.as_deref());
+    let message = common::sdk_api_error_message(status, json.as_ref(), text);
+    Error::Status {
+        status,
+        message,
+        body,
+        retry_after_ms,
+    }
+}
+
+/// A 400 `invalid_request_error` (the SDK's `error.type`, from the body's `error.type`) whose
+/// message names one of the strict tool limits.
 fn is_strict_tool_limit_error(error: &Error) -> bool {
-    // Upstream also requires the error type `invalid_request_error`; `Error::Status` does not
-    // carry the body's error type, so only the status and message are checked.
-    matches!(error, Error::Status { status: 400, message, .. }
-        if STRICT_TOOL_LIMIT_MESSAGES.iter().any(|text| message.contains(text)))
+    let Error::Status {
+        status: 400,
+        message,
+        body,
+        ..
+    } = error
+    else {
+        return false;
+    };
+    let error_type = body
+        .as_deref()
+        .and_then(|body| serde_json::from_str::<Value>(body).ok())
+        .and_then(|body| body.pointer("/error/type").and_then(Value::as_str).map(str::to_owned));
+    error_type.as_deref() == Some("invalid_request_error")
+        && STRICT_TOOL_LIMIT_MESSAGES.iter().any(|text| message.contains(text))
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,7 +1166,8 @@ async fn run(
         let sent = http::send_with_retry(&retry_options, || {
             Ok(client.post(&url).headers(headers.clone()).body(body.clone()))
         })
-        .await;
+        .await
+        .map_err(format_http_error);
         match sent {
             Ok(response) => break response,
             Err(error) => {

@@ -762,7 +762,29 @@ async fn http_errors_carry_status_and_message() {
     let (events, result) = collect(stream(&model, &transcript(&hello()), key())).await;
     assert_eq!(kinds(&events), ["error"]);
     assert_eq!(result.stop_reason, StopReason::Error);
-    assert_eq!(result.error_message.as_deref(), Some("400 prompt is too long"));
+    // The Anthropic SDK's `APIError` message: the status and the whole JSON body.
+    assert_eq!(
+        result.error_message.as_deref(),
+        Some(r#"400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long"}}"#)
+    );
+}
+
+#[tokio::test]
+async fn http_errors_without_a_json_body_keep_the_text() {
+    for (status, body, expected) in [
+        (502, "upstream connect error", "502 upstream connect error"),
+        (503, "", "503 status code (no body)"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(&server)
+            .await;
+        let model = model(&server.uri(), json!({}));
+        let (_, result) = collect(stream(&model, &transcript(&hello()), key())).await;
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(result.error_message.as_deref(), Some(expected));
+    }
 }
 
 #[tokio::test]
@@ -786,7 +808,10 @@ async fn retries_only_when_max_retries_is_set() {
 
     // Upstream's retry helper defaults to no retries.
     let (_, result) = collect(stream(&model, &transcript(&hello()), key())).await;
-    assert_eq!(result.error_message.as_deref(), Some("529 Overloaded"));
+    assert_eq!(
+        result.error_message.as_deref(),
+        Some(r#"529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#)
+    );
     assert_eq!(requests(&server).await.len(), 1);
 
     let options = StreamOptions {
@@ -1187,20 +1212,39 @@ async fn strict_tool_limit_rejection_retries_with_non_strict_preferred_tools() {
 
 #[tokio::test]
 async fn strict_tool_fallback_only_for_matching_rejections() {
-    for (tools, status, message) in [
+    const INVALID: &str = "invalid_request_error";
+    for (tools, status, kind, message) in [
         // Only required or ordinary tools: nothing to downgrade.
-        (vec![strict_tool("lookup", StrictMode::Require)], 400, GRAMMAR_ERROR),
-        (vec![empty_tool("lookup")], 400, GRAMMAR_ERROR),
+        (
+            vec![strict_tool("lookup", StrictMode::Require)],
+            400,
+            INVALID,
+            GRAMMAR_ERROR,
+        ),
+        (vec![empty_tool("lookup")], 400, INVALID, GRAMMAR_ERROR),
         (
             vec![strict_tool("lookup", StrictMode::Prefer)],
             400,
+            INVALID,
             "Invalid tool schema",
         ),
-        (vec![strict_tool("lookup", StrictMode::Prefer)], 500, GRAMMAR_ERROR),
+        (
+            vec![strict_tool("lookup", StrictMode::Prefer)],
+            500,
+            INVALID,
+            GRAMMAR_ERROR,
+        ),
+        // Upstream also requires the SDK error type `invalid_request_error`.
+        (
+            vec![strict_tool("lookup", StrictMode::Prefer)],
+            400,
+            "api_error",
+            GRAMMAR_ERROR,
+        ),
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(status).set_body_json(error_body("invalid_request_error", message)))
+            .respond_with(ResponseTemplate::new(status).set_body_json(error_body(kind, message)))
             .mount(&server)
             .await;
         let model = model(&server.uri(), json!({"compat": {"supportsStrictTools": true}}));

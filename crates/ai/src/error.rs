@@ -117,6 +117,11 @@ pub enum Error {
     Status {
         status: u16,
         message: String,
+        /// The raw response body, trimmed and truncated to
+        /// [`crate::http::MAX_PROVIDER_ERROR_BODY_CHARS`] (upstream `normalizeProviderError`'s
+        /// `body`); `None` when empty. APIs whose upstream error text comes from the vendor
+        /// SDK's error object format their message from it.
+        body: Option<String>,
         /// Server-requested retry delay, when present.
         retry_after_ms: Option<u64>,
     },

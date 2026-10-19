@@ -160,7 +160,11 @@ toolUse，否则 stop；stop reason 为 error → 以其消息失败；`supports
 
 - 请求通过 `http::send_with_retry`：408/409/429/5xx 与连接错误重试，遵守 `retry-after-ms` /
   `retry-after`，超过 `max_retry_delay` 立即失败；取消随时生效。
-- HTTP 错误消息为核心统一格式 `"<status> <body message>"`。
+- HTTP 错误消息与上游一致：先按 OpenAI SDK 得到 `APIError`（消息 `"<status> <error.message>"`，正文
+  没有 `error` 对象时为 `"<status> <文本>"` 或 `"<status> status code (no body)"`），再按
+  `formatProviderError`：正文的 `error` 是非空对象且消息里不含它时为 `"<status>: <error JSON>"`，否则为
+  SDK 消息。OpenRouter 的 `error.metadata.raw` 不在消息里时另起一行追加。原始正文来自
+  `Error::Status.body`，辅助函数在 `api::common`（`openai_sdk_error`、`format_provider_error`）。
 - 失败时（包括 HTTP 错误前、流中错误、取消）流以 `error` 事件结束，保留已收到的内容；已收集的
   `reasoning_details` 仍写入思考签名。
 - 取消：读取循环结束，已打开的块正常结束，然后以 `Request was aborted`（aborted）失败，与上游
@@ -173,10 +177,9 @@ toolUse，否则 stop；stop reason 为 error → 以其消息失败；`supports
 - grammar 工具调用的参数由 builder 解析流出的 JSON 得到，结果与上游 `{property: input}` 相同。
   若同一个调用先以 function 增量开始、后改为 custom（上游会丢弃已有的 function 参数缓冲），
   builder 中已累积的 JSON 无法清除，参数可能解析失败。
-- HTTP 错误格式与上游不同：上游经 OpenAI SDK 和 `formatProviderError` 得到
-  `400: {"message":...,"type":...}` 或 `502 Bad Gateway`；这里是核心的 `400 <message>`。HTTP 错误体中
-  OpenRouter 的 `error.metadata.raw` 因核心不保留原始错误体而无法追加（流内错误会追加）。
-  连接错误的文本也来自 reqwest 而不是 SDK 的 `Connection error.`。
+- HTTP 错误正文先去掉首尾空白并截断到 4000 字符（`Error::Status.body`）：超过 4000 字符的 JSON 正文
+  无法解析，按文本处理；`error` 对象由 `serde_json` 重新序列化，浮点数写法可能与 `JSON.stringify`
+  不同（如 `1.0`）。连接错误的文本来自 reqwest 而不是 SDK 的 `Connection error.`。
 - 默认重试次数由核心决定（`DEFAULT_MAX_RETRIES = 2`），上游 `retryProviderRequest` 默认不重试。
 - 不发送 OpenAI SDK 的 `X-Stainless-*` 头；`User-Agent` 为核心的 `tau/<版本> (...)`。
 - Rust 字符串不含孤立代理项，`sanitizeSurrogates` 无需移植。
@@ -202,8 +205,6 @@ toolUse，否则 stop；stop reason 为 error → 以其消息失败；`supports
 
 ## 待确认的改进
 
-- 核心 `Error::Status` 保留原始错误体（或解析后的 JSON），使本 API 能复现上游的
-  `<status>: <error JSON>` 格式并追加 OpenRouter `error.metadata.raw`。
 - 流内 `overloaded`/`529` 类错误是否按可重试处理（上游不重试）。
 - provider-references 的“同一 index 不同 id 视为新调用”规则是否需要对某些 provider 生效
   （与上游 Kimi 行为冲突，目前未采用）。

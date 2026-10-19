@@ -1077,6 +1077,39 @@ fn backoff(retry_index: u32) -> Duration {
     Duration::from_secs_f64(base * (1.0 - jitter))
 }
 
+/// Give an HTTP error the message `@google/genai` gives it (`ApiError` from
+/// `throwErrorIfNotOK`): the JSON body re-serialized, or for a body that is not JSON
+/// `{"error":{"message":<text>,"code":<status>,"status":<status text>}}`. Upstream's
+/// `formatProviderError` keeps that message as it is. Other errors are returned unchanged.
+pub fn format_google_http_error(error: Error) -> Error {
+    let Error::Status {
+        status,
+        body,
+        retry_after_ms,
+        ..
+    } = error
+    else {
+        return error;
+    };
+    let text = body.as_deref().unwrap_or("");
+    let message = match serde_json::from_str::<Value>(text) {
+        Ok(json) => json.to_string(),
+        Err(_) => {
+            let status_text = reqwest::StatusCode::from_u16(status)
+                .ok()
+                .and_then(|code| code.canonical_reason())
+                .unwrap_or("");
+            serde_json::json!({"error": {"message": text, "code": status, "status": status_text}}).to_string()
+        }
+    };
+    Error::Status {
+        status,
+        message,
+        body,
+        retry_after_ms,
+    }
+}
+
 /// Run a request with the shared provider retry policy (upstream `retryGoogleRequest`), for
 /// transports that do not go through [`http::send_with_retry`] (the Vertex AI SDK).
 ///
@@ -1940,6 +1973,7 @@ mod tests {
         Error::Status {
             status: code,
             message: format!("got status: {code}"),
+            body: None,
             retry_after_ms: None,
         }
     }
@@ -1988,6 +2022,7 @@ mod tests {
             Err(Error::Status {
                 status: 503,
                 message: "503 busy".into(),
+                body: None,
                 retry_after_ms: Some(5000),
             })
         })
@@ -1996,5 +2031,38 @@ mod tests {
             result.unwrap_err().to_string(),
             "Server requested 5s retry delay (max: 1s). 503 busy"
         );
+    }
+
+    #[test]
+    fn http_errors_carry_the_sdk_json_message() {
+        let error = |status: u16, body: Option<&str>| {
+            format_google_http_error(Error::Status {
+                status,
+                message: String::new(),
+                body: body.map(str::to_owned),
+                retry_after_ms: None,
+            })
+            .to_string()
+        };
+        // A JSON body is re-serialized (compact), as `JSON.stringify(await response.json())`.
+        assert_eq!(
+            error(
+                400,
+                Some(
+                    "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"API key not valid.\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}"
+                )
+            ),
+            r#"{"error":{"code":400,"message":"API key not valid.","status":"INVALID_ARGUMENT"}}"#
+        );
+        // Other bodies are wrapped like the SDK does.
+        assert_eq!(
+            error(403, Some("blocked by gateway WAF")),
+            r#"{"error":{"message":"blocked by gateway WAF","code":403,"status":"Forbidden"}}"#
+        );
+        assert_eq!(
+            error(502, None),
+            r#"{"error":{"message":"","code":502,"status":"Bad Gateway"}}"#
+        );
+        assert_eq!(format_google_http_error(Error::msg("boom")).to_string(), "boom");
     }
 }

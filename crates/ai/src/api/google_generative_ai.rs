@@ -15,7 +15,7 @@ use crate::api::common::{
 use crate::api::google_shared::{
     Candidate, Content, FunctionDeclaration, GenerateRequest, InlineData, Part, RequestSettings, ResponseChunk,
     ResponseFunctionCall, ResponsePart, StreamState, ThinkingConfig, ToolParameters, UsageMetadata, build_request,
-    check_finished, google_thinking_level_name, simple_thinking, simple_tool_choice,
+    check_finished, format_google_http_error, google_thinking_level_name, simple_thinking, simple_tool_choice,
 };
 use crate::error::{Error, Result};
 use crate::events::{AssistantMessageEventStream, MessageBuilder};
@@ -124,8 +124,9 @@ async fn run(
     }
     let headers = http::build_headers([&defaults, options.headers.as_ref().unwrap_or(&ProviderHeaders::new())])?;
     let client = http::client(options);
-    let response =
-        http::send_with_retry(options, || Ok(client.post(&url).headers(headers.clone()).json(&body))).await?;
+    let response = http::send_with_retry(options, || Ok(client.post(&url).headers(headers.clone()).json(&body)))
+        .await
+        .map_err(format_google_http_error)?;
     notify_response(options, model, &response).await?;
     builder.start();
 
