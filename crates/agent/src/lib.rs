@@ -30,3 +30,7 @@ pub use types::{
     AfterToolCallResult, AgentEvent, AgentMessage, AgentToolCallOutcome, AgentToolResult, AgentTurnDecision,
     BeforeToolCallResult, CustomMessage, NoCustom, QueueMode, ToolExecutionMode,
 };
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
