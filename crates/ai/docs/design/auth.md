@@ -1,49 +1,49 @@
-# 鉴权（`auth`）
+# Auth (`auth`)
 
-上游：`src/auth/types.ts`、`src/auth/resolve.ts`、`src/auth/helpers.ts`、`src/auth/context.ts`、`src/auth/credential-store.ts`。
+Upstream: `src/auth/types.ts`, `src/auth/resolve.ts`, `src/auth/helpers.ts`, `src/auth/context.ts`, `src/auth/credential-store.ts`.
 
-## 类型
+## Types
 
-| 上游 | Rust |
+| Upstream | Rust |
 | --- | --- |
 | `ModelAuth { apiKey, headers, baseUrl }` | `ModelAuth` |
-| `ApiKeyCredential` / `OAuthCredential` / `Credential` | 同名；`Credential` 用 `type` 标签（`api_key` / `oauth`），与 pi 的 `auth.json` 格式一致；OAuth 的额外字段放在 `extra` |
-| `CredentialStore` | trait：`read`、`list`、`modify`、`delete` |
-| `InMemoryCredentialStore` | 同名，按 provider 串行化写入 |
-| `AuthContext` | trait：`env(name)`、`file_exists(path)`；默认实现 `DefaultAuthContext` |
-| `ApiKeyAuth` | trait：`name`、`resolve`、可选 `check`、可选 `login` |
-| `OAuthAuth` | trait：`name`、`login`、`refresh`、`to_auth` |
-| `ProviderAuth { apiKey?, oauth? }` | `ProviderAuth { api_key, oauth }`（`Arc<dyn ..>`） |
+| `ApiKeyCredential` / `OAuthCredential` / `Credential` | Same names; `Credential` is tagged by `type` (`api_key` / `oauth`), matching pi's `auth.json` format; extra OAuth fields go in `extra` |
+| `CredentialStore` | trait: `read`, `list`, `modify`, `delete` |
+| `InMemoryCredentialStore` | Same name; serializes writes per provider |
+| `AuthContext` | trait: `env(name)`, `file_exists(path)`; default implementation `DefaultAuthContext` |
+| `ApiKeyAuth` | trait: `name`, `resolve`, optional `check`, optional `login` |
+| `OAuthAuth` | trait: `name`, `login`, `refresh`, `to_auth` |
+| `ProviderAuth { apiKey?, oauth? }` | `ProviderAuth { api_key, oauth }` (`Arc<dyn ..>`) |
 | `envApiKeyAuth(name, envVars)` | `env_api_key_auth(name, &[..])` |
-| 本地无 key 服务器的 `resolve: () => ({ auth: {} })` | `ProviderAuth::keyless(name)` |
-| `AuthInteraction` / `AuthPrompt` / `AuthEvent` | 同名 trait / 枚举 |
+| `resolve: () => ({ auth: {} })` for local servers without a key | `ProviderAuth::keyless(name)` |
+| `AuthInteraction` / `AuthPrompt` / `AuthEvent` | trait / enums with the same names |
 
-`CredentialStore::modify` 是唯一的写入路径：传入的函数拿到当前凭据，返回新凭据或 `None`（不变）。存储实现负责对同一 provider 串行化（支持时跨进程加锁，例如文件锁）。
+`CredentialStore::modify` is the only write path. The function passed in receives the current credential and returns a new credential, or `None` (unchanged). The store implementation serializes access per provider (with a cross-process lock where supported, for example a file lock).
 
-## 解析顺序（`resolve_provider_auth`）
+## Resolution order (`resolve_provider_auth`)
 
-与上游一致：
+Same as upstream:
 
-1. 显式 `api_key`（请求选项）且 provider 有 API key 鉴权：用它构造临时凭据解析。
-2. 有存储的凭据：
-   - OAuth 且 provider 支持 OAuth：剩余有效期不足 5 分钟（或调用方要求的更长时间）时在锁内刷新，然后 `to_auth`。
-   - API key 且 provider 支持：用存储的 key 和 env 解析（请求的 env 覆盖存储的）。
-   - 类型不匹配：视为未配置，不回退到环境变量。
-3. 没有存储的凭据：用环境变量等环境来源解析。
+1. An explicit `api_key` (request option) and the provider has API key auth: build a temporary credential from it and resolve.
+2. A stored credential exists:
+   - OAuth and the provider supports OAuth: if less than 5 minutes of validity remain (or a longer period the caller asks for), refresh inside the lock, then call `to_auth`.
+   - API key and the provider supports it: resolve with the stored key and env (the request's env overrides the stored one).
+   - Type mismatch: treated as not configured; no fallback to environment variables.
+3. No stored credential: resolve from environment sources such as environment variables.
 
-存储的凭据拥有该 provider：只有没有存储凭据时才看环境变量；OAuth 刷新失败不会悄悄改用环境变量里的 key。
+A stored credential owns the provider: environment variables are only consulted when no credential is stored. A failed OAuth refresh does not silently fall back to a key from environment variables.
 
-请求的 `env` 覆盖层：`OverlayAuthContext` 先查请求的 env，再查进程环境。空白值视为未设置。
+The request's `env` overlay: `OverlayAuthContext` checks the request's env first, then the process environment. Blank values count as unset.
 
-## OAuth 刷新加锁
+## OAuth refresh locking
 
-`refresh_stored_oauth_credential`：在 `modify` 内重新检查是否需要刷新（双重检查），需要时调用 `oauth.refresh`，结果在释放锁前写入存储。并发请求只刷新一次（有测试覆盖）。
+`refresh_stored_oauth_credential`: inside `modify`, check again whether a refresh is needed (double check). If so, call `oauth.refresh` and write the result to the store before the lock is released. Concurrent requests refresh only once (covered by tests).
 
-上游里调用方的 signal 只取消“等锁”，刷新一旦开始就忽略 signal，只受 15 秒超时约束，以免丢失已轮换的 refresh token。Rust 里取消就是丢弃 future，所以整个刷新放在独立的 Tokio 任务里，调用方丢弃 future 不影响刷新完成和写回；刷新本身仍有 15 秒超时。
+In upstream, the caller's signal only cancels the wait for the lock. Once the refresh starts, it ignores the signal and is bounded only by a 15-second timeout, so that a rotated refresh token is not lost. In Rust, cancelling means dropping the future, so the whole refresh runs in a separate Tokio task. Dropping the caller's future does not stop the refresh from completing and writing back. The refresh itself still has a 15-second timeout.
 
-错误码：刷新失败 → `OAuth`（凭据保留，重新登录可修复）；存储读写失败或 API key 解析失败 → `Auth`。
+Error codes: refresh failure → `OAuth` (the credential is kept; logging in again fixes it); store read/write failure or API key resolution failure → `Auth`.
 
-## 第一阶段范围
+## Scope of the first phase
 
-- 已实现：类型、内存存储、解析顺序、加锁刷新、`env_api_key_auth`、`keyless`、`Models::login/logout` 框架。
-- 未实现：各 provider 的具体 OAuth 登录流程（Anthropic、OpenAI ChatGPT、Codex、GitHub Copilot、OpenRouter 等）、回调服务器、设备码流程、PKCE。它们放在后续阶段，按 provider 逐个移植。
+- Implemented: types, in-memory store, resolution order, locked refresh, `env_api_key_auth`, `keyless`, the `Models::login/logout` framework.
+- Not implemented: the OAuth login flows of specific providers (Anthropic, OpenAI ChatGPT, Codex, GitHub Copilot, OpenRouter and others), the callback server, the device code flow, PKCE. These come in later phases and will be ported one provider at a time.

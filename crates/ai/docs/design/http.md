@@ -1,66 +1,66 @@
-# HTTP、SSE 与 API 任务框架（`http`、`json`、`api::common`）
+# HTTP, SSE and the API task framework (`http`, `json`, `api::common`)
 
-上游没有单独的 HTTP 层：各 API 用厂商 SDK，SDK 负责重试、超时和 SSE。手写客户端需要自己实现这些，所以集中在 `http` 模块里，行为对齐上游所用 SDK 的策略（`src/utils/provider-retry.ts`、`src/utils/error-body.ts`、`src/utils/headers.ts`），并参考了 Zed 和 litellm-rs 的实现（见 `docs/research/provider-references.md`）。
+Upstream has no separate HTTP layer: each API uses a vendor SDK, and the SDK handles retries, timeouts and SSE. Hand-written clients must implement these themselves, so they are collected in the `http` module. The behavior follows the policies of the SDKs upstream uses (`src/utils/provider-retry.ts`, `src/utils/error-body.ts`, `src/utils/headers.ts`), and draws on the Zed and litellm-rs implementations (see `docs/research/provider-references.md`).
 
-## 客户端与请求头
+## Client and request headers
 
-- `http::client(&options)`：`options.http_client` 或当前 Tokio 运行时的默认客户端（rustls，连接超时 30 秒，User-Agent `delta/<版本> (<os>; <arch>)`）。代理遵循 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 和系统代理设置。
-  默认客户端按运行时缓存（只保留最近一个运行时的）：连接池里的连接属于打开它的运行时，运行时关闭后这些连接失效，跨运行时复用会让请求随机失败（例如每个 `#[tokio::test]` 各有一个运行时）。不在运行时里调用时每次新建。
-- `http::build_headers([..])`：按顺序合并多个来源，名字不区分大小写，后者覆盖前者，`None` 删除前面的同名头。API 实现的顺序：API 默认头 → `options.headers`。
+- `http::client(&options)`: `options.http_client`, or the default client of the current Tokio runtime (rustls, 30-second connect timeout, User-Agent `delta/<version> (<os>; <arch>)`). Proxies follow `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and the system proxy settings.
+  The default client is cached per runtime (only the most recent runtime's is kept). Connections in the pool belong to the runtime that opened them and become invalid after that runtime shuts down; reusing them across runtimes makes requests fail at random (for example, each `#[tokio::test]` has its own runtime). When called outside a runtime, a new client is built each time.
+- `http::build_headers([..])`: merges several sources in order, with case-insensitive names. Later sources override earlier ones, and `None` removes an earlier header with the same name. Order in API implementations: API default headers → `options.headers`.
 
-## 重试（`send_with_retry`）
+## Retries (`send_with_retry`)
 
-与上游 `retryProviderRequest` 相同（上游复刻了 OpenAI/Anthropic SDK 的策略并让退避可中断）：
+Same as upstream `retryProviderRequest` (upstream copies the OpenAI/Anthropic SDK policy and makes the backoff interruptible):
 
-- 可重试：`x-should-retry: true`；或 408、409、429、5xx；或连接错误。`x-should-retry: false` 不重试。
-- 次数：`max_retries`，默认 2。
-- 延迟：`retry-after-ms`，其次 `retry-after`（秒数或 HTTP 日期），否则指数退避 `min(0.5·2^n, 8)` 秒并减去至多 25% 的抖动。
-- 服务器要求的延迟超过 `max_retry_delay`（默认 60 秒，0 表示不限）时立即失败，错误信息包含要求的秒数。
-- 退避期间和请求过程中都响应 `options.cancel`。
-- 请求超时：`timeout`，默认 10 分钟（与 SDK 默认一致）。
+- Retryable: `x-should-retry: true`; or 408, 409, 429, 5xx; or a connection error. `x-should-retry: false` is not retried.
+- Count: `max_retries`, default 2.
+- Delay: `retry-after-ms`, then `retry-after` (seconds or an HTTP date), otherwise exponential backoff of `min(0.5·2^n, 8)` seconds minus up to 25% jitter.
+- If the delay the server asks for exceeds `max_retry_delay` (default 60 seconds, 0 means no limit), fail immediately. The error message includes the requested number of seconds.
+- `options.cancel` is honored both during backoff and during the request.
+- Request timeout: `timeout`, default 10 minutes (same as the SDK default).
 
-错误响应变成 `Error::Status { status, message: "<status> <正文消息>", body, retry_after_ms }`。正文消息取 JSON 的 `error.message` / `message` / `error` / `detail`，否则取整段文本，截断到 4000 字符（上游 `MAX_PROVIDER_ERROR_BODY_CHARS`）。`body` 是原始正文，按上游 `normalizeProviderError` 的做法去掉首尾空白（JavaScript `trim` 的空白集合）、空正文为 `None`、截断到 4000 字符并注明截掉的字符数（`http::error_body_text`）。
+An error response becomes `Error::Status { status, message: "<status> <body message>", body, retry_after_ms }`. The body message is taken from the JSON `error.message` / `message` / `error` / `detail`, otherwise the whole text, truncated to 4000 characters (upstream `MAX_PROVIDER_ERROR_BODY_CHARS`). `body` is the raw body, processed as upstream `normalizeProviderError` does: leading and trailing whitespace trimmed (the JavaScript `trim` whitespace set), `None` for an empty body, truncated to 4000 characters with a note giving the number of characters cut (`http::error_body_text`).
 
-上游的 HTTP 错误文本来自厂商 SDK 的错误对象，各 API 用 `body` 按上游格式重写 `message`：
+Upstream's HTTP error text comes from the vendor SDK's error object, so each API uses `body` to rewrite `message` in upstream's format:
 
-- `openai-completions`、`openai-responses`、`azure-openai-responses`：OpenAI SDK 的 `APIError` 消息加 `formatProviderError`（`api::common::openai_sdk_error`、`api::common::format_provider_error`）。
-- `anthropic-messages`：Anthropic SDK 的 `APIError` 消息，`"<status> <整个 JSON body>"`（`api::common::sdk_api_error_message`）。
-- `google-generative-ai`：`@google/genai` 的 `ApiError` 消息，即整段 JSON 正文（`google_shared::format_google_http_error`）。
-- `mistral-conversations` 不经过 `send_with_retry`，自己按上游格式 `Mistral API error (<status>): <正文>` 生成消息，也填写 `body`。
+- `openai-completions`, `openai-responses`, `azure-openai-responses`: the OpenAI SDK `APIError` message plus `formatProviderError` (`api::common::openai_sdk_error`, `api::common::format_provider_error`).
+- `anthropic-messages`: the Anthropic SDK `APIError` message, `"<status> <whole JSON body>"` (`api::common::sdk_api_error_message`).
+- `google-generative-ai`: the `@google/genai` `ApiError` message, which is the whole JSON body (`google_shared::format_google_http_error`).
+- `mistral-conversations` does not go through `send_with_retry`. It builds the message itself in upstream's format `Mistral API error (<status>): <body>`, and also fills in `body`.
 
-截断按字符计数，上游按 UTF-16 码元计数；超过 4000 字符的 JSON 正文截断后无法解析，按文本处理。
+Truncation counts characters; upstream counts UTF-16 code units. A JSON body over 4000 characters cannot be parsed after truncation and is treated as text.
 
-## SSE 解码（`SseDecoder`、`sse_events`）
+## SSE decoding (`SseDecoder`, `sse_events`)
 
-按 WHATWG event-stream 规范实现：
+Implemented according to the WHATWG event-stream specification:
 
-- 行结束符 `\n`、`\r\n`、单独的 `\r`（包括跨 chunk 的 `\r` + `\n`）。
-- 字节按行缓冲后再解码 UTF-8，跨 chunk 截断的多字节字符正确解码。
-- 多行 `data:` 用 `\n` 拼接；字段值只去掉一个前导空格；`:` 开头的注释忽略；暴露 `event` 和 `id`。
-- 空行分派事件；流结束时冲刷最后一个未以空行结尾的事件。
-- `[DONE]` 不在解码器里特殊处理，由各 API 决定（OpenAI 兼容流用它表示结束；Anthropic、Gemini 跳过代理注入的 `[DONE]`）。
+- Line terminators `\n`, `\r\n` and a lone `\r` (including `\r` + `\n` split across chunks).
+- Bytes are buffered per line before UTF-8 decoding, so multi-byte characters split across chunks decode correctly.
+- Multi-line `data:` is joined with `\n`. Only one leading space is stripped from a field value. Comments starting with `:` are ignored. `event` and `id` are exposed.
+- An empty line dispatches the event. At end of stream, the last event that did not end with an empty line is flushed.
+- `[DONE]` gets no special handling in the decoder; each API decides (OpenAI-compatible streams use it to mark the end; Anthropic and Gemini skip a `[DONE]` injected by proxies).
 
-`sse_events(response, cancel)` 把响应体变成 `Stream<Item = Result<SseEvent>>`，读取错误和取消以 `Err` 返回。
+`sse_events(response, cancel)` turns the response body into a `Stream<Item = Result<SseEvent>>`. Read errors and cancellation are returned as `Err`.
 
-## 流式 JSON（`json`）
+## Streaming JSON (`json`)
 
-上游用 `partial-json` 包解析未完成的工具参数。Rust 里手写（没有合适的高质量 crate）：
+Upstream uses the `partial-json` package to parse unfinished tool arguments. Rust hand-writes it (there is no suitable high-quality crate):
 
-- `repair_json`：转义字符串里的原始控制字符，非法转义前的反斜杠加倍。
-- `parse_json_with_repair`：先严格解析，失败后修复再解析一次。
-- `parse_partial_json`：递归下降解析 JSON 前缀，在输入结束处闭合未完成的字符串、数组、对象；不完整的数字回退到最长合法前缀；`tr` 之类的字面量前缀补全；对象里没有值的键丢弃；非法（而非截断）输入返回 `None`。
-- `parse_streaming_json`：依次尝试完整解析、前缀解析、修复后的前缀解析，结果不是对象时返回空对象。
-- `parse_tool_call_arguments`：完成的工具调用参数，非对象时返回空参数和包含原文的错误信息。
+- `repair_json`: escapes raw control characters inside strings and doubles the backslash before an invalid escape.
+- `parse_json_with_repair`: parses strictly first; on failure, repairs and parses once more.
+- `parse_partial_json`: recursive-descent parsing of a JSON prefix. At end of input it closes unfinished strings, arrays and objects. An incomplete number falls back to its longest valid prefix. Literal prefixes such as `tr` are completed. Keys without a value in an object are dropped. Invalid (rather than truncated) input returns `None`.
+- `parse_streaming_json`: tries a full parse, a prefix parse and a repaired prefix parse in turn. Returns an empty object when the result is not an object.
+- `parse_tool_call_arguments`: for completed tool call arguments. For a non-object, returns empty arguments and an error message that includes the raw text.
 
-## API 任务框架（`api::common`）
+## API task framework (`api::common`)
 
-`spawn_stream(model, cancel, run)` 在 Tokio 任务里运行一次 API 请求，并统一结束事件流：
+`spawn_stream(model, cancel, run)` runs one API request in a Tokio task and ends the event stream in a uniform way:
 
-- `run` 返回 `Err`，或取消令牌已触发：发 `Error`（取消时为 `aborted`，消息 "Request was aborted"），保留已收到的部分内容。
-- `run` 返回 `Ok`，但 `stop_reason` 是 error/aborted：发 `Error`，消息取 `error_message`。
-- 否则补齐未结束的工具调用后发 `Done`。
-- 消费者已丢弃流：什么都不发。
+- `run` returns `Err`, or the cancellation token has fired: emit `Error` (`aborted` on cancellation, with message "Request was aborted"), keeping the partial content received so far.
+- `run` returns `Ok`, but `stop_reason` is error/aborted: emit `Error`, with the message taken from `error_message`.
+- Otherwise, close any unfinished tool calls and emit `Done`.
+- The consumer has already dropped the stream: emit nothing.
 
-另有回调包装（`apply_on_payload`、`notify_response`、`observe_provider_event`）、`finalize_usage`（重算 total 和费用）、`require_auth`、`join_url`、`short_hash`（上游 `utils/hash.ts` 的 `shortHash`，按 UTF-16 码元计算，输出与 TypeScript 逐位一致）。
+Also provided: callback wrappers (`apply_on_payload`, `notify_response`, `observe_provider_event`), `finalize_usage` (recomputes the total and cost), `require_auth`, `join_url`, and `short_hash` (upstream `shortHash` from `utils/hash.ts`, computed over UTF-16 code units, with output identical bit for bit to TypeScript).
 
-各 API 共用的约束采样逻辑（上游 `api/constrained-sampling.ts`：严格 JSON schema 转换、grammar 工具）在 `api::constrained_sampling`。`make_strict_json_schema` 和 `resolve_json_schema_strict_sampling` 与上游一样接受可选的关键字检查（`Option<fn(&str, &Value) -> bool>`），provider 用它拒绝自己的严格模式不支持的关键字，错误文本为 `<key>: <值的 JSON> is unsupported`；目前只有 Anthropic 传入检查。
+The constrained sampling logic shared by the APIs (upstream `api/constrained-sampling.ts`: strict JSON schema conversion, grammar tools) is in `api::constrained_sampling`. As in upstream, `make_strict_json_schema` and `resolve_json_schema_strict_sampling` accept an optional keyword check (`Option<fn(&str, &Value) -> bool>`). A provider uses it to reject keywords its strict mode does not support, with the error text `<key>: <JSON of the value> is unsupported`. Currently only Anthropic passes a check.

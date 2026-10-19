@@ -1,62 +1,62 @@
-# 消息、模型与兼容性配置（`types`、`model`、`compat`）
+# Messages, models and compat configuration (`types`, `model`, `compat`)
 
-上游：`src/types.ts`、`src/providers/model-schema.ts`、`src/providers/compat-schema.ts`、`src/utils/model-operations.ts`、`src/models.ts`（`calculateCost`、思考级别函数）。
+Upstream: `src/types.ts`, `src/providers/model-schema.ts`, `src/providers/compat-schema.ts`, `src/utils/model-operations.ts`, `src/models.ts` (`calculateCost`, thinking level functions).
 
-## 序列化兼容
+## Serialization compatibility
 
-所有可序列化类型的 JSON 形状与上游相同：字段 camelCase，内容块用 `type` 标签，消息用 `role` 标签，可选字段缺省时不输出。由 pi（TS）、pi-py 和 delta 序列化的上下文、模型、凭据可以互相读取。`types.rs` 的测试用上游格式的 JSON 做往返校验。
+Every serializable type has the same JSON shape as upstream: camelCase fields, content blocks tagged by `type`, messages tagged by `role`, optional fields omitted when absent. Contexts, models and credentials serialized by pi (TS), pi-py and delta can be read by each other. The tests in `types.rs` round-trip JSON in upstream format.
 
-## 消息与内容
+## Messages and content
 
-| 上游 | Rust |
+| Upstream | Rust |
 | --- | --- |
-| `TextContent` / `ThinkingContent` / `ImageContent` / `ToolCall` | 同名结构体 |
-| 用户消息与工具结果的内容 `(TextContent \| ImageContent)[]` | `UserBlock` 枚举 |
-| 助手消息的内容 `(TextContent \| ThinkingContent \| ToolCall)[]` | `AssistantBlock` 枚举 |
-| `string \| Block[]` | `Content<B>`（untagged：`Text(String)` 或 `Blocks(Vec<B>)`），`UserContent`、`SystemContent` 是它的别名 |
-| `Message` 联合 | `Message` 枚举：`System`、`User`、`Assistant`、`ToolResult` |
-| `JsonObject` | `serde_json::Map`（开启 `preserve_order`，保持键顺序） |
-| `StopReason` 字符串 | `StopReason` 枚举 |
-| `timestamp: number`（毫秒） | `i64` |
+| `TextContent` / `ThinkingContent` / `ImageContent` / `ToolCall` | Structs with the same names |
+| User message and tool result content `(TextContent \| ImageContent)[]` | `UserBlock` enum |
+| Assistant message content `(TextContent \| ThinkingContent \| ToolCall)[]` | `AssistantBlock` enum |
+| `string \| Block[]` | `Content<B>` (untagged: `Text(String)` or `Blocks(Vec<B>)`); `UserContent` and `SystemContent` are aliases of it |
+| `Message` union | `Message` enum: `System`, `User`, `Assistant`, `ToolResult` |
+| `JsonObject` | `serde_json::Map` (with `preserve_order` enabled to keep key order) |
+| `StopReason` string | `StopReason` enum |
+| `timestamp: number` (milliseconds) | `i64` |
 
-`ToolResultMessage::details` 在上游是泛型 `TDetails`（编译期检查 JSON 兼容）；Rust 里是 `Option<serde_json::Value>`，调用方自行序列化。
+`ToolResultMessage::details` is a generic `TDetails` in upstream (JSON compatibility checked at compile time). In Rust it is `Option<serde_json::Value>`, and the caller serializes it.
 
-`Tool::parameters` 是 JSON Schema（`serde_json::Value`），对应上游的 TypeBox schema。`constrainedSampling: false` 反序列化为 `None`，与省略同义。
+`Tool::parameters` is a JSON Schema (`serde_json::Value`), corresponding to upstream's TypeBox schema. `constrainedSampling: false` deserializes to `None`, which means the same as omitting it.
 
-`Context` 是公共入口的输入，`system_prompt` 和 `tools` 是首条 system 消息的简写。`TranscriptContext` 只能由 `normalize_context` 和 transcript 辅助函数构造（构造函数是 `pub(crate)`），对应上游用品牌类型阻止原始 `Context` 进入 provider 代码。
+`Context` is the input to the public entry points; `system_prompt` and `tools` are shorthand for the first system message. `TranscriptContext` can only be built by `normalize_context` and the transcript helper functions (the constructor is `pub(crate)`). This matches upstream's use of a branded type to keep a raw `Context` out of provider code.
 
-## 模型
+## Models
 
-| 上游 | Rust |
+| Upstream | Rust |
 | --- | --- |
-| `Model<TApi>` | `Model`（`api: String`） |
-| `ImageModel` / `ClassifierModel` | 同名结构体 |
-| `AnyModel` | `AnyModel` 枚举，序列化时带 `type`，缺少 `type` 视为 chat |
-| `ThinkingLevel` / `ModelThinkingLevel` | 同名枚举 |
-| `ThinkingLevelMap` | `BTreeMap<ModelThinkingLevel, Option<String>>`：键缺失与值为 `null` 含义不同 |
+| `Model<TApi>` | `Model` (`api: String`) |
+| `ImageModel` / `ClassifierModel` | Structs with the same names |
+| `AnyModel` | `AnyModel` enum, serialized with `type`; a missing `type` means chat |
+| `ThinkingLevel` / `ModelThinkingLevel` | Enums with the same names |
+| `ThinkingLevelMap` | `BTreeMap<ModelThinkingLevel, Option<String>>`: a missing key and a `null` value mean different things |
 | `getSupportedThinkingLevels` / `clampThinkingLevel` | `Model::supported_thinking_levels` / `clamp_thinking_level` |
-| `calculateCost` | `calculate_cost`：按 tier 选价格，1h 缓存写入按 2 倍输入价计 |
+| `calculateCost` | `calculate_cost`: picks the price by tier; 1h cache writes are charged at 2x the input price |
 
-上游 `Model<TApi>` 的 `compat` 字段类型随 `api` 变化。Rust 里 `Model::compat` 是 `ModelCompat` 枚举，反序列化时先读 `api` 再用对应 schema 解析（`#[serde(try_from = "ModelRepr")]`）：
+In upstream `Model<TApi>`, the type of the `compat` field depends on `api`. In Rust, `Model::compat` is the `ModelCompat` enum. Deserialization reads `api` first and then parses with the matching schema (`#[serde(try_from = "ModelRepr")]`):
 
-| `api` | 变体 |
+| `api` | Variant |
 | --- | --- |
 | `openai-completions` | `OpenAICompletions(OpenAICompletionsCompat)` |
-| `openai-responses`、`azure-openai-responses`、`openai-codex-responses` | `OpenAIResponses(OpenAIResponsesCompat)` |
+| `openai-responses`, `azure-openai-responses`, `openai-codex-responses` | `OpenAIResponses(OpenAIResponsesCompat)` |
 | `anthropic-messages` | `AnthropicMessages(AnthropicMessagesCompat)` |
 | `bedrock-converse-stream` | `Bedrock(BedrockCompat)` |
 | `mistral-conversations` | `Mistral(MistralConversationsCompat)` |
-| 其他 | `Other(JsonObject)` |
+| Others | `Other(JsonObject)` |
 
-兼容性结构体的字段都是 `Option`，未设置时由 API 实现按默认值或 URL 自动检测。上游 schema 允许额外属性（`additionalProperties: true`），所以每个结构体有 `#[serde(flatten)] extra` 保存未知字段，自定义模型文件可以无损往返。
+All fields of the compat structs are `Option`. When a field is unset, the API implementation uses a default or detects the value from the URL. The upstream schema allows extra properties (`additionalProperties: true`), so each struct has a `#[serde(flatten)] extra` that keeps unknown fields. Custom model files round-trip without loss.
 
-`Model` 序列化时不输出 `type`（chat 是默认类型）；`AnyModel` 序列化时总是输出 `type`。
+`Model` does not emit `type` when serialized (chat is the default type). `AnyModel` always emits `type`.
 
-## 选项（`options`）
+## Options (`options`)
 
-`StreamOptions` 对应上游 `StreamOptions` + `ProviderRequestOptions`；`SimpleStreamOptions { base, tool_choice, reasoning, thinking_budgets }` 对应上游 `SimpleStreamOptions`（`deferred` 不在第一阶段）。各 API 的专有选项放在 `StreamOptions::api: Option<ApiOptions>`，与 `model.api` 不匹配的变体被忽略：
+`StreamOptions` corresponds to upstream `StreamOptions` + `ProviderRequestOptions`. `SimpleStreamOptions { base, tool_choice, reasoning, thinking_budgets }` corresponds to upstream `SimpleStreamOptions` (`deferred` is not in the first phase). API-specific options go in `StreamOptions::api: Option<ApiOptions>`. A variant that does not match `model.api` is ignored:
 
-| `ApiOptions` 变体 | 上游类型 |
+| `ApiOptions` variant | Upstream type |
 | --- | --- |
 | `AnthropicMessages(AnthropicOptions)` | `AnthropicOptions` |
 | `OpenAICompletions(OpenAICompletionsOptions)` | `OpenAICompletionsOptions` |
@@ -66,13 +66,13 @@
 | `GoogleVertex(GoogleVertexOptions)` | `GoogleVertexOptions` |
 | `MistralConversations(MistralOptions)` | `MistralOptions` |
 | `BedrockConverseStream(BedrockOptions)` | `BedrockOptions` |
-| `Custom(JsonObject)` | 自定义 API 的 `Record<string, unknown>` |
+| `Custom(JsonObject)` | `Record<string, unknown>` for custom APIs |
 
-上游 Anthropic 选项里的 `client`（注入预构建的 SDK 客户端）在手写实现里没有对应物；需要替换传输时用 `StreamOptions::http_client`。
+The `client` field in upstream's Anthropic options (inject a prebuilt SDK client) has no counterpart in the hand-written implementation. To replace the transport, use `StreamOptions::http_client`.
 
-`StreamOptions` 的 `Debug` 输出会隐藏 API key，只列出 env 和 header 的名字。
+The `Debug` output of `StreamOptions` hides the API key and lists only the names of env vars and headers.
 
-## 错误（`error`）
+## Errors (`error`)
 
-- `ModelsError { code, message, source }`：对应上游 `ModelsError`。`code` 多了 `Aborted`（上游用 `AbortError`）。构造时把 cause 的消息拼进 `message`，只显示 `to_string()` 的调用方也能看到原因（上游行为）。
-- `Error`：API 实现内部的错误类型，不会从流里抛出：流以 `Error` 事件结束，`error_message` 是它的 `to_string()`。HTTP 错误是 `Error::Status { status, message, retry_after_ms }`。
+- `ModelsError { code, message, source }`: corresponds to upstream `ModelsError`. `code` has an extra `Aborted` (upstream uses `AbortError`). The constructor appends the cause's message to `message`, so callers that only display `to_string()` still see the cause (upstream behavior).
+- `Error`: the internal error type of API implementations. It is never thrown from the stream: the stream ends with an `Error` event whose `error_message` is its `to_string()`. HTTP errors are `Error::Status { status, message, retry_after_ms }`.
