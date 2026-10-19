@@ -37,6 +37,7 @@ url = "2.5"
 uuid = { version = "1.28", features = ["v4"] }
 
 # dev
+aws-smithy-eventstream = "0.61"
 pretty_assertions = "1"
 tokio-test = "0.4"
 wiremock = "0.6"
