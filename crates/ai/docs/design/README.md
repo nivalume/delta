@@ -83,6 +83,7 @@ crates/ai/
 | Vertex AI | 用官方 `google-cloud-aiplatform-v1` + `google-cloud-auth` |
 | 各 API 的专有选项 | `StreamOptions` 放公共字段，`api: Option<ApiOptions>` 是类型化枚举，每个内置 API 一个变体，另有 `Custom(JsonObject)` |
 | 包名 | crates.io 用 `tau-*`（`pi-*` 被上游占用），本包 `tau-llm`，库名 `tau_ai` |
+| 丢弃事件流 | 取消请求：`AssistantMessageEventStream` 被 drop 后，生产者检测到通道关闭（`MessageBuilder::is_closed`）就停止读取并断开 HTTP 连接。上游 JS 里请求会继续跑完。需要跑完的场景先调用 `result()` |
 
 ## 与上游的差异（Rust 语言层面）
 
@@ -99,7 +100,6 @@ crates/ai/
 
 ## 待确认
 
-以下是行为变化或尚未移植的部分，需要确认后再定：
+第一阶段不移植的部分：遥测（等 `tau-telemetry` 移植后接入）、图片生成、分类器、deferred 响应、OAuth 登录流程（`Models::login` 的框架已在，具体 provider 的流程未写）、OpenAI Codex 与 WebSocket 传输、GitHub Copilot、Cloudflare、Radius（`pi-messages`）。模型目录里已有这些模型的数据。
 
-1. **丢弃事件流即取消请求。** 上游里调用方不再读取流时，请求会继续跑完。Rust 实现里 `AssistantMessageEventStream` 被 drop 后，生产者检测到通道关闭会停止读取并断开 HTTP 连接（`MessageBuilder::is_closed`）。这是 Rust 的惯用语义，也能省 token；如果需要和上游完全一致，可以改成继续读完。
-2. **第一阶段不移植的部分**：遥测（等 `tau-telemetry` 移植后接入）、图片生成、分类器、deferred 响应、OAuth 登录流程（`Models::login` 的框架已在，具体 provider 的流程未写）、OpenAI Codex 与 WebSocket 传输、GitHub Copilot、Cloudflare、Radius（`pi-messages`）。模型目录里已有这些模型的数据。
+各 API 的待确认项见对应的 `api-*.md`。
