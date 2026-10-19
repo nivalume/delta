@@ -35,6 +35,8 @@ A stored credential owns the provider: environment variables are only consulted 
 
 The request's `env` overlay: `OverlayAuthContext` checks the request's env first, then the process environment. Blank values count as unset.
 
+An `ApiKeyAuth` may resolve to empty auth with provider config in `env`. Anthropic's workload identity federation does this: the federation ids and the identity token file path go in `env`, and the `anthropic-messages` API exchanges the identity token for an access token per request (see [anthropic-federation.md](anthropic-federation.md)).
+
 ## OAuth refresh locking
 
 `refresh_stored_oauth_credential`: inside `modify`, check again whether a refresh is needed (double check). If so, call `oauth.refresh` and write the result to the store before the lock is released. Concurrent requests refresh only once (covered by tests).

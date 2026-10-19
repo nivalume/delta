@@ -15,7 +15,7 @@ Upstream sends the request through the Anthropic SDK (`client.beta.messages.crea
 
 ## Upstream source files
 
-- `packages/ai/src/api/anthropic-messages.ts` (main body: options, request building, SSE parsing, event mapping, `streamSimple`)
+- `packages/ai/src/api/anthropic-messages.ts` (main body: options, request building, SSE parsing, event mapping, `streamSimple`; workload identity federation is described in [anthropic-federation.md](anthropic-federation.md))
 - `packages/ai/src/api/constrained-sampling.ts` (strict JSON schema conversion, `resolveJsonSchemaStrictSampling`; in Rust this is the shared module `api::constrained_sampling`)
 - `packages/ai/src/api/simple-options.ts` (`buildBaseOptions`, `adjustMaxTokensForThinking`, `clampMaxTokensToContext`; already in `simple_options.rs`)
 - `packages/ai/src/api/transform-messages.ts` (`transformMessages`, `splitErrorToolResultImages`; already in `transform.rs`)
@@ -30,7 +30,8 @@ The ported test cases come from upstream `test/anthropic-*.test.ts`, `cache-rete
 ### Endpoint and authentication
 
 - `POST {baseUrl}/v1/messages?beta=true`. `?beta=true` is a query parameter built into the SDK's `beta.messages` path; requests from both pi and pi-py carry it. When `baseUrl` is an empty string, `https://api.anthropic.com` is used (same as the JS SDK's `baseURL || default`).
-- The authentication check matches upstream `assertRequestAuth`: there must be a non-empty `api_key`, or a non-blank `authorization` / `x-api-key` / `cf-aig-authorization` in `options.headers`. Otherwise the request fails with `No API key for provider: <provider>` (the stream contains a single `error` event).
+- The authentication check matches upstream `assertRequestAuth`: there must be a non-empty `api_key`, or a non-blank `authorization` / `x-api-key` / `cf-aig-authorization` in `options.headers`, or (provider `anthropic` only) a workload identity federation config. Otherwise the request fails with `No API key for provider: <provider>` (the stream contains a single `error` event).
+- Workload identity federation (upstream `getAnthropicFederation`): for provider `anthropic`, when there is no key and no auth header, and `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID` and `ANTHROPIC_IDENTITY_TOKEN_FILE` are set in `options.env` (else the process environment), the request sends `Authorization: Bearer <access token>` from a shared token cache in the auth header position and appends `oauth-2025-04-20` to `anthropic-beta`, as the SDK does. A 401 response drops the cached token. The exchange, the cache and their errors are in [anthropic-federation.md](anthropic-federation.md).
 - Three authentication modes:
   - `provider == "github-copilot"`: `Authorization: Bearer <key>`, no OAuth rewriting, plus Copilot's dynamic headers (see [github-copilot.md](github-copilot.md)).
   - `api_key` contains `sk-ant-oat`: OAuth (Claude Code) mode. `Authorization: Bearer <token>`, plus `user-agent: claude-cli/2.1.280` and `x-app: cli`. The betas get `claude-code-20250219` and `oauth-2025-04-20`. The system prompt is prefixed with `You are Claude Code, Anthropic's official CLI for Claude.`. Tool names are rewritten to Claude Code's canonical casing, and tool names in the response are mapped back to the caller's names.
@@ -141,8 +142,9 @@ After the stream ends, these checks run in order: `message_start` seen but no `m
 
 ## Not ported
 
-- **Workload identity federation** (`ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_IDENTITY_TOKEN_FILE`, `ANTHROPIC_WORKSPACE_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`): upstream leaves OIDC token exchange and caching to the SDK. This is out of scope for now; without a key or authentication header the result is always `No API key for provider: ...`. If needed, this module can implement the `POST /v1/oauth/token` (jwt-bearer) exchange, cache tokens per configuration, invalidate and re-exchange on 401, and make the authentication check in `stream_simple`/`stream` accept that configuration.
-- Telemetry, the OAuth login flow, deferred responses, WebSocket transport: out of scope per the task description.
+- The `telemetry` parent span option: upstream's `streamSimple` only forwards it (through `buildBaseOptions`); spans and metrics are recorded by `Models`, and telemetry as a whole waits for `delta-telemetry`.
+
+The Anthropic OAuth login flow is ported in `oauth` (see [oauth.md](oauth.md)). Upstream's `anthropic-messages` API has no deferred responses and no WebSocket transport, so there is nothing to port for those.
 
 ## Improvements pending confirmation
 

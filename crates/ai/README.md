@@ -537,7 +537,7 @@ Built-in providers resolve these environment variables:
 | OpenAI | `OPENAI_API_KEY` |
 | Ant Ling | `ANT_LING_API_KEY` |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_BASE_URL` (e.g. `https://{resource}.openai.azure.com`) or `AZURE_OPENAI_RESOURCE_NAME`. Root endpoints are normalized to `/openai/v1`. Optional: `AZURE_OPENAI_API_VERSION` (default `v1`), `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`. |
-| Anthropic | `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, or `ANTHROPIC_AUTH_TOKEN` (sent as a bearer token) |
+| Anthropic | `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, or `ANTHROPIC_AUTH_TOKEN` (sent as a bearer token); or workload identity federation (see below) |
 | TypeSafe | `TYPESAFE_API_KEY` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 | NVIDIA NIM | `NVIDIA_API_KEY` |
@@ -575,6 +575,8 @@ Built-in providers resolve these environment variables:
 OpenAI Codex has no environment variable: it authenticates only with OAuth (`delta-ai login openai-codex` or `Models::login`). The OpenAI provider also accepts Sign in with ChatGPT through OAuth. `PI_OAUTH_CALLBACK_HOST` sets the host of the loopback OAuth callback server (default `127.0.0.1`).
 
 `qwen-token-plan-individual` and `qwen-token-plan` share the international endpoint and `QWEN_TOKEN_PLAN_API_KEY`. The Individual provider lists only the models documented for Individual subscriptions. Stored credentials are provider-scoped, so save the key under the provider id you register.
+
+Anthropic also supports workload identity federation, for workloads that hold an OIDC identity token instead of an API key. Set `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID` and `ANTHROPIC_IDENTITY_TOKEN_FILE` (the path of the JWT file; it is read again for every exchange, so rotated tokens work), and optionally `ANTHROPIC_SERVICE_ACCOUNT_ID` and `ANTHROPIC_WORKSPACE_ID`. It applies only to the `anthropic` provider and only when no API key, `ANTHROPIC_AUTH_TOKEN` or auth header is set. Requests exchange the identity token at `POST {baseUrl}/v1/oauth/token` for a short-lived access token and send it as a bearer token. The token is cached for the current federation config and refreshed before it expires, so requests do not exchange every time. The variables can also be passed in `StreamOptions::env`, which is read before the process environment.
 
 Amazon Bedrock (feature `bedrock`) resolves ambient AWS credentials (`AWS_BEARER_TOKEN_BEDROCK`, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, ECS task roles, web identity tokens); its API-key login flow supports bearer tokens, AWS profiles and the existing credential chain. Bedrock requests go through `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` unless `NO_PROXY` matches the model's base URL, and `AWS_BEDROCK_FORCE_HTTP1=1` switches to HTTP/1.1 for custom endpoints that need it. Vertex AI (feature `vertex`) resolves either an API key or Application Default Credentials plus project and location, with an API-key login flow for API keys, ADC and service-account files.
 

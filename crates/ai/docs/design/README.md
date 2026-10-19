@@ -15,6 +15,7 @@
 | [transcript.md](transcript.md) | `transcript`, `transform`, `estimate`, `simple_options` | System message replay, cross-provider switching, token estimation, thinking budgets |
 | [http.md](http.md) | `http`, `json`, `api::common`, `api::constrained_sampling` | SSE decoding, retries, error bodies, streaming JSON parsing, API task framework, shared constrained sampling |
 | [catalog-and-faux.md](catalog-and-faux.md) | `providers::catalog`, `providers::faux` | Built-in model catalog, faux provider for tests |
+| [anthropic-federation.md](anthropic-federation.md) | `api::anthropic_federation` | Anthropic workload identity federation: resolution, jwt-bearer token exchange, token cache and refresh |
 | [cloudflare.md](cloudflare.md) | `api::cloudflare`, `providers::cloudflare` | Cloudflare AI Gateway and Workers AI: auth, endpoint placeholders |
 | [images-classifiers-deferred.md](images-classifiers-deferred.md) | `images`, `classifier`, `deferred` | Image generation and classification contracts, deferred responses, their `Models` and `create_provider` wiring |
 | [radius.md](radius.md) | `providers::radius`, `oauth::radius` | Radius gateway: shipped and gateway catalogs, API key and OAuth login |
