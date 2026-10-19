@@ -11,9 +11,9 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
-use tau_ai::transcript::{ToolStateChanges, get_current_tools, get_tool_state_changes};
-use tau_ai::validation::validate_tool_arguments;
-use tau_ai::{
+use delta_ai::transcript::{ToolStateChanges, get_current_tools, get_tool_state_changes};
+use delta_ai::validation::validate_tool_arguments;
+use delta_ai::{
     AssistantMessage, AssistantMessageEvent, Context, Message, StopReason, SystemMessage, ToolCall, ToolResultMessage,
     normalize_context,
 };
@@ -435,7 +435,7 @@ pub fn declare_tool_changes<C: CustomMessage>(
     }
     let update = with_tool_changes(
         &SystemMessage {
-            timestamp: tau_ai::types::now_ms(),
+            timestamp: delta_ai::types::now_ms(),
             ..SystemMessage::default()
         },
         &changes,
@@ -944,7 +944,7 @@ fn tool_result_message(outcome: &AgentToolCallOutcome) -> ToolResultMessage {
         usage: outcome.result.usage.clone(),
         nested_calls: None,
         is_error: outcome.is_error,
-        timestamp: tau_ai::types::now_ms(),
+        timestamp: delta_ai::types::now_ms(),
         duration_ms: outcome.duration_ms,
     }
 }
@@ -963,9 +963,9 @@ async fn emit_tool_result_message<C: CustomMessage>(message: &ToolResultMessage,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use delta_ai::AssistantMessageEventStream;
+    use delta_ai::events::MessageBuilder;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use tau_ai::AssistantMessageEventStream;
-    use tau_ai::events::MessageBuilder;
 
     use crate::types::NoCustom;
 
@@ -989,10 +989,11 @@ mod tests {
                 stream
             })
         });
-        let model = tau_ai::providers::faux::FauxProvider::new(tau_ai::providers::faux::FauxOptions::default()).model();
+        let model =
+            delta_ai::providers::faux::FauxProvider::new(delta_ai::providers::faux::FauxOptions::default()).model();
         let caller_cancel = CancellationToken::new();
         let mut events = agent_loop::<NoCustom>(
-            vec![tau_ai::UserMessage::new("hi").into()],
+            vec![delta_ai::UserMessage::new("hi").into()],
             AgentContext::default(),
             AgentLoopConfig::new(model),
             caller_cancel.clone(),

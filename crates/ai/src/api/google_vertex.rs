@@ -429,7 +429,7 @@ fn credentials(auth: &VertexAuth) -> Result<Credentials> {
     }
 }
 
-/// tau's User-Agent unless `options.headers` sets one, as upstream (`{User-Agent, ...headers}`).
+/// delta's User-Agent unless `options.headers` sets one, as upstream (`{User-Agent, ...headers}`).
 fn user_agent(options: &StreamOptions) -> String {
     options
         .headers

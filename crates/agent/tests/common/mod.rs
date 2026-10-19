@@ -10,13 +10,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use tau_agent::{
+use delta_agent::{
     AfterToolCallContext, AfterToolCallResult, AgentEvent, AgentEventSink, AgentEventStream, AgentHooks,
     AgentLoopConfig, AgentLoopTurnUpdate, AgentMessage, AgentRequestUpdate, AgentToolResult, AgentTurnContext,
     AgentTurnDecision, BeforeToolCallContext, BeforeToolCallResult, CustomMessage, FnTool, MessageSource, NoCustom,
     PrepareRequestContext, StreamFn, ToolContext, ToolError,
 };
-use tau_ai::{
+use delta_ai::{
     AssistantBlock, AssistantMessage, AssistantMessageEventStream, InputModality, Message, MessageBuilder, Model,
     ModelCost, SimpleStreamOptions, StopReason, TextContent, Tool, ToolCall, TranscriptContext, UserContent,
     UserMessage,
@@ -188,7 +188,7 @@ pub async fn collect<C: CustomMessage>(mut stream: AgentEventStream<C>) -> (Vec<
 }
 
 /// The tool result messages among `messages`.
-pub fn tool_results<C>(messages: &[AgentMessage<C>]) -> Vec<tau_ai::ToolResultMessage> {
+pub fn tool_results<C>(messages: &[AgentMessage<C>]) -> Vec<delta_ai::ToolResultMessage> {
     messages
         .iter()
         .filter_map(|message| match message {
@@ -199,12 +199,12 @@ pub fn tool_results<C>(messages: &[AgentMessage<C>]) -> Vec<tau_ai::ToolResultMe
 }
 
 /// Text of the first text block.
-pub fn first_text(content: &[tau_ai::UserBlock]) -> String {
+pub fn first_text(content: &[delta_ai::UserBlock]) -> String {
     content
         .iter()
         .find_map(|block| match block {
-            tau_ai::UserBlock::Text(text) => Some(text.text.clone()),
-            tau_ai::UserBlock::Image(_) => None,
+            delta_ai::UserBlock::Text(text) => Some(text.text.clone()),
+            delta_ai::UserBlock::Image(_) => None,
         })
         .unwrap_or_default()
 }
@@ -223,7 +223,7 @@ pub fn empty_schema() -> Value {
 }
 
 /// A tool from a name, schema and closure.
-pub fn tool<F, Fut>(name: &str, parameters: Value, execute: F) -> Arc<dyn tau_agent::AgentTool>
+pub fn tool<F, Fut>(name: &str, parameters: Value, execute: F) -> Arc<dyn delta_agent::AgentTool>
 where
     F: Fn(Value, ToolContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<AgentToolResult, ToolError>> + Send + 'static,
@@ -235,7 +235,7 @@ where
 }
 
 /// A `{ value: string }` tool that records the values it ran with and echoes them.
-pub fn echo_tool(executed: Shared<Vec<Value>>) -> Arc<dyn tau_agent::AgentTool> {
+pub fn echo_tool(executed: Shared<Vec<Value>>) -> Arc<dyn delta_agent::AgentTool> {
     tool("echo", value_schema(), move |args, _| {
         let executed = executed.clone();
         async move {
@@ -249,7 +249,7 @@ pub fn echo_tool(executed: Shared<Vec<Value>>) -> Arc<dyn tau_agent::AgentTool> 
 }
 
 /// A tool without parameters that returns its name.
-pub fn noop_tool(name: &str) -> Arc<dyn tau_agent::AgentTool> {
+pub fn noop_tool(name: &str) -> Arc<dyn delta_agent::AgentTool> {
     let label = name.to_owned();
     tool(name, empty_schema(), move |_, _| {
         let label = label.clone();

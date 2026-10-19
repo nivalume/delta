@@ -28,10 +28,10 @@
 
 ## 客户端重建
 
-`stream_proxy` 用 `tau_ai::events::MessageBuilder` 重建消息，和手写的 provider 实现走同一套生产端工具，所以发给循环的事件、`partial()` 归约结果与直连 provider 一致：
+`stream_proxy` 用 `delta_ai::events::MessageBuilder` 重建消息，和手写的 provider 实现走同一套生产端工具，所以发给循环的事件、`partial()` 归约结果与直连 provider 一致：
 
 - `*_start` 的 `contentIndex` 必须等于当前内容块数量，`*_delta`/`*_end` 必须指向对应类型的块，否则以错误结束。
-- `toolcall_delta` 的参数用 `tau_ai::json` 的流式 JSON 解析；`toolcall_end` 用服务器给的最终 `toolCall` 替换（`MessageBuilder::end_tool_call_with`）。
+- `toolcall_delta` 的参数用 `delta_ai::json` 的流式 JSON 解析；`toolcall_end` 用服务器给的最终 `toolCall` 替换（`MessageBuilder::end_tool_call_with`）。
 - `done`/`error` 写入停止原因、用量和错误文本后结束。
 
 ## 错误
@@ -45,6 +45,6 @@
 
 ## 与上游的差异
 
-- 上游从 `fetch` 的 `ReadableStream` 手动按行切分 SSE；tau 用 `tau_ai::http::sse_events`，与其他手写 provider 共用。
-- 上游在客户端维护 partial 对象并原地修改；tau 用 `MessageBuilder`，事件流的消费端归约出 partial（`tau_ai` 的设计）。
-- 事件流被 drop 时停止读取并断开连接（`tau_ai` 的约定）。
+- 上游从 `fetch` 的 `ReadableStream` 手动按行切分 SSE；delta 用 `delta_ai::http::sse_events`，与其他手写 provider 共用。
+- 上游在客户端维护 partial 对象并原地修改；delta 用 `MessageBuilder`，事件流的消费端归约出 partial（`delta_ai` 的设计）。
+- 事件流被 drop 时停止读取并断开连接（`delta_ai` 的约定）。

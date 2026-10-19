@@ -3,20 +3,20 @@
 
 #![allow(clippy::unwrap_used)] // Test helpers outside `#[test]` functions.
 
-use futures::StreamExt;
-use serde_json::{Value, json};
-use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tau_ai::api::mistral_conversations::{MistralConversationsApi, stream, stream_simple};
-use tau_ai::options::{MistralOptions, OnPayload, OnProviderStreamEvent, OnResponse};
-use tau_ai::types::{ConstrainedSampling, StrictMode};
-use tau_ai::{
+use delta_ai::api::mistral_conversations::{MistralConversationsApi, stream, stream_simple};
+use delta_ai::options::{MistralOptions, OnPayload, OnProviderStreamEvent, OnResponse};
+use delta_ai::types::{ConstrainedSampling, StrictMode};
+use delta_ai::{
     ApiOptions, AssistantBlock, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, CacheRetention,
     Context, ImageContent, Message, Model, ProviderStreams, SimpleStreamOptions, StopReason, StreamOptions,
     SystemMessage, TextContent, ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolChoice, ToolResultMessage,
     TranscriptContext, UserBlock, UserContent, UserMessage, normalize_context,
 };
+use futures::StreamExt;
+use serde_json::{Value, json};
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -240,7 +240,7 @@ async fn serializes_sdk_style_payloads_to_the_wire_format() {
     });
     let responses = Arc::new(Mutex::new(Vec::new()));
     let response_sink = responses.clone();
-    let on_response: OnResponse = Arc::new(move |response: &tau_ai::options::ProviderResponse, _model: &Model| {
+    let on_response: OnResponse = Arc::new(move |response: &delta_ai::options::ProviderResponse, _model: &Model| {
         response_sink.lock().unwrap().push(response.clone());
         Box::pin(async { Ok(()) })
     });
@@ -279,7 +279,7 @@ async fn serializes_sdk_style_payloads_to_the_wire_format() {
     assert_eq!(header("content-type"), "application/json");
     assert_eq!(header("x-affinity"), "session-1");
     assert_eq!(header("x-custom"), "value");
-    assert!(header("user-agent").starts_with("tau/"));
+    assert!(header("user-agent").starts_with("delta/"));
 
     let payload = callback_payload.lock().unwrap().clone().unwrap();
     assert_eq!(payload["maxTokens"], json!(123));
@@ -555,7 +555,7 @@ async fn keeps_mid_conversation_system_messages_only_when_supported() {
 
     let mut supporting = model(&server.uri());
     supporting.compat = Some(
-        tau_ai::compat::ModelCompat::from_value(
+        delta_ai::compat::ModelCompat::from_value(
             "mistral-conversations",
             json!({"supportsMidConvoSystemMessages": true}),
         )
@@ -1027,7 +1027,7 @@ async fn preserves_http_status_and_response_bodies_in_errors() {
     let server = server_with(ResponseTemplate::new(403).set_body_string(r#"{"message":"blocked by gateway"}"#)).await;
     let statuses = Arc::new(Mutex::new(Vec::new()));
     let sink = statuses.clone();
-    let on_response: OnResponse = Arc::new(move |response: &tau_ai::options::ProviderResponse, _model: &Model| {
+    let on_response: OnResponse = Arc::new(move |response: &delta_ai::options::ProviderResponse, _model: &Model| {
         sink.lock().unwrap().push(response.status);
         Box::pin(async { Ok(()) })
     });

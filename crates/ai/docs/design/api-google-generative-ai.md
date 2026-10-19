@@ -34,7 +34,7 @@ Vertex 模块要做的只有：把 `GenerateRequest` 转成 proto 请求，把 p
 - `POST {base}/{model}:streamGenerateContent?alt=sse`。
 - `base`：模型的 `base_url`（已含 API 版本，与上游 `apiVersion: ""` 一致）；为空时用 `GOOGLE_GEMINI_BASE_URL`（先查 `options.env`，再查进程环境）或 `https://generativelanguage.googleapis.com`，再加 `/v1beta`（SDK 的默认值）。
 - 模型路径：id 已以 `models/` 或 `tunedModels/` 开头时原样使用，否则加 `models/`（SDK `tModel`）。id 含 `..`、`?`、`&` 时报错 "invalid model parameter"（SDK 同样拒绝）。
-- 请求头（`build_headers` 合并顺序：默认值 → `options.headers`）：`Content-Type: application/json`、`User-Agent: tau/…`、`x-goog-api-key: <key>`。密钥只放请求头，不进 URL。`options.headers` 可以覆盖其中任何一个（与上游显式头覆盖默认 User-Agent 的行为一致）。模型的 `headers` 由 `Models` 合并进 `options.headers`。
+- 请求头（`build_headers` 合并顺序：默认值 → `options.headers`）：`Content-Type: application/json`、`User-Agent: delta/…`、`x-goog-api-key: <key>`。密钥只放请求头，不进 URL。`options.headers` 可以覆盖其中任何一个（与上游显式头覆盖默认 User-Agent 的行为一致）。模型的 `headers` 由 `Models` 合并进 `options.headers`。
 
 ### 请求体
 

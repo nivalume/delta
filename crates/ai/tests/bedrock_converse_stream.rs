@@ -11,17 +11,17 @@ use aws_smithy_eventstream::frame::write_message_to;
 use aws_smithy_types::event_stream::{Header, HeaderValue, Message as Frame};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use futures::StreamExt;
-use pretty_assertions::assert_eq;
-use serde_json::{Value, json};
-use tau_ai::api::bedrock_converse_stream::{BedrockConverseStreamApi, stream, stream_simple};
-use tau_ai::options::{ApiOptions, BedrockOptions, ProviderResponse, ThinkingBudgets};
-use tau_ai::types::ProviderEnv;
-use tau_ai::{
+use delta_ai::api::bedrock_converse_stream::{BedrockConverseStreamApi, stream, stream_simple};
+use delta_ai::options::{ApiOptions, BedrockOptions, ProviderResponse, ThinkingBudgets};
+use delta_ai::types::ProviderEnv;
+use delta_ai::{
     AssistantBlock, AssistantMessage, Context, ImageContent, Message, Model, ProviderStreams, SimpleStreamOptions,
     StopReason, StreamOptions, ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolResultMessage, UserBlock,
     UserContent, UserMessage, normalize_context,
 };
+use futures::StreamExt;
+use pretty_assertions::assert_eq;
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -128,12 +128,12 @@ fn options() -> StreamOptions {
     StreamOptions {
         env: Some(env()),
         max_retries: Some(0),
-        cache_retention: Some(tau_ai::CacheRetention::None),
+        cache_retention: Some(delta_ai::CacheRetention::None),
         ..StreamOptions::default()
     }
 }
 
-fn hello() -> tau_ai::TranscriptContext {
+fn hello() -> delta_ai::TranscriptContext {
     normalize_context(&Context::new(vec![Message::user("hello")]))
 }
 
@@ -389,7 +389,7 @@ async fn request_payload_shape_on_the_wire() {
         json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
     )]);
     let options = StreamOptions {
-        cache_retention: Some(tau_ai::CacheRetention::Long),
+        cache_retention: Some(delta_ai::CacheRetention::Long),
         temperature: Some(0.5),
         api: Some(ApiOptions::BedrockConverseStream(BedrockOptions {
             reasoning: Some(ThinkingLevel::Medium),
@@ -397,7 +397,7 @@ async fn request_payload_shape_on_the_wire() {
                 medium: Some(4096),
                 ..ThinkingBudgets::default()
             }),
-            request_metadata: Some([("project".to_owned(), "tau".to_owned())].into_iter().collect()),
+            request_metadata: Some([("project".to_owned(), "delta".to_owned())].into_iter().collect()),
             ..BedrockOptions::default()
         })),
         ..options()
@@ -432,7 +432,7 @@ async fn request_payload_shape_on_the_wire() {
                 "thinking": {"type": "enabled", "budget_tokens": 4096, "display": "summarized"},
                 "anthropic_beta": ["interleaved-thinking-2025-05-14"]
             },
-            "requestMetadata": {"project": "tau"}
+            "requestMetadata": {"project": "delta"}
         })
     );
 }

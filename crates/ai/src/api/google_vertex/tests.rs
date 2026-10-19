@@ -236,7 +236,7 @@ fn custom_base_urls() {
 }
 
 fn temp_file(name: &str, contents: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("tau-vertex-{}-{name}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("delta-vertex-{}-{name}", std::process::id()));
     std::fs::write(&path, contents).unwrap();
     path
 }
@@ -258,10 +258,10 @@ fn credentials_files() {
             .starts_with("Failed to parse Google credentials file")
     );
     assert!(
-        credentials_from_file("/nonexistent/tau-vertex.json")
+        credentials_from_file("/nonexistent/delta-vertex.json")
             .unwrap_err()
             .to_string()
-            .starts_with("Failed to read Google credentials file /nonexistent/tau-vertex.json")
+            .starts_with("Failed to read Google credentials file /nonexistent/delta-vertex.json")
     );
     for path in [unknown, invalid] {
         let _ = std::fs::remove_file(path);
@@ -495,7 +495,7 @@ fn request_payload_edge_cases() {
             "contents": [],
             "toolConfig": {"functionCallingConfig": {"mode": "ANY"}},
             "generationConfig": {"topK": 3, "thinkingConfig": {"thinkingBudget": -1}},
-            "labels": {"team": "tau"}
+            "labels": {"team": "delta"}
         }),
         "projects/p/locations/l/publishers/google/models/m",
     )
@@ -504,7 +504,7 @@ fn request_payload_edge_cases() {
     let generation = proto.generation_config.unwrap();
     assert_eq!(generation.top_k, Some(3.0));
     assert_eq!(generation.thinking_config.unwrap().thinking_budget, Some(-1));
-    assert_eq!(proto.labels.get("team").map(String::as_str), Some("tau"));
+    assert_eq!(proto.labels.get("team").map(String::as_str), Some("delta"));
     assert_eq!(
         proto.tool_config.unwrap().function_calling_config.unwrap().mode,
         Mode::Any
@@ -704,7 +704,7 @@ fn sdk_errors_map_to_http_statuses() {
 }
 
 #[test]
-fn user_agent_defaults_to_tau_and_headers_override_it() {
+fn user_agent_defaults_to_delta_and_headers_override_it() {
     assert_eq!(user_agent(&StreamOptions::default()), http::user_agent());
     let mut headers = crate::types::ProviderHeaders::new();
     headers.insert("User-Agent".into(), Some("my-app/1.0".into()));

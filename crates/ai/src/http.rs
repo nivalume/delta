@@ -35,10 +35,10 @@ fn new_default_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-/// `tau (<os>; <arch>)`.
+/// `delta (<os>; <arch>)`.
 pub fn user_agent() -> String {
     format!(
-        "tau/{} ({}; {})",
+        "delta/{} ({}; {})",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH

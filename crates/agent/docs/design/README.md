@@ -1,6 +1,6 @@
-# tau-agent-runtime（`tau_agent`）设计文档
+# delta-agent（`delta_agent`）设计文档
 
-`tau-agent-runtime` 是 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent) 的 Rust 移植，代码里 `use tau_agent::...`。它在 [`tau_ai`](../../../ai/docs/design/README.md) 之上实现有状态的 agent：维护对话记录、执行工具调用、处理 steering 与 follow-up 队列、发出生命周期事件。
+`delta-agent` 是 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent) 的 Rust 移植，代码里 `use delta_agent::...`。它在 [`delta_ai`](../../../ai/docs/design/README.md) 之上实现有状态的 agent：维护对话记录、执行工具调用、处理 steering 与 follow-up 队列、发出生命周期事件。
 
 设计以上游为准。Rust 语言层面必须改写的地方在各文档的“与上游的差异”里列出；属于改进或行为变化的放在“待确认”，确认前不实现。
 
@@ -58,9 +58,9 @@ crates/agent/
 | --- | --- |
 | 自定义消息 | 泛型参数：`AgentMessage<C = NoCustom>`，`C: CustomMessage`。上游用 TypeScript 声明合并扩展 `AgentMessage`。见 [types.md](types.md) |
 | 工具定义 | `AgentTool` trait；另有 `FnTool`（声明 + 闭包）和 `typed_tool`（参数类型由 schemars 生成 schema，feature 可关）。见 [tools.md](tools.md) |
-| 丢弃事件流 | 与 `tau_ai` 一致：drop 即取消。`agent_loop` 返回的 `AgentEventStream` 在运行结束前被 drop 时取消本次运行（取消的是调用方令牌的子令牌）；需要跑完时调用 `result()` |
+| 丢弃事件流 | 与 `delta_ai` 一致：drop 即取消。`agent_loop` 返回的 `AgentEventStream` 在运行结束前被 drop 时取消本次运行（取消的是调用方令牌的子令牌）；需要跑完时调用 `result()` |
 | `MessageUpdate` 里的消息 | `Arc<AssistantMessage>` 快照，每个更新事件克隆一次当前消息。上游直接传可变的 partial 引用 |
-| 包名 | 暂定 `tau-agent-runtime`（`tau-agent`、`tau-agent-core` 在 crates.io 已被占用），库名 `tau_agent` |
+| 包名 | crates.io 包名 `delta-agent`，库名 `delta_agent` |
 
 ## 与上游的差异（Rust 语言层面）
 
@@ -74,5 +74,4 @@ crates/agent/
 
 ## 待确认
 
-- 包名 `tau-agent-runtime` 是暂定的。
 - 上游 `examples/mcp-codemode` 和 `test/e2e.test.ts`（需要真实 API key）不移植。

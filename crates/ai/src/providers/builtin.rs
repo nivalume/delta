@@ -1,7 +1,7 @@
 //! Factories of the built-in providers.
 //!
 //! Upstream has one module per provider (`src/providers/<id>.ts`). Most of them only pair
-//! an environment variable with an API implementation, so tau keeps those in one table and
+//! an environment variable with an API implementation, so delta keeps those in one table and
 //! writes out the providers with their own behavior (Azure, OpenCode, Bedrock, Vertex AI).
 //!
 //! Not built in yet: providers whose APIs or auth flows are not ported (Cloudflare AI

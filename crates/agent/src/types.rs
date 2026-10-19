@@ -6,13 +6,13 @@ use serde_json::Value;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use tau_ai::{AssistantMessage, AssistantMessageEvent, Message, ToolCall, ToolResultMessage, Usage, UserBlock};
+use delta_ai::{AssistantMessage, AssistantMessageEvent, Message, ToolCall, ToolResultMessage, Usage, UserBlock};
 
 /// App-defined message types that live in the transcript next to the LLM messages, for
 /// example UI notifications. [`crate::AgentHooks::convert_to_llm`] filters or converts
 /// them before each request.
 ///
-/// Upstream extends `AgentMessage` through TypeScript declaration merging; tau uses a type
+/// Upstream extends `AgentMessage` through TypeScript declaration merging; delta uses a type
 /// parameter instead.
 pub trait CustomMessage: Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static {
     /// The message role, e.g. `"notification"`. Must not be one of the LLM roles.
@@ -101,14 +101,14 @@ impl<C> From<ToolResultMessage> for AgentMessage<C> {
     }
 }
 
-impl<C> From<tau_ai::UserMessage> for AgentMessage<C> {
-    fn from(message: tau_ai::UserMessage) -> Self {
+impl<C> From<delta_ai::UserMessage> for AgentMessage<C> {
+    fn from(message: delta_ai::UserMessage) -> Self {
         Self::Llm(Message::User(message))
     }
 }
 
-impl<C> From<tau_ai::SystemMessage> for AgentMessage<C> {
-    fn from(message: tau_ai::SystemMessage) -> Self {
+impl<C> From<delta_ai::SystemMessage> for AgentMessage<C> {
+    fn from(message: delta_ai::SystemMessage) -> Self {
         Self::Llm(Message::System(message))
     }
 }

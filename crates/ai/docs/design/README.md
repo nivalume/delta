@@ -1,6 +1,6 @@
-# tau-llm（`tau_ai`）设计文档
+# delta-ai（`delta_ai`）设计文档
 
-`tau-llm` 是 [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai) 的 Rust 移植，crates.io 包名 `tau-llm`，代码里 `use tau_ai::...`。设计以上游为准；Rust 语言层面必须改动的地方在各文档的“与上游的差异”里列出，属于改进或行为变化的放在“待确认”里，确认前不实现。
+`delta-ai` 是 [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai) 的 Rust 移植，crates.io 包名 `delta-ai`，代码里 `use delta_ai::...`。设计以上游为准；Rust 语言层面必须改动的地方在各文档的“与上游的差异”里列出，属于改进或行为变化的放在“待确认”里，确认前不实现。
 
 ## 文档索引
 
@@ -17,7 +17,7 @@
 
 ## 总体结构
 
-![tau_ai 运行时结构](diagrams/architecture.png)
+![delta_ai 运行时结构](diagrams/architecture.png)
 
 （可交互版本：[diagrams/architecture.html](diagrams/architecture.html)）
 
@@ -62,7 +62,7 @@ crates/ai/
 
 ## provider 实现策略
 
-有官方 Rust SDK 的用官方 SDK，没有的手写（`reqwest` + `tau_ai::http`），不依赖第三方 SDK crate。2026-10 的调研结果：
+有官方 Rust SDK 的用官方 SDK，没有的手写（`reqwest` + `delta_ai::http`），不依赖第三方 SDK crate。2026-10 的调研结果：
 
 | 厂商 | 官方 Rust SDK | 做法 |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ crates/ai/
 | 事件里的 `partial` | 消费端归约：事件不带 `partial`，`AssistantMessageEventStream::partial()` 返回截至刚取出事件时的消息。见 [events.md](events.md) |
 | Vertex AI | 用官方 `google-cloud-aiplatform-v1` + `google-cloud-auth` |
 | 各 API 的专有选项 | `StreamOptions` 放公共字段，`api: Option<ApiOptions>` 是类型化枚举，每个内置 API 一个变体，另有 `Custom(JsonObject)` |
-| 包名 | crates.io 用 `tau-*`（`pi-*` 被上游占用），本包 `tau-llm`，库名 `tau_ai` |
+| 包名 | crates.io 用 `delta-*`（`pi-*` 被上游占用），本包 `delta-ai`，库名 `delta_ai` |
 | 丢弃事件流 | 取消请求：`AssistantMessageEventStream` 被 drop 后，生产者检测到通道关闭（`MessageBuilder::is_closed`）就停止读取并断开 HTTP 连接。上游 JS 里请求会继续跑完。需要跑完的场景先调用 `result()` |
 
 ## 与上游的差异（Rust 语言层面）
@@ -100,6 +100,6 @@ crates/ai/
 
 ## 待确认
 
-第一阶段不移植的部分：遥测（等 `tau-telemetry` 移植后接入）、图片生成、分类器、deferred 响应、OAuth 登录流程（`Models::login` 的框架已在，具体 provider 的流程未写）、OpenAI Codex 与 WebSocket 传输、GitHub Copilot、Cloudflare、Radius（`pi-messages`）。模型目录里已有这些模型的数据。
+第一阶段不移植的部分：遥测（等 `delta-telemetry` 移植后接入）、图片生成、分类器、deferred 响应、OAuth 登录流程（`Models::login` 的框架已在，具体 provider 的流程未写）、OpenAI Codex 与 WebSocket 传输、GitHub Copilot、Cloudflare、Radius（`pi-messages`）。模型目录里已有这些模型的数据。
 
 各 API 的待确认项见对应的 `api-*.md`。

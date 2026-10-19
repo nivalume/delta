@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use tau_ai::{JsonObject, Tool};
+use delta_ai::{JsonObject, Tool};
 
 use crate::types::{AgentToolResult, ToolExecutionMode};
 
@@ -184,7 +184,7 @@ pub fn schema_for<T: schemars::JsonSchema>() -> Value {
 /// ```
 /// use schemars::JsonSchema;
 /// use serde::Deserialize;
-/// use tau_agent::{AgentToolResult, typed_tool};
+/// use delta_agent::{AgentToolResult, typed_tool};
 ///
 /// /// Arguments of `get_time`.
 /// #[derive(Deserialize, JsonSchema)]

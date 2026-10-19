@@ -27,7 +27,7 @@ pub struct AgentLoopConfig<C> {
 }
 ```
 
-上游 `AgentLoopConfig` 继承 `SimpleStreamOptions`，并把各个回调平铺在同一个对象上。tau 把请求选项放在 `stream_options` 字段，把回调收进 `hooks`。`MessageSource<C>` 是返回 `BoxFuture<Vec<AgentMessage<C>>>` 的闭包，对应上游的 `getSteeringMessages` / `getFollowUpMessages`。
+上游 `AgentLoopConfig` 继承 `SimpleStreamOptions`，并把各个回调平铺在同一个对象上。delta 把请求选项放在 `stream_options` 字段，把回调收进 `hooks`。`MessageSource<C>` 是返回 `BoxFuture<Vec<AgentMessage<C>>>` 的闭包，对应上游的 `getSteeringMessages` / `getFollowUpMessages`。
 
 ## `StreamFn`
 
@@ -39,8 +39,8 @@ pub type StreamFn = Arc<
 
 - 输入是已规范化的 `TranscriptContext`（system prompt 和工具声明都在 system 消息里）。
 - 失败必须编码在返回的流里（`Error` 事件），不能 panic。
-- `models_stream_fn(models)` 把 `tau_ai::Models::stream_simple` 适配成 `StreamFn`，是常规用法；`stream_proxy`（见 [proxy.md](proxy.md)）是另一种实现；测试里直接构造。
-- 上游有全局的 `setDefaultStreamFn`，调用方不传 `streamFn` 时使用。tau 不设全局状态，`StreamFn` 必须显式传入。
+- `models_stream_fn(models)` 把 `delta_ai::Models::stream_simple` 适配成 `StreamFn`，是常规用法；`stream_proxy`（见 [proxy.md](proxy.md)）是另一种实现；测试里直接构造。
+- 上游有全局的 `setDefaultStreamFn`，调用方不传 `streamFn` 时使用。delta 不设全局状态，`StreamFn` 必须显式传入。
 
 ## `AgentHooks<C>`
 
@@ -77,7 +77,7 @@ pub type StreamFn = Arc<
 
 ### 工具声明变更（`declare_tool_changes`）
 
-`context.tools` 是运行时可以执行的工具；对话记录里的 system 消息声明模型可以调用哪些工具（`tau_ai` 的 transcript 设计，见 [tau_ai transcript.md](../../../ai/docs/design/transcript.md)）。两者不一致时（例如应用调用了 `Agent::set_tools`），下一次请求前把差异写成 system 消息上的 `tools_added` / `tools_removed`：
+`context.tools` 是运行时可以执行的工具；对话记录里的 system 消息声明模型可以调用哪些工具（`delta_ai` 的 transcript 设计，见 [delta_ai transcript.md](../../../ai/docs/design/transcript.md)）。两者不一致时（例如应用调用了 `Agent::set_tools`），下一次请求前把差异写成 system 消息上的 `tools_added` / `tools_removed`：
 
 - 待追加的消息里有 system 消息时，改写最后一条：它的工具字段替换为差异。
 - 否则在第一条非 system 消息前插入一条新的 system 消息。

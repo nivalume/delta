@@ -1,4 +1,4 @@
-# tau (pi-rs): notes for contributors and coding agents
+# delta (pi-rs): notes for contributors and coding agents
 
 Rust port of [pi](https://github.com/earendil-works/pi). The Python port lives in
 [nivalume/pi-py](https://github.com/nivalume/pi-py) and is a useful second reference.
@@ -6,9 +6,9 @@ Rust port of [pi](https://github.com/earendil-works/pi). The Python port lives i
 ## Layout
 
 - `crates/<upstream package>`: one crate per upstream package. crates.io names are
-  `tau-*` (the `pi-*` names belong to upstream); library names are `tau_<package>`, e.g.
-  `crates/ai` is published as `tau-llm` and imported as `tau_ai`.
-- `crates/<crate>/docs/design/`: design documents (Chinese), one per module. Upstream
+  `delta-*` (the `pi-*` names belong to upstream); library names are `delta_<package>`, e.g.
+  `crates/ai` is published as `delta-ai` and imported as `delta_ai`.
+- `crates/<crate>/docs/design/`: design documents (English), one per module. Upstream
   design wins; any deviation is listed in the document and confirmed with the maintainer
   before it is implemented.
 - `docs/research/`: notes on reference implementations.
@@ -17,10 +17,10 @@ Rust port of [pi](https://github.com/earendil-works/pi). The Python port lives i
 ## Rules
 
 - Wire compatibility: serialized types (messages, models, credentials) keep upstream's
-  JSON shape, so transcripts and `auth.json` files move between pi, pi-py and tau.
+  JSON shape, so transcripts and `auth.json` files move between pi, pi-py and delta.
 - Providers: use the vendor's official Rust SDK when one exists (AWS Bedrock:
   `aws-sdk-bedrockruntime`; Vertex AI: `google-cloud-aiplatform-v1`), otherwise hand-write
-  the client on `reqwest` + `tau_ai::http`. No third-party SDK crates.
+  the client on `reqwest` + `delta_ai::http`. No third-party SDK crates.
 - Zed's provider crates are GPL-3.0: read them for behavior, never copy code.
   `docs/research/provider-references.md` lists the behaviors to cover.
 - Commits are authored by `nivalume <25273209+nivalume@users.noreply.github.com>` and

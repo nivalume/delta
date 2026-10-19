@@ -4,7 +4,7 @@
 
 ## `AgentMessage<C>` 与自定义消息
 
-对话记录里除了 LLM 消息，应用还可以放自己的消息（例如 UI 通知、压缩摘要）。上游通过 TypeScript 声明合并扩展 `AgentMessage` 联合类型；tau 用类型参数：
+对话记录里除了 LLM 消息，应用还可以放自己的消息（例如 UI 通知、压缩摘要）。上游通过 TypeScript 声明合并扩展 `AgentMessage` 联合类型；delta 用类型参数：
 
 ```rust
 pub trait CustomMessage: Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static {

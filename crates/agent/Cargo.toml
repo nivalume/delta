@@ -1,5 +1,5 @@
 [package]
-name = "tau-agent-runtime"
+name = "delta-agent"
 description = "Stateful LLM agent for Rust: tool execution (parallel or sequential), steering and follow-up queues, lifecycle events and hooks (Rust port of pi-agent-core)"
 readme = "README.md"
 keywords = ["llm", "agent", "ai", "tools"]
@@ -14,7 +14,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [lib]
-name = "tau_agent"
+name = "delta_agent"
 
 [features]
 default = ["schemars"]
@@ -22,7 +22,7 @@ default = ["schemars"]
 schemars = ["dep:schemars"]
 
 [dependencies]
-tau-llm.workspace = true
+delta-ai.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 schemars = { workspace = true, optional = true }

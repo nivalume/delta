@@ -7,24 +7,24 @@
 // Test helpers panic on unexpected shapes by design.
 #![allow(clippy::unwrap_used, clippy::needless_pass_by_value)]
 
+use delta_ai::api::anthropic_messages::{AnthropicMessagesApi, stream, stream_simple};
+use delta_ai::model::ThinkingLevel;
+use delta_ai::options::{
+    AnthropicEffort, AnthropicOptions, AnthropicToolChoice, ApiOptions, OnPayload, OnProviderStreamEvent,
+    SimpleStreamOptions, StreamOptions, ThinkingDisplay, ToolChoice,
+};
+use delta_ai::types::{
+    AssistantBlock, AssistantMessage, ConstrainedSampling, ImageContent, Message, StopReason, StrictMode,
+    SystemMessage, TextContent, ThinkingContent, ToolCall, ToolReference, ToolResultMessage, UserBlock, UserContent,
+    UserMessage,
+};
+use delta_ai::{AssistantMessageEvent, AssistantMessageEventStream, Context, Model, ProviderStreams, Tool};
 use futures::StreamExt;
 use futures::future::FutureExt;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tau_ai::api::anthropic_messages::{AnthropicMessagesApi, stream, stream_simple};
-use tau_ai::model::ThinkingLevel;
-use tau_ai::options::{
-    AnthropicEffort, AnthropicOptions, AnthropicToolChoice, ApiOptions, OnPayload, OnProviderStreamEvent,
-    SimpleStreamOptions, StreamOptions, ThinkingDisplay, ToolChoice,
-};
-use tau_ai::types::{
-    AssistantBlock, AssistantMessage, ConstrainedSampling, ImageContent, Message, StopReason, StrictMode,
-    SystemMessage, TextContent, ThinkingContent, ToolCall, ToolReference, ToolResultMessage, UserBlock, UserContent,
-    UserMessage,
-};
-use tau_ai::{AssistantMessageEvent, AssistantMessageEventStream, Context, Model, ProviderStreams, Tool};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -50,8 +50,8 @@ fn model(base_url: &str, extra: Value) -> Model {
     serde_json::from_value(value).unwrap()
 }
 
-fn transcript(context: &Context) -> tau_ai::TranscriptContext {
-    tau_ai::normalize_context(context)
+fn transcript(context: &Context) -> delta_ai::TranscriptContext {
+    delta_ai::normalize_context(context)
 }
 
 fn hello() -> Context {
@@ -269,7 +269,7 @@ fn simple(reasoning: Option<ThinkingLevel>) -> SimpleStreamOptions {
 
 fn no_cache() -> StreamOptions {
     StreamOptions {
-        cache_retention: Some(tau_ai::CacheRetention::None),
+        cache_retention: Some(delta_ai::CacheRetention::None),
         ..StreamOptions::default()
     }
 }
@@ -319,7 +319,7 @@ async fn streams_text_and_sends_sdk_headers() {
         header(request, "anthropic-dangerous-direct-browser-access"),
         Some("true")
     );
-    assert!(header(request, "user-agent").unwrap().starts_with("tau/"));
+    assert!(header(request, "user-agent").unwrap().starts_with("delta/"));
     assert_eq!(header(request, "anthropic-beta"), None);
     let body: Value = request.body_json().unwrap();
     assert_eq!(body["model"], "claude-test");
@@ -1095,7 +1095,7 @@ async fn session_affinity_headers() {
     assert_eq!(header(&requests(&server).await[0], "x-session-id"), Some("session-1"));
 
     let none = StreamOptions {
-        cache_retention: Some(tau_ai::CacheRetention::None),
+        cache_retention: Some(delta_ai::CacheRetention::None),
         ..options()
     };
     let (server, _, _) = run_events(json!({"provider": "openrouter"}), &minimal_events(), &hello(), none).await;
@@ -1114,7 +1114,7 @@ async fn session_affinity_headers() {
 
 #[tokio::test]
 async fn on_payload_replacement_is_still_streamed_and_body_fields_become_headers() {
-    let hook: tau_ai::options::OnPayload = Arc::new(|payload: &Value, _: &Model| {
+    let hook: delta_ai::options::OnPayload = Arc::new(|payload: &Value, _: &Model| {
         let mut replaced = payload.clone();
         replaced["stream"] = json!(false);
         replaced["inference_geo"] = json!("us");
@@ -1175,7 +1175,7 @@ async fn strict_tool_limit_rejection_retries_with_non_strict_preferred_tools() {
     let responses = Arc::new(Mutex::new(0));
     let counter = responses.clone();
     let options = StreamOptions {
-        on_response: Some(Arc::new(move |_: &tau_ai::options::ProviderResponse, _: &Model| {
+        on_response: Some(Arc::new(move |_: &delta_ai::options::ProviderResponse, _: &Model| {
             *counter.lock().unwrap() += 1;
             async { Ok(()) }.boxed()
         })),
@@ -1298,7 +1298,7 @@ async fn cache_control_follows_retention() {
     );
 
     let long = StreamOptions {
-        cache_retention: Some(tau_ai::CacheRetention::Long),
+        cache_retention: Some(delta_ai::CacheRetention::Long),
         ..StreamOptions::default()
     };
     let (payload, _) = capture(&model, &context, long.clone()).await;

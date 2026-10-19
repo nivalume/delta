@@ -9,9 +9,9 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use tau_ai::options::{OnPayload, OnProviderStreamEvent, OnResponse, ThinkingBudgets, Transport};
-use tau_ai::transcript::{create_initial_system_message, get_current_system_message, get_current_system_prompt};
-use tau_ai::{
+use delta_ai::options::{OnPayload, OnProviderStreamEvent, OnResponse, ThinkingBudgets, Transport};
+use delta_ai::transcript::{create_initial_system_message, get_current_system_message, get_current_system_prompt};
+use delta_ai::{
     AssistantMessage, ImageContent, InputModality, Message, Model, ModelCost, ModelThinkingLevel, SimpleStreamOptions,
     StreamOptions, UserBlock, UserContent, UserMessage,
 };
@@ -760,8 +760,8 @@ impl<C: CustomMessage> AgentEventSink<C> for AgentSink<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tau_ai::events::MessageBuilder;
-    use tau_ai::{AssistantMessageEventStream, Message};
+    use delta_ai::events::MessageBuilder;
+    use delta_ai::{AssistantMessageEventStream, Message};
 
     /// Starts a response and waits for cancellation; `started` is notified once the request
     /// is in flight.

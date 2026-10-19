@@ -385,7 +385,7 @@ async fn build_client(plan: &ClientPlan, options: &StreamOptions) -> Client {
             credentials.secret_access_key.clone(),
             credentials.session_token.clone(),
             None,
-            "tau-bedrock",
+            "delta-bedrock",
         ));
     } else if let Some(profile) = &plan.profile {
         // The JS SDK skips environment credentials when a profile is configured; the Rust default
@@ -1494,7 +1494,7 @@ impl ResponseCapture {
 
 impl Intercept for ResponseCapture {
     fn name(&self) -> &'static str {
-        "TauBedrockResponseCapture"
+        "DeltaBedrockResponseCapture"
     }
 
     fn read_before_deserialization(

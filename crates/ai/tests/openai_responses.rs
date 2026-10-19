@@ -2,21 +2,21 @@
 
 #![allow(clippy::unwrap_used)] // Test helpers outside #[test] functions.
 
+use delta_ai::api::openai_responses::{self, OpenAIResponsesApi};
+use delta_ai::options::{OpenAIResponsesOptions, ReasoningEffort};
+use delta_ai::types::ProviderHeaders;
+use delta_ai::{
+    ApiOptions, AssistantBlock, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Context,
+    ImageContent, Message, Model, ProviderStreams, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
+    ThinkingLevel, Tool, ToolCall, ToolChoice, ToolResultMessage, UserBlock, UserContent, UserMessage,
+    normalize_context,
+};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tau_ai::api::openai_responses::{self, OpenAIResponsesApi};
-use tau_ai::options::{OpenAIResponsesOptions, ReasoningEffort};
-use tau_ai::types::ProviderHeaders;
-use tau_ai::{
-    ApiOptions, AssistantBlock, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Context,
-    ImageContent, Message, Model, ProviderStreams, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
-    ThinkingLevel, Tool, ToolCall, ToolChoice, ToolResultMessage, UserBlock, UserContent, UserMessage,
-    normalize_context,
-};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -65,7 +65,7 @@ fn options() -> StreamOptions {
     }
 }
 
-fn hi() -> tau_ai::TranscriptContext {
+fn hi() -> delta_ai::TranscriptContext {
     normalize_context(&Context::new(vec![Message::user("hi")]).with_system_prompt("sys"))
 }
 
@@ -170,7 +170,7 @@ async fn streams_reasoning_text_and_usage() {
     assert_eq!(header(&request, "authorization"), Some("Bearer sk-test"));
     assert_eq!(header(&request, "session_id"), Some("session-123"));
     assert_eq!(header(&request, "x-client-request-id"), Some("session-123"));
-    assert!(header(&request, "user-agent").unwrap().starts_with("tau/"));
+    assert!(header(&request, "user-agent").unwrap().starts_with("delta/"));
     let body = body(&request);
     assert_eq!(body["model"], "gpt-5.4");
     assert_eq!(body["stream"], true);
@@ -239,11 +239,11 @@ async fn streams_parallel_tool_calls_and_replays_them() {
     let mut messages = vec![Message::user("read a and b"), message.clone().into()];
     messages.extend(results);
     let context = normalize_context(&Context::new(messages));
-    let input = tau_ai::api::openai_responses_shared::convert_responses_messages(
+    let input = delta_ai::api::openai_responses_shared::convert_responses_messages(
         &target,
         &context,
         &["openai"],
-        &tau_ai::api::openai_responses_shared::ConvertResponsesMessagesOptions::default(),
+        &delta_ai::api::openai_responses_shared::ConvertResponsesMessagesOptions::default(),
     )
     .unwrap();
     assert_eq!(
@@ -415,7 +415,7 @@ async fn callbacks_see_payload_response_and_events() {
     }));
     let log = seen.clone();
     opts.on_response = Some(Arc::new(
-        move |response: &tau_ai::options::ProviderResponse, _: &Model| -> BoxFuture<'static, _> {
+        move |response: &delta_ai::options::ProviderResponse, _: &Model| -> BoxFuture<'static, _> {
             log.lock().unwrap().push(format!("status {}", response.status));
             Box::pin(async { Ok(()) })
         },
@@ -486,7 +486,7 @@ async fn session_affinity_formats_and_overrides() {
 
     let mut nosession = model(&base_url(&server));
     nosession.compat = Some(
-        tau_ai::compat::ModelCompat::from_value(
+        delta_ai::compat::ModelCompat::from_value(
             "openai-responses",
             json!({"sessionAffinityFormat": "openai-nosession"}),
         )
@@ -510,7 +510,7 @@ async fn session_affinity_formats_and_overrides() {
     assert_eq!(header(&request, "x-client-request-id"), None);
 
     let mut no_cache = opts;
-    no_cache.cache_retention = Some(tau_ai::CacheRetention::None);
+    no_cache.cache_retention = Some(delta_ai::CacheRetention::None);
     let request = run(model(&base_url(&server)), no_cache).await;
     assert_eq!(header(&request, "session_id"), None);
     assert!(body(&request).get("prompt_cache_key").is_none());
@@ -562,7 +562,7 @@ async fn replays_foreign_messages_and_images() {
     let server = server_with(sse(&[completed("r")])).await;
     let foreign = AssistantMessage {
         content: vec![
-            AssistantBlock::Thinking(tau_ai::ThinkingContent {
+            AssistantBlock::Thinking(delta_ai::ThinkingContent {
                 thinking: "secret".into(),
                 thinking_signature: Some("anthropic-sig".into()),
                 redacted: None,
@@ -632,9 +632,10 @@ async fn reasoning_effort_off_and_max_tokens_compat() {
 
     let mut capped = model(&base_url(&server));
     capped.compat = Some(
-        tau_ai::compat::ModelCompat::from_value("openai-responses", json!({"supportsMaxOutputTokens": false})).unwrap(),
+        delta_ai::compat::ModelCompat::from_value("openai-responses", json!({"supportsMaxOutputTokens": false}))
+            .unwrap(),
     );
-    capped.thinking_level_map = Some([(tau_ai::model::ModelThinkingLevel::Off, None)].into_iter().collect());
+    capped.thinking_level_map = Some([(delta_ai::model::ModelThinkingLevel::Off, None)].into_iter().collect());
     collect(openai_responses::stream(&capped, &hi(), opts)).await;
     let request = body(&last_request(&server).await);
     assert!(request.get("max_output_tokens").is_none());

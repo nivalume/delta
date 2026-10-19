@@ -22,13 +22,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use tau_ai::api::google_vertex::{GoogleVertexApi, stream_simple, stream_with_client};
-use tau_ai::options::{
+use delta_ai::api::google_vertex::{GoogleVertexApi, stream_simple, stream_with_client};
+use delta_ai::options::{
     ApiOptions, CallbackError, GoogleOptions, GoogleThinking, GoogleThinkingLevel, GoogleToolChoice,
     GoogleVertexOptions, OnPayload, OnProviderStreamEvent, ThinkingBudgets,
 };
-use tau_ai::types::{AssistantBlock, ImageContent, TextContent, ThinkingContent, ToolCall, ToolResultMessage};
-use tau_ai::{
+use delta_ai::types::{AssistantBlock, ImageContent, TextContent, ThinkingContent, ToolCall, ToolResultMessage};
+use delta_ai::{
     AssistantMessage, AssistantMessageEvent, Context, Message, Model, ProviderStreams, SimpleStreamOptions, StopReason,
     StreamOptions, ThinkingLevel, Tool, TranscriptContext, UserBlock, UserContent, UserMessage, normalize_context,
 };
@@ -192,7 +192,7 @@ fn with_vertex(mut opts: StreamOptions, update: impl FnOnce(&mut GoogleVertexOpt
 
 const MODEL_NAME: &str = "projects/test-project/locations/us-central1/publishers/google/models/gemini-2.5-flash";
 
-async fn collect(mut events: tau_ai::AssistantMessageEventStream) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
+async fn collect(mut events: delta_ai::AssistantMessageEventStream) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
     let mut collected = Vec::new();
     while let Some(event) = events.next().await {
         collected.push(event);
@@ -714,7 +714,7 @@ async fn unreadable_credentials_file_fails_the_stream() {
     opts.env = Some(
         [(
             "GOOGLE_APPLICATION_CREDENTIALS".to_owned(),
-            "/nonexistent/tau-vertex-adc.json".to_owned(),
+            "/nonexistent/delta-vertex-adc.json".to_owned(),
         )]
         .into(),
     );
@@ -728,7 +728,7 @@ async fn unreadable_credentials_file_fails_the_stream() {
             .error_message
             .as_deref()
             .unwrap()
-            .starts_with("Failed to read Google credentials file /nonexistent/tau-vertex-adc.json"),
+            .starts_with("Failed to read Google credentials file /nonexistent/delta-vertex-adc.json"),
         "{:?}",
         message.error_message
     );
@@ -746,7 +746,7 @@ async fn on_payload_sees_rest_json_and_may_replace_it() {
         *sink.lock().unwrap() = Some(payload.clone());
         let mut payload = payload.clone();
         payload["generationConfig"]["topK"] = json!(3);
-        payload["labels"] = json!({"team": "tau"});
+        payload["labels"] = json!({"team": "delta"});
         Box::pin(async move { Ok(Some(payload)) })
     });
     let mut opts = options();
@@ -765,7 +765,7 @@ async fn on_payload_sees_rest_json_and_may_replace_it() {
     );
     let request = stub.last_request();
     assert_eq!(request.generation_config.unwrap().top_k, Some(3.0));
-    assert_eq!(request.labels.get("team").map(String::as_str), Some("tau"));
+    assert_eq!(request.labels.get("team").map(String::as_str), Some("delta"));
     assert_eq!(request.model, MODEL_NAME);
 
     // A payload the proto cannot represent fails the request before it is sent.
@@ -1097,10 +1097,10 @@ async fn mid_conversation_system_messages_are_collapsed() {
     let context = normalize_context(
         &Context::new(vec![
             Message::user("one"),
-            Message::System(tau_ai::SystemMessage {
+            Message::System(delta_ai::SystemMessage {
                 content: "Also be kind.".into(),
                 tools_added: Some(vec![Tool::new("late", "Late tool", json!({"type": "object"}))]),
-                ..tau_ai::SystemMessage::default()
+                ..delta_ai::SystemMessage::default()
             }),
             Message::user("two"),
         ])

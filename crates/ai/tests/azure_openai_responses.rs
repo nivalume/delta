@@ -2,18 +2,18 @@
 
 #![allow(clippy::unwrap_used)] // Test helpers outside #[test] functions.
 
+use delta_ai::api::azure_openai_responses::{self, AzureOpenAIResponsesApi};
+use delta_ai::options::{AzureOpenAIResponsesOptions, OpenAIResponsesOptions};
+use delta_ai::types::ProviderHeaders;
+use delta_ai::{
+    ApiOptions, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Context, Message, Model,
+    ProviderStreams, SimpleStreamOptions, StopReason, StreamOptions, Tool, ToolChoice, normalize_context,
+};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
-use tau_ai::api::azure_openai_responses::{self, AzureOpenAIResponsesApi};
-use tau_ai::options::{AzureOpenAIResponsesOptions, OpenAIResponsesOptions};
-use tau_ai::types::ProviderHeaders;
-use tau_ai::{
-    ApiOptions, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Context, Message, Model,
-    ProviderStreams, SimpleStreamOptions, StopReason, StreamOptions, Tool, ToolChoice, normalize_context,
-};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -63,7 +63,7 @@ fn azure_options(server: &MockServer, azure: AzureOpenAIResponsesOptions) -> Str
     }
 }
 
-fn hello() -> tau_ai::TranscriptContext {
+fn hello() -> delta_ai::TranscriptContext {
     normalize_context(&Context::new(vec![Message::user("hello")]))
 }
 
@@ -131,7 +131,7 @@ async fn request_wire_format() {
     let request = last_request(&server).await;
     assert_eq!(header(&request, "api-key"), Some("test-api-key"));
     assert_eq!(header(&request, "authorization"), None);
-    assert!(header(&request, "user-agent").unwrap().starts_with("tau/"));
+    assert!(header(&request, "user-agent").unwrap().starts_with("delta/"));
     let body = body(&request);
     assert_eq!(
         body,
@@ -155,7 +155,7 @@ async fn deployment_map_reasoning_and_strict_compat() {
     let mut target = model();
     target.reasoning = true;
     target.compat = Some(
-        tau_ai::compat::ModelCompat::from_value("azure-openai-responses", json!({"supportsStrictMode": false}))
+        delta_ai::compat::ModelCompat::from_value("azure-openai-responses", json!({"supportsStrictMode": false}))
             .unwrap(),
     );
     let mut options = azure_options(&server, AzureOpenAIResponsesOptions::default());
@@ -172,8 +172,8 @@ async fn deployment_map_reasoning_and_strict_compat() {
         "d",
         json!({"type": "object", "properties": {"value": {"type": "string"}}}),
     );
-    tool.constrained_sampling = Some(tau_ai::types::ConstrainedSampling::JsonSchema {
-        strict: tau_ai::types::StrictMode::Prefer,
+    tool.constrained_sampling = Some(delta_ai::types::ConstrainedSampling::JsonSchema {
+        strict: delta_ai::types::StrictMode::Prefer,
     });
     let context = normalize_context(&Context::new(vec![Message::user("hello")]).with_tools(vec![tool]));
     collect(azure_openai_responses::stream(&target, &context, options)).await;

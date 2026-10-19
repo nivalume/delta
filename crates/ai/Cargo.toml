@@ -1,5 +1,5 @@
 [package]
-name = "tau-llm"
+name = "delta-ai"
 description = "Unified LLM API for Rust: provider collections, auth resolution, streaming events, token and cost tracking, tool calling and cross-provider hand-off (Rust port of pi-ai)"
 readme = "README.md"
 keywords = ["llm", "ai", "anthropic", "openai", "gemini"]
@@ -14,7 +14,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [lib]
-name = "tau_ai"
+name = "delta_ai"
 
 [features]
 default = []

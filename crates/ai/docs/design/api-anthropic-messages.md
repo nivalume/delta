@@ -2,7 +2,7 @@
 
 ## 目的
 
-`tau_ai::api::anthropic_messages` 实现 Anthropic Messages 协议（流式）。凡是 `model.api == "anthropic-messages"` 的模型都走这里：Anthropic 官方端点、OAuth（Claude Code 订阅）、GitHub Copilot 的 Claude 端点，以及 OpenRouter、Vercel AI Gateway、Cloudflare AI Gateway、Fireworks、Kimi 等兼容端点。
+`delta_ai::api::anthropic_messages` 实现 Anthropic Messages 协议（流式）。凡是 `model.api == "anthropic-messages"` 的模型都走这里：Anthropic 官方端点、OAuth（Claude Code 订阅）、GitHub Copilot 的 Claude 端点，以及 OpenRouter、Vercel AI Gateway、Cloudflare AI Gateway、Fireworks、Kimi 等兼容端点。
 
 模块对外提供：
 
@@ -11,7 +11,7 @@
 - `stream_simple(model, context, options)`：把 `reasoning` / `thinking_budgets` / `tool_choice` 映射为 `AnthropicOptions`，再调用 `stream`。
 - 几个纯函数与常量：`normalize_tool_call_id`、`to_claude_code_name`、`from_claude_code_name`、`is_oauth_token`、`CLAUDE_CODE_VERSION`、`CLAUDE_CODE_SYSTEM_PROMPT`、`CLAUDE_CODE_TOOLS`。
 
-上游通过 Anthropic SDK 发请求（`client.beta.messages.create(params).asResponse()`），然后自己解析 SSE 响应体。按 AGENTS.md 的规则（Anthropic 没有官方 Rust SDK，不引入第三方 SDK），这里用 `reqwest` + `tau_ai::http` 手写 SDK 在线上发出的同一个请求。
+上游通过 Anthropic SDK 发请求（`client.beta.messages.create(params).asResponse()`），然后自己解析 SSE 响应体。按 AGENTS.md 的规则（Anthropic 没有官方 Rust SDK，不引入第三方 SDK），这里用 `reqwest` + `delta_ai::http` 手写 SDK 在线上发出的同一个请求。
 
 ## 上游源文件
 
@@ -42,7 +42,7 @@
 
 1. SDK 默认：`Accept: application/json`、`anthropic-version: 2023-06-01`
 2. 认证头（`X-Api-Key` 或 `Authorization`）
-3. 客户端默认头（上游 `mergeClientHeaders`）：`User-Agent: tau/...`、`accept`、`anthropic-dangerous-direct-browser-access: true`；OAuth 模式的 `user-agent`/`x-app`；API key 模式的会话亲和头；`model.headers`；`options.headers`
+3. 客户端默认头（上游 `mergeClientHeaders`）：`User-Agent: delta/...`、`accept`、`anthropic-dangerous-direct-browser-access: true`；OAuth 模式的 `user-agent`/`x-app`；API key 模式的会话亲和头；`model.headers`；`options.headers`
 4. `Content-Type: application/json`
 5. 由请求体字段生成的头：`betas` → `anthropic-beta`（逗号连接），`user_profile_id` → `anthropic-user-profile-id`。这两个字段在 `on_payload` 之后从请求体里取出，与 SDK 的行为相同。
 
@@ -97,7 +97,7 @@
 
 只处理 SSE 事件名为 `message_start`、`message_delta`、`message_stop`、`content_block_start`、`content_block_delta`、`content_block_stop` 的事件（数据用 `parse_json_with_repair` 解析）；`ping`、`[DONE]`、代理扩展事件被跳过；`event: error` 直接以原始 data 作为错误消息结束流。每个已解析事件先交给 `on_provider_stream_event`。HTTP 响应被接受、`on_response` 调用之后才发 `start`。
 
-| Anthropic 事件 | 处理 | tau 事件 |
+| Anthropic 事件 | 处理 | delta 事件 |
 | --- | --- | --- |
 | `message_start` | `response_id`、`input_transformations`；`message.model` 与请求模型不同则记 `response_model`，若它在 `allowedFallbackModels` 中则改用其价格；初始 usage（`cacheWrite1h` 取 `cache_creation.ephemeral_1h_input_tokens`，缺省 0），重算总量与费用 | 无 |
 | `content_block_start` `text` | 新文本块；`content_block.text` 非空时作为第一个增量 | `text_start`（+ `text_delta`） |
@@ -129,7 +129,7 @@
 
 ## Rust 实现上的差异
 
-- **事件形状**：tau 的事件不携带共享 `partial`。`content_block_start` 自带非空文本时，额外发一个 `text_delta`，使消费端归约出的部分消息包含这段文本；thinking 的初始文本和签名随 `thinking_start` 给出。上游只发 `text_start`/`thinking_start`。
+- **事件形状**：delta 的事件不携带共享 `partial`。`content_block_start` 自带非空文本时，额外发一个 `text_delta`，使消费端归约出的部分消息包含这段文本；thinking 的初始文本和签名随 `thinking_start` 给出。上游只发 `text_start`/`thinking_start`。
 - **未结束的工具调用**：成功结束时 `spawn_stream` 会为仍未收到 `content_block_stop` 的工具调用补发 `toolcall_end`（共享契约），上游不补发。
 - **HTTP 错误消息**：与 SDK 的 `APIError.makeMessage` 一样由 `Error::Status` 的原始响应体拼出：JSON 正文是 `"<status> <整个 JSON body>"`（如 `400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long"}}`），否则是 `"<status> <文本>"`，空正文是 `"<status> status code (no body)"`。差异：正文先去掉首尾空白并截断到 4000 字符（`Error::Status.body`），超过 4000 字符的 JSON 正文无法解析，按文本处理；JSON 由 `serde_json` 重新序列化，浮点数写法可能与 `JSON.stringify` 不同（如 `1.0`）。连接错误、超时的文字是 reqwest 的而不是 SDK 的 `Connection error.` / `Request timed out.`。
 - **严格工具降级的判断**：与上游一样要求状态码 400、错误体的 `error.type == "invalid_request_error"`，且消息包含上述限制文本之一。

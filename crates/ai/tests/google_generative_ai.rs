@@ -15,13 +15,13 @@ use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use tau_ai::api::google_generative_ai::{GoogleGenerativeAiApi, stream, stream_simple};
-use tau_ai::options::{
+use delta_ai::api::google_generative_ai::{GoogleGenerativeAiApi, stream, stream_simple};
+use delta_ai::options::{
     ApiOptions, CallbackError, GoogleOptions, GoogleThinking, GoogleThinkingLevel, GoogleToolChoice, OnPayload,
     OnProviderStreamEvent, OnResponse, ProviderResponse, ThinkingBudgets,
 };
-use tau_ai::types::{AssistantBlock, ImageContent, TextContent, ThinkingContent, ToolCall, ToolResultMessage};
-use tau_ai::{
+use delta_ai::types::{AssistantBlock, ImageContent, TextContent, ThinkingContent, ToolCall, ToolResultMessage};
+use delta_ai::{
     AssistantMessage, AssistantMessageEvent, Context, Message, Model, ProviderStreams, SimpleStreamOptions, StopReason,
     StreamOptions, ThinkingLevel, Tool, TranscriptContext, UserBlock, UserContent, UserMessage, normalize_context,
 };
@@ -108,7 +108,7 @@ fn base_url(server: &MockServer) -> String {
     format!("{}/v1beta", server.uri())
 }
 
-async fn collect(mut events: tau_ai::AssistantMessageEventStream) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
+async fn collect(mut events: delta_ai::AssistantMessageEventStream) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
     let mut collected = Vec::new();
     while let Some(event) = events.next().await {
         collected.push(event);
@@ -222,7 +222,7 @@ async fn text_and_thinking_stream() {
             .unwrap()
             .to_str()
             .unwrap()
-            .starts_with("tau/")
+            .starts_with("delta/")
     );
     assert_eq!(
         request.body_json::<Value>().unwrap(),
@@ -773,7 +773,7 @@ async fn simple_options_map_tool_choice_and_max_tokens() {
             max_tokens: Some(100),
             ..StreamOptions::default()
         },
-        tool_choice: Some(tau_ai::ToolChoice::None),
+        tool_choice: Some(delta_ai::ToolChoice::None),
         ..SimpleStreamOptions::default()
     };
     let m = custom_model("gemini-2.5-flash", &json!({}));
@@ -827,7 +827,7 @@ async fn explicit_thinking_options() {
     // Options of another API are ignored.
     let server2 = server_ok().await;
     let m = model(&base_url(&server2), "gemini-2.5-flash");
-    opts.api = Some(ApiOptions::GoogleVertex(tau_ai::options::GoogleVertexOptions {
+    opts.api = Some(ApiOptions::GoogleVertex(delta_ai::options::GoogleVertexOptions {
         thinking: Some(GoogleThinking {
             enabled: true,
             budget_tokens: None,
@@ -981,10 +981,10 @@ async fn mid_conversation_system_messages_are_collapsed() {
     let context = normalize_context(
         &Context::new(vec![
             Message::user("one"),
-            Message::System(tau_ai::SystemMessage {
+            Message::System(delta_ai::SystemMessage {
                 content: "Also be kind.".into(),
                 tools_added: Some(vec![Tool::new("late", "Late tool", json!({"type": "object"}))]),
-                ..tau_ai::SystemMessage::default()
+                ..delta_ai::SystemMessage::default()
             }),
             Message::user("two"),
         ])

@@ -10,13 +10,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use tau_agent::{
+use delta_agent::{
     Agent, AgentError, AgentEvent, AgentMessage, AgentOptions, AgentTool, AgentToolResult, AgentTurnDecision,
     QueueMode, StreamFn, ToolUpdates,
 };
-use tau_ai::transcript::get_current_system_message;
-use tau_ai::types::ToolReference;
-use tau_ai::{
+use delta_ai::transcript::get_current_system_message;
+use delta_ai::types::ToolReference;
+use delta_ai::{
     AssistantMessageEvent, AssistantMessageEventStream, DoneReason, Message, ModelThinkingLevel, StopReason,
     SystemMessage, Tool, ToolResultMessage, UserBlock,
 };
@@ -45,7 +45,7 @@ fn recording(requests: Shared<Vec<Vec<String>>>) -> StreamFn {
     })
 }
 
-fn tool_use_message(calls: Vec<(&str, &str)>) -> tau_ai::AssistantMessage {
+fn tool_use_message(calls: Vec<(&str, &str)>) -> delta_ai::AssistantMessage {
     assistant(
         calls
             .into_iter()
@@ -93,7 +93,7 @@ fn creates_an_agent_with_default_state() {
 
 #[test]
 fn creates_an_agent_with_custom_initial_state() {
-    let custom_model = tau_ai::Model {
+    let custom_model = delta_ai::Model {
         id: "gpt-4o-mini".into(),
         ..model()
     };
@@ -126,7 +126,7 @@ fn tool_names(tools: Option<&Vec<Tool>>) -> Vec<String> {
 }
 
 fn echo_input_tool() -> Arc<dyn AgentTool> {
-    Arc::new(tau_agent::FnTool::new(
+    Arc::new(delta_agent::FnTool::new(
         Tool::new("echo", "Echo input", empty_schema()),
         |_, _| async { Ok(AgentToolResult::text("echo")) },
     ))
@@ -236,7 +236,7 @@ async fn merges_tool_changes_into_a_pending_system_message() {
             system_from_json(json!({
                 "role": "system", "content": "", "sections": {"skills": "<skills>x</skills>"}, "timestamp": 1
             })),
-            tau_ai::UserMessage {
+            delta_ai::UserMessage {
                 content: "hi".into(),
                 timestamp: 2,
             }
@@ -277,7 +277,7 @@ async fn rewrites_pending_tool_declarations_to_match_the_executable_set() {
                 "toolsRemoved": [{"name": "first"}],
                 "timestamp": 1,
             })),
-            tau_ai::UserMessage {
+            delta_ai::UserMessage {
                 content: "hi".into(),
                 timestamp: 2,
             }
@@ -302,7 +302,7 @@ fn restores_the_transcript_baseline_when_reset() {
         options.initial_state.system_prompt = Some("You are helpful.".into());
         options.initial_state.tools = vec![echo_input_tool()];
         options.initial_state.messages = vec![
-            tau_ai::UserMessage {
+            delta_ai::UserMessage {
                 content: "old".into(),
                 timestamp: 1,
             }
@@ -341,7 +341,7 @@ fn subscribes_to_events() {
     assert_eq!(count.load(Ordering::SeqCst), 0);
 }
 
-// Upstream throws from the stream function; a tau stream function reports failures in its
+// Upstream throws from the stream function; a delta stream function reports failures in its
 // stream, so the response fails before generation starts.
 #[tokio::test]
 async fn emits_full_lifecycle_events_for_failed_runs() {
@@ -566,7 +566,7 @@ async fn ignores_a_settled_parallel_tool_update_while_another_tool_is_still_runn
 fn updates_state_with_setters() {
     let agent = new_agent(unused_stream_fn());
 
-    let new_model = tau_ai::Model {
+    let new_model = delta_ai::Model {
         id: "gemini-2.5-flash".into(),
         ..model()
     };
@@ -632,7 +632,7 @@ async fn rejects_reset_while_processing_without_corrupting_the_transcript() {
     let agent = new_agent(Arc::new(move |model, _, _| {
         let (sender_started, sender_release) = (stream_started.clone(), stream_release.clone());
         let (mut sender, stream) = AssistantMessageEventStream::channel();
-        let partial = tau_ai::AssistantMessage::empty(&model.api, &model.provider, &model.id);
+        let partial = delta_ai::AssistantMessage::empty(&model.api, &model.provider, &model.id);
         tokio::spawn(async move {
             sender.push(AssistantMessageEvent::Start { message: partial });
             sender_started.open();
@@ -695,14 +695,14 @@ async fn rejects_continue_while_streaming() {
 async fn continue_processes_queued_follow_up_messages_after_an_assistant_turn() {
     let agent = new_agent(scripted(vec![assistant_text("Processed")]));
     agent.set_messages(vec![
-        tau_ai::UserMessage {
-            content: tau_ai::UserContent::Blocks(vec![UserBlock::text("Initial")]),
-            timestamp: tau_ai::types::now_ms() - 10,
+        delta_ai::UserMessage {
+            content: delta_ai::UserContent::Blocks(vec![UserBlock::text("Initial")]),
+            timestamp: delta_ai::types::now_ms() - 10,
         }
         .into(),
         assistant_text("Initial response").into(),
     ]);
-    agent.follow_up(tau_ai::UserMessage::new(tau_ai::UserContent::Blocks(vec![
+    agent.follow_up(delta_ai::UserMessage::new(delta_ai::UserContent::Blocks(vec![
         UserBlock::text("Queued follow-up"),
     ])));
 

@@ -2,7 +2,7 @@
 
 ## 目的
 
-`google-vertex` 通过 Vertex AI 流式调用 Gemini 模型，把响应转换成 tau 统一的 `AssistantMessageEvent` 协议。
+`google-vertex` 通过 Vertex AI 流式调用 Gemini 模型，把响应转换成 delta 统一的 `AssistantMessageEvent` 协议。
 
 上游通过 `@google/genai` 的 Vertex 模式发 REST 请求。按 `AGENTS.md`，Vertex AI 用 Google Cloud 官方 Rust 客户端库：
 
@@ -106,7 +106,7 @@ gRPC 的路径是固定的（`/google.cloud.aiplatform.v1.PredictionService/Stre
 
 ### 请求头
 
-上游把 `{User-Agent: pi UA, ...model.headers, ...options.headers}` 设为 SDK 的 `httpOptions.headers`。这里 `options.headers`（`Models` 已合并模型的 headers；值为 `None` 的项删除）作为客户端级的请求元数据（`ClientBuilder::with_extension(HeaderMap)`）。SDK 会丢弃 `user-agent`、`authorization`、`x-goog-api-key`、`x-goog-api-client`、`x-goog-user-project`、`x-goog-request-params` 的自定义值，由它自己设置。User-Agent 通过 `RequestOptionsBuilder::with_user_agent` 按请求设置：默认 tau 的 User-Agent，`options.headers` 里有 `user-agent` 时用它的值，与上游一致。
+上游把 `{User-Agent: pi UA, ...model.headers, ...options.headers}` 设为 SDK 的 `httpOptions.headers`。这里 `options.headers`（`Models` 已合并模型的 headers；值为 `None` 的项删除）作为客户端级的请求元数据（`ClientBuilder::with_extension(HeaderMap)`）。SDK 会丢弃 `user-agent`、`authorization`、`x-goog-api-key`、`x-goog-api-client`、`x-goog-user-project`、`x-goog-request-params` 的自定义值，由它自己设置。User-Agent 通过 `RequestOptionsBuilder::with_user_agent` 按请求设置：默认 delta 的 User-Agent，`options.headers` 里有 `user-agent` 时用它的值，与上游一致。
 
 ### 请求体
 

@@ -1,4 +1,4 @@
-//! Stateful agent with tool execution and event streaming, built on [`tau_ai`].
+//! Stateful agent with tool execution and event streaming, built on [`delta_ai`].
 //!
 //! Rust port of [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent).
 //! Design notes live in `docs/design/` of this crate.

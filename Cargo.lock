@@ -890,6 +890,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "delta-agent"
+version = "0.1.0"
+dependencies = [
+ "delta-ai",
+ "futures",
+ "pretty_assertions",
+ "reqwest",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "wiremock",
+]
+
+[[package]]
+name = "delta-ai"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "aws-smithy-eventstream",
+ "aws-smithy-types",
+ "base64 0.23.1",
+ "bytes",
+ "futures",
+ "google-cloud-aiplatform-v1",
+ "google-cloud-auth",
+ "google-cloud-gax",
+ "http",
+ "indexmap 2.14.2",
+ "jsonschema",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3156,54 +3204,6 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
-]
-
-[[package]]
-name = "tau-agent-runtime"
-version = "0.1.0"
-dependencies = [
- "futures",
- "pretty_assertions",
- "reqwest",
- "schemars 1.2.3",
- "serde",
- "serde_json",
- "tau-llm",
- "thiserror",
- "tokio",
- "tokio-util",
- "wiremock",
-]
-
-[[package]]
-name = "tau-llm"
-version = "0.1.0"
-dependencies = [
- "aws-config",
- "aws-sdk-bedrockruntime",
- "aws-smithy-eventstream",
- "aws-smithy-types",
- "base64 0.23.1",
- "bytes",
- "futures",
- "google-cloud-aiplatform-v1",
- "google-cloud-auth",
- "google-cloud-gax",
- "http",
- "indexmap 2.14.2",
- "jsonschema",
- "pretty_assertions",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "uuid",
- "wiremock",
 ]
 
 [[package]]

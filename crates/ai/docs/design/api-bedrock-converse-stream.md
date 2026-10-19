@@ -3,7 +3,7 @@
 ## 目的
 
 `bedrock-converse-stream` 通过 Amazon Bedrock 的 `ConverseStream` 接口流式调用 Bedrock 上的模型（Claude、Nova、OpenAI GPT/gpt-oss 等），
-把 Bedrock 的事件流转换成 tau 统一的 `AssistantMessageEvent` 协议。
+把 Bedrock 的事件流转换成 delta 统一的 `AssistantMessageEvent` 协议。
 
 按 `AGENTS.md` 的规定，Bedrock 使用 AWS 官方 Rust SDK（`aws-sdk-bedrockruntime` + `aws-config`），不手写 SigV4 和事件流解析。
 整个模块在 `bedrock` feature 之后（`#[cfg(feature = "bedrock")]`），未开启时不编译 AWS SDK。

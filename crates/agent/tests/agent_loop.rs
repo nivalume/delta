@@ -12,14 +12,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use tau_agent::{
+use delta_agent::{
     AfterToolCallResult, AgentContext, AgentEvent, AgentHooks, AgentLoopError, AgentLoopTurnUpdate, AgentMessage,
     AgentRequestUpdate, AgentTool, AgentToolResult, AgentTurnDecision, BeforeToolCallContext, BeforeToolCallResult,
     CustomMessage, FnTool, NoCustom, RunToolCallOptions, ToolContext, ToolError, ToolExecutionMode, agent_loop,
     agent_loop_continue, run_agent_loop, run_tool_call,
 };
-use tau_ai::types::UsageCost;
-use tau_ai::{
+use delta_ai::types::UsageCost;
+use delta_ai::{
     JsonObject, Message, ModelThinkingLevel, StopReason, SystemMessage, ThinkingLevel, Tool, Usage, UserBlock,
 };
 
@@ -44,7 +44,7 @@ fn usage(base: u64) -> Usage {
     }
 }
 
-fn tool_call_message(calls: Vec<(&str, &str, Value)>) -> tau_ai::AssistantMessage {
+fn tool_call_message(calls: Vec<(&str, &str, Value)>) -> delta_ai::AssistantMessage {
     assistant(
         calls
             .into_iter()
@@ -55,7 +55,7 @@ fn tool_call_message(calls: Vec<(&str, &str, Value)>) -> tau_ai::AssistantMessag
 }
 
 /// Requests: the first answers with `first`, later ones with "done".
-fn first_then_done(first: tau_ai::AssistantMessage, calls: Arc<AtomicUsize>) -> tau_agent::StreamFn {
+fn first_then_done(first: delta_ai::AssistantMessage, calls: Arc<AtomicUsize>) -> delta_agent::StreamFn {
     stream_fn(move |index, _, _, _| {
         calls.fetch_add(1, Ordering::SeqCst);
         respond(if index == 0 {
@@ -145,7 +145,7 @@ fn custom(role: &str, text: &str) -> AgentMessage<Custom> {
     AgentMessage::Custom(Custom {
         role: role.into(),
         text: text.into(),
-        timestamp: tau_ai::types::now_ms(),
+        timestamp: delta_ai::types::now_ms(),
     })
 }
 
@@ -496,7 +496,7 @@ impl Overlap {
     }
 
     /// First request: two calls to `name`, then open the gate after 20 ms.
-    fn stream_fn(&self, first: (&str, &str), second: (&str, &str)) -> tau_agent::StreamFn {
+    fn stream_fn(&self, first: (&str, &str), second: (&str, &str)) -> delta_agent::StreamFn {
         let release = self.release.clone();
         let message = tool_call_message(vec![
             ("tool-1", first.0, json!({ "value": first.1 })),
@@ -636,8 +636,8 @@ async fn injects_queued_messages_after_all_tool_calls_complete() {
             } => Some(format!("tool:{}", result.tool_call_id)),
             AgentEvent::MessageStart {
                 message:
-                    AgentMessage::Llm(Message::User(tau_ai::UserMessage {
-                        content: tau_ai::UserContent::Text(text),
+                    AgentMessage::Llm(Message::User(delta_ai::UserMessage {
+                        content: delta_ai::UserContent::Text(text),
                         ..
                     })),
             } => Some(text.clone()),
@@ -1009,7 +1009,7 @@ async fn lets_a_natural_follow_up_request_satisfy_continuation() {
 
 #[tokio::test]
 async fn prepares_the_initial_request_after_pending_messages_and_can_replace_request_state() {
-    let replacement = tau_ai::Model {
+    let replacement = delta_ai::Model {
         id: "replacement".into(),
         name: "replacement".into(),
         ..model()
@@ -1278,7 +1278,7 @@ async fn action_end_receives_finalized_turn_context_and_stops_before_queue_polli
 }
 
 /// Every request answers with the same tool call; a second request would answer "done".
-fn same_tool_call_then_done(calls: Arc<AtomicUsize>) -> tau_agent::StreamFn {
+fn same_tool_call_then_done(calls: Arc<AtomicUsize>) -> delta_agent::StreamFn {
     first_then_done(
         tool_call_message(vec![("tool-1", "echo", json!({"value": "hello"}))]),
         calls,
@@ -1473,7 +1473,7 @@ async fn continue_allows_custom_message_types_as_last_message() {
         messages
             .iter()
             .filter_map(|message| match message {
-                AgentMessage::Custom(custom) if custom.role == "custom" => Some(Message::User(tau_ai::UserMessage {
+                AgentMessage::Custom(custom) if custom.role == "custom" => Some(Message::User(delta_ai::UserMessage {
                     content: custom.text.clone().into(),
                     timestamp: custom.timestamp,
                 })),

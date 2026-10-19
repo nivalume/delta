@@ -2,7 +2,7 @@
 
 ## 目的
 
-`mistral-conversations` 对接 Mistral 原生的 Chat Completions 接口：`POST {baseUrl}/v1/chat/completions`，`stream: true`，用 SSE 返回增量。上游通过 Mistral SDK 的 HTTP 层调用该接口；tau 没有 Mistral 官方 Rust SDK，所以在 `reqwest` + `tau_ai::http` 上手写客户端，请求字段与上游发送的完全一致。
+`mistral-conversations` 对接 Mistral 原生的 Chat Completions 接口：`POST {baseUrl}/v1/chat/completions`，`stream: true`，用 SSE 返回增量。上游通过 Mistral SDK 的 HTTP 层调用该接口；delta 没有 Mistral 官方 Rust SDK，所以在 `reqwest` + `delta_ai::http` 上手写客户端，请求字段与上游发送的完全一致。
 
 实现位于 `crates/ai/src/api/mistral_conversations.rs`，对外提供：
 
@@ -89,7 +89,7 @@ Mistral 只接受 9 位字母数字 id。移植上游的规范化函数：
 
 | 头 | 值 |
 | --- | --- |
-| `User-Agent` | `tau/<版本> (<os>; <arch>)` |
+| `User-Agent` | `delta/<版本> (<os>; <arch>)` |
 | `accept` | `text/event-stream` |
 | `authorization` | `Bearer <api_key>` |
 | `content-type` | `application/json` |
@@ -149,8 +149,8 @@ Mistral 只接受 9 位字母数字 id。移植上游的规范化函数：
 
 ## Rust 实现差异
 
-- 上游在 API 内部再合并一次 `model.headers`；tau 由 `Models` 在调用 API 前把模型头合并进 `options.headers`（并在其后运行 `transform_headers`），API 只合并默认头和 `options.headers`。`x-affinity` 的“显式指定”判断因此只看 `options.headers`，效果相同。直接调用 `stream` 时需要自己把模型头放进 `options.headers`。
-- `User-Agent` 用 tau 自己的值，而不是 `pi (...)`。
+- 上游在 API 内部再合并一次 `model.headers`；delta 由 `Models` 在调用 API 前把模型头合并进 `options.headers`（并在其后运行 `transform_headers`），API 只合并默认头和 `options.headers`。`x-affinity` 的“显式指定”判断因此只看 `options.headers`，效果相同。直接调用 `stream` 时需要自己把模型头放进 `options.headers`。
+- `User-Agent` 用 delta 自己的值，而不是 `pi (...)`。
 - `stream_simple` 在上游缺少 API key 时同步抛错；Rust 返回只含一个 `error` 事件的流，消息相同。
 - 上游对每个字符串做 `sanitizeSurrogates`；Rust 字符串保证是合法 UTF-8，不需要。
 - 事件不携带共享的 `partial`。工具调用每收到一段参数，就用 `parse_streaming_json` 更新输出消息中的参数（与上游的部分解析一致），结束时再完整解析。空的参数增量不产生 `toolcall_delta` 事件（`MessageBuilder` 的统一行为），上游会发出一个空增量。
@@ -168,5 +168,5 @@ Mistral 只接受 9 位字母数字 id。移植上游的规范化函数：
 1. 按 `options.max_retries` 用 `http::send_with_retry` 的策略重试 408/409/429/5xx（pi-py 已支持 `max_retries`，默认 0）。上游不重试，暂未实现。
 2. 流内错误对象（例如 `{"object": "error", "message": ...}`）目前只报 `Invalid Mistral streaming event`，可以把其中的 `message` 带出来。
 3. 匿名工具调用（先无 id、后有真实 id）沿用生成的 id；可考虑改用后到的真实 id。
-4. 响应体空闲超时：上游把卡住的响应体交给 HTTP 客户端的空闲超时，tau 的默认客户端没有读取超时。
+4. 响应体空闲超时：上游把卡住的响应体交给 HTTP 客户端的空闲超时，delta 的默认客户端没有读取超时。
 5. 块中的 `model` 字段可写入 `response_model`（上游未写）。

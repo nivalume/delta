@@ -1,10 +1,10 @@
-# tau-agent-runtime
+# delta-agent
 
-Stateful LLM agent for Rust, built on [`tau-llm`](https://crates.io/crates/tau-llm). Rust port of
+Stateful LLM agent for Rust, built on [`delta-ai`](https://crates.io/crates/delta-ai). Rust port of
 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent);
-part of [tau](https://github.com/nivalume/pi-rs).
+part of [delta](https://github.com/nivalume/pi-rs).
 
-Import it as `tau_agent`.
+Import it as `delta_agent`.
 
 - Tool execution, parallel by default or sequential, with argument validation and `before`/`after` hooks
 - Steering and follow-up queues
@@ -15,7 +15,7 @@ Import it as `tau_agent`.
 
 ```rust
 use std::sync::Arc;
-use tau_agent::{Agent, AgentEvent, AgentInitialState, AgentOptions, AgentToolResult, models_stream_fn, typed_tool};
+use delta_agent::{Agent, AgentEvent, AgentInitialState, AgentOptions, AgentToolResult, models_stream_fn, typed_tool};
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct GetTime {

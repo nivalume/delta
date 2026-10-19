@@ -2,8 +2,8 @@
 //!
 //! ```
 //! # #[tokio::main(flavor = "current_thread")] async fn main() {
-//! use tau_ai::providers::faux::{FauxOptions, FauxProvider, faux_assistant_message, faux_text};
-//! use tau_ai::{Context, Message, Models, StreamOptions};
+//! use delta_ai::providers::faux::{FauxOptions, FauxProvider, faux_assistant_message, faux_text};
+//! use delta_ai::{Context, Message, Models, StreamOptions};
 //!
 //! let faux = FauxProvider::new(FauxOptions::default());
 //! let models = Models::default();

@@ -3,6 +3,14 @@
 // Shared helpers outside `#[test]` functions panic on setup failures too.
 #![allow(clippy::unwrap_used)]
 
+use delta_ai::api::openai_completions::{self, OpenAICompletionsApi};
+use delta_ai::options::{OpenAICompletionsOptions, ProviderResponse, ReasoningEffort};
+use delta_ai::types::{ConstrainedSampling, GrammarVariants};
+use delta_ai::{
+    ApiOptions, AssistantBlock, AssistantMessage, AssistantMessageEvent, Context, Message, Model, ProviderStreams,
+    SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, ThinkingLevel, Tool, ToolCall,
+    ToolChoice, TranscriptContext, normalize_context,
+};
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
@@ -10,14 +18,6 @@ use std::fmt::Write as _;
 use std::io::{Read, Write as _};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tau_ai::api::openai_completions::{self, OpenAICompletionsApi};
-use tau_ai::options::{OpenAICompletionsOptions, ProviderResponse, ReasoningEffort};
-use tau_ai::types::{ConstrainedSampling, GrammarVariants};
-use tau_ai::{
-    ApiOptions, AssistantBlock, AssistantMessage, AssistantMessageEvent, Context, Message, Model, ProviderStreams,
-    SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, ThinkingLevel, Tool, ToolCall,
-    ToolChoice, TranscriptContext, normalize_context,
-};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -87,7 +87,7 @@ fn options() -> StreamOptions {
     }
 }
 
-async fn collect(mut stream: tau_ai::AssistantMessageEventStream) -> (AssistantMessage, Vec<AssistantMessageEvent>) {
+async fn collect(mut stream: delta_ai::AssistantMessageEventStream) -> (AssistantMessage, Vec<AssistantMessageEvent>) {
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -165,7 +165,7 @@ async fn streams_text_with_usage_and_sends_the_wire_format() {
     let header = |name: &str| request.headers.get(name).map(|v| v.to_str().unwrap().to_owned());
     assert_eq!(header("authorization").as_deref(), Some("Bearer sk-test"));
     assert_eq!(header("content-type").as_deref(), Some("application/json"));
-    assert!(header("user-agent").unwrap().starts_with("tau/"));
+    assert!(header("user-agent").unwrap().starts_with("delta/"));
     assert_eq!(header("x-model").as_deref(), Some("model-header"));
     assert_eq!(header("x-extra").as_deref(), Some("1"));
     assert_eq!(
@@ -222,7 +222,7 @@ async fn headers_override_defaults_and_session_affinity() {
     let request = last_request(&server).await;
     assert_eq!(request.headers.get("x-session-id").unwrap(), "s");
     assert!(request.headers.get("x-session-affinity").is_none());
-    opts.cache_retention = Some(tau_ai::CacheRetention::None);
+    opts.cache_retention = Some(delta_ai::CacheRetention::None);
     run(&open_router, &hi(), opts).await;
     assert!(last_request(&server).await.headers.get("x-session-id").is_none());
 }
@@ -336,7 +336,7 @@ async fn reasoning_details_become_the_signature_and_replay() {
     let follow_up = ctx(vec![
         Message::user("read"),
         Message::Assistant(message),
-        Message::ToolResult(tau_ai::ToolResultMessage::text(
+        Message::ToolResult(delta_ai::ToolResultMessage::text(
             &ToolCall {
                 id: "call_1".into(),
                 name: "read".into(),
@@ -914,14 +914,14 @@ async fn replays_foreign_messages_images_and_orphaned_calls() {
     let mut aborted = AssistantMessage::empty("openai-completions", "openai", "gpt-4o");
     aborted.stop_reason = StopReason::Aborted;
     aborted.content = vec![AssistantBlock::Text(TextContent::new("half"))];
-    let image = tau_ai::UserBlock::Image(tau_ai::ImageContent {
+    let image = delta_ai::UserBlock::Image(delta_ai::ImageContent {
         data: "AAAA".into(),
         mime_type: "image/png".into(),
     });
     let context = normalize_context(
         &Context::new(vec![
-            Message::User(tau_ai::UserMessage {
-                content: tau_ai::UserContent::Blocks(vec![tau_ai::UserBlock::text("look"), image]),
+            Message::User(delta_ai::UserMessage {
+                content: delta_ai::UserContent::Blocks(vec![delta_ai::UserBlock::text("look"), image]),
                 timestamp: 1,
             }),
             Message::Assistant(foreign),

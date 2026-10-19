@@ -7,7 +7,7 @@
 - `api::openai_responses_shared`：Responses 家族共用的输入项转换、工具转换和流事件处理。`openai-responses` 与 `azure-openai-responses` 都用它，以后的 `openai-codex-responses` 也可以复用。
 - `api::openai_responses`：单元结构体 `OpenAIResponsesApi`，负责兼容配置、请求体、请求头、缓存与会话亲和、服务等级计价，以及 `stream` / `stream_simple`。
 
-客户端手写在 `reqwest` + `tau_ai::http` 之上，不依赖 OpenAI SDK。
+客户端手写在 `reqwest` + `delta_ai::http` 之上，不依赖 OpenAI SDK。
 
 ## 上游源文件
 
@@ -24,7 +24,7 @@
 
 - URL：`join_url(model.base_url, "responses")`。
 - 请求头合并顺序（后者覆盖前者，名字不区分大小写，`None` 删除）：
-  1. API 默认：`Authorization: Bearer <api_key>`（没有 key 但有 `authorization` / `cf-aig-authorization` 头时用 `unused`）、`Accept`、`Content-Type: application/json`、`User-Agent: tau/...`；
+  1. API 默认：`Authorization: Bearer <api_key>`（没有 key 但有 `authorization` / `cf-aig-authorization` 头时用 `unused`）、`Accept`、`Content-Type: application/json`、`User-Agent: delta/...`；
   2. `model.headers`；
   3. 会话亲和头（见下）；
   4. `options.headers`。

@@ -8,8 +8,8 @@ use std::fmt::Write as _;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use tau_agent::{ProxyStreamOptions, stream_proxy};
-use tau_ai::{
+use delta_agent::{ProxyStreamOptions, stream_proxy};
+use delta_ai::{
     AssistantBlock, AssistantMessage, AssistantMessageEvent, Context, Model, SimpleStreamOptions, StopReason,
     normalize_context,
 };

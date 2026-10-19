@@ -1,7 +1,7 @@
 //! Message, content, tool and usage types.
 //!
 //! The JSON shape of every type matches upstream pi-ai (camelCase fields, `type`/`role`
-//! tags), so a context serialized by pi, pi-py or tau can be read by the others.
+//! tags), so a context serialized by pi, pi-py or delta can be read by the others.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize};

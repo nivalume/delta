@@ -4,7 +4,7 @@
 
 ## `AgentTool` trait
 
-上游的 `AgentTool` 是一个对象接口：继承 `Tool`（名称、描述、参数 schema），加上 `label`、`execute` 和几个可选字段。tau 用 trait：
+上游的 `AgentTool` 是一个对象接口：继承 `Tool`（名称、描述、参数 schema），加上 `label`、`execute` 和几个可选字段。delta 用 trait：
 
 ```rust
 pub trait AgentTool: Send + Sync {
@@ -19,9 +19,9 @@ pub trait AgentTool: Send + Sync {
 }
 ```
 
-| 上游 | tau | 说明 |
+| 上游 | delta | 说明 |
 | --- | --- | --- |
-| `name`、`description`、`parameters`（继承自 `Tool`） | `definition() -> &Tool` | 直接复用 `tau_ai::Tool`，包括 `constrained_sampling` |
+| `name`、`description`、`parameters`（继承自 `Tool`） | `definition() -> &Tool` | 直接复用 `delta_ai::Tool`，包括 `constrained_sampling` |
 | `label` | `label()` | 默认取工具名 |
 | `executionMode` | `execution_mode()` | 任一调用的工具是 `Sequential`，整批顺序执行 |
 | `outputSchema` | `output_schema()` | 只是声明，循环不校验 |
@@ -87,7 +87,7 @@ let tool = typed_tool("get_time", "Get the current time", |args: GetTime, _ctx| 
 
 1. **查找工具**：按名称在 `context.tools` 里找。找不到记录错误结果 `Tool {name} not found`。
 2. **`prepare_arguments`**：处理原始参数。
-3. **校验**：`tau_ai::validation::validate_tool_arguments`，包括上游的类型强制转换（字符串数字转数字等）。失败时错误文本发给模型。
+3. **校验**：`delta_ai::validation::validate_tool_arguments`，包括上游的类型强制转换（字符串数字转数字等）。失败时错误文本发给模型。
 4. **`before_tool_call` 钩子**：可以阻止执行。钩子返回后若运行已取消，记录 `Operation aborted`。
 5. **执行**：`execute`，期间转发 `ToolExecutionUpdate`，记录耗时。
 6. **`after_tool_call` 钩子**：逐字段覆盖结果。

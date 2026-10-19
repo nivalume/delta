@@ -181,7 +181,7 @@ toolUse，否则 stop；stop reason 为 error → 以其消息失败；`supports
   无法解析，按文本处理；`error` 对象由 `serde_json` 重新序列化，浮点数写法可能与 `JSON.stringify`
   不同（如 `1.0`）。连接错误的文本来自 reqwest 而不是 SDK 的 `Connection error.`。
 - 默认重试次数由核心决定（`DEFAULT_MAX_RETRIES = 2`），上游 `retryProviderRequest` 默认不重试。
-- 不发送 OpenAI SDK 的 `X-Stainless-*` 头；`User-Agent` 为核心的 `tau/<版本> (...)`。
+- 不发送 OpenAI SDK 的 `X-Stainless-*` 头；`User-Agent` 为核心的 `delta/<版本> (...)`。
 - Rust 字符串不含孤立代理项，`sanitizeSurrogates` 无需移植。
 - JavaScript 语义：`trim()` 的空白集合（含 `\u{feff}`、不含 `\u{85}`）、`shortHash` 按 UTF-16 单元、
   `??=`/`||=` 对 `reasoning_details` 字段的赋值（来源缺失时删除字段）都按上游实现。

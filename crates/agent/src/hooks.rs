@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use tau_ai::{
+use delta_ai::{
     AssistantMessage, AssistantMessageEventStream, Message, Model, ModelThinkingLevel, Models, SimpleStreamOptions,
     ToolCall, ToolResultMessage, TranscriptContext,
 };
@@ -32,7 +32,7 @@ pub fn models_stream_fn(models: Models) -> StreamFn {
     Arc::new(move |model, context, options| {
         let models = models.clone();
         // The transcript is already normalized; normalizing it again is a no-op.
-        let context = tau_ai::Context::new(context.into_messages());
+        let context = delta_ai::Context::new(context.into_messages());
         Box::pin(async move { models.stream_simple(&model, &context, options) })
     })
 }

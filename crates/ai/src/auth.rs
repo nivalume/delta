@@ -854,7 +854,7 @@ mod tests {
     #[tokio::test]
     async fn stored_key_wins_over_env_and_explicit_key_wins_over_stored() {
         let store: Arc<dyn CredentialStore> = Arc::new(InMemoryCredentialStore::new());
-        let auth = ProviderAuth::api_key(env_api_key_auth("Test key", &["TAU_TEST_UNSET_KEY_VAR"]));
+        let auth = ProviderAuth::api_key(env_api_key_auth("Test key", &["DELTA_TEST_UNSET_KEY_VAR"]));
         let none = resolve_provider_auth(
             "p",
             &auth,

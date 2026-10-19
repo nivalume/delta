@@ -27,7 +27,7 @@ Azure 模型没有可直接使用的 baseUrl：每个用户一个资源，按请
 
 ## 请求映射
 
-- 请求头（后者覆盖前者）：`api-key: <api_key>`、`Accept`、`Content-Type: application/json`、`User-Agent: tau/...`，然后 `model.headers`，最后 `options.headers`。不发送 `Authorization`，也不发送会话亲和头。
+- 请求头（后者覆盖前者）：`api-key: <api_key>`、`Accept`、`Content-Type: application/json`、`User-Agent: delta/...`，然后 `model.headers`，最后 `options.headers`。不发送 `Authorization`，也不发送会话亲和头。
 - 必须有 `options.api_key`，请求头不能代替（与上游一致），否则报错 `No API key for provider: <provider>`。
 - 工具调用 id 允许列表：`openai`、`openai-codex`、`opencode`、`azure`。
 

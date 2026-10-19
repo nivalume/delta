@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use tau_ai::events::MessageBuilder;
-use tau_ai::http::sse_events;
-use tau_ai::options::ThinkingBudgets;
-use tau_ai::{
+use delta_ai::events::MessageBuilder;
+use delta_ai::http::sse_events;
+use delta_ai::options::ThinkingBudgets;
+use delta_ai::{
     AssistantMessage, AssistantMessageEventStream, Model, SimpleStreamOptions, StopReason, ToolCall, TranscriptContext,
     Usage,
 };
@@ -125,10 +125,10 @@ fn request_options(options: &SimpleStreamOptions) -> Value {
         "transport",
         base.transport.map_or(Value::Null, |transport| {
             json!(match transport {
-                tau_ai::options::Transport::Sse => "sse",
-                tau_ai::options::Transport::Websocket => "websocket",
-                tau_ai::options::Transport::WebsocketCached => "websocket-cached",
-                tau_ai::options::Transport::Auto => "auto",
+                delta_ai::options::Transport::Sse => "sse",
+                delta_ai::options::Transport::Websocket => "websocket",
+                delta_ai::options::Transport::WebsocketCached => "websocket-cached",
+                delta_ai::options::Transport::Auto => "auto",
             })
         }),
     );
@@ -183,7 +183,7 @@ async fn run(
     options: &ProxyStreamOptions,
     cancel: Option<&CancellationToken>,
 ) -> Result<(), String> {
-    let client = tau_ai::http::client(&options.options.base);
+    let client = delta_ai::http::client(&options.options.base);
     let body = json!({"model": model, "context": context, "options": request_options(&options.options)});
     let request = client
         .post(format!("{}/api/stream", options.proxy_url.trim_end_matches('/')))
@@ -334,9 +334,9 @@ fn apply(builder: &mut MessageBuilder, event: ProxyAssistantMessageEvent) -> Res
 
 fn require_kind(builder: &mut MessageBuilder, index: usize, kind: &str, event: &str) -> Result<(), String> {
     let matches = match builder.output.content.get(index) {
-        Some(tau_ai::AssistantBlock::Text(_)) => kind == "text",
-        Some(tau_ai::AssistantBlock::Thinking(_)) => kind == "thinking",
-        Some(tau_ai::AssistantBlock::ToolCall(_)) => kind == "toolCall",
+        Some(delta_ai::AssistantBlock::Text(_)) => kind == "text",
+        Some(delta_ai::AssistantBlock::Thinking(_)) => kind == "thinking",
+        Some(delta_ai::AssistantBlock::ToolCall(_)) => kind == "toolCall",
         None => false,
     };
     if matches {

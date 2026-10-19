@@ -1,28 +1,28 @@
 # Provider implementation references: Zed and litellm-rs
 
 Notes from reading how two Rust projects implement LLM provider clients, used as a
-checklist for tau's hand-written API implementations (Anthropic Messages, OpenAI Chat
+checklist for delta's hand-written API implementations (Anthropic Messages, OpenAI Chat
 Completions and Responses, Gemini, Mistral).
 
 Read at: Zed `042e0406` (2026-10-19), litellm-rs `81077510` (2026-10-15).
 
 ## Licenses
 
-| Source | License | Use in tau (MIT) |
+| Source | License | Use in delta (MIT) |
 | --- | --- | --- |
 | Zed provider crates (`anthropic`, `open_ai`, `google_ai`, `mistral`, `bedrock`, `language_model_core`, ...) | GPL-3.0-or-later | Study only. Behavior is re-implemented from the wire specs; no code is copied. |
 | Zed `http_client`, `cloud_llm_client` | Apache-2.0 | Nothing relevant to provider logic. |
-| [litellm-rs](https://github.com/majiayu000/litellm-rs) | MIT | May be adapted with attribution. tau re-implements instead, because the code is tied to gateway types. |
+| [litellm-rs](https://github.com/majiayu000/litellm-rs) | MIT | May be adapted with attribution. delta re-implements instead, because the code is tied to gateway types. |
 
 Neither is usable as a dependency: Zed crates are `publish = false` (the crates.io names
 `anthropic`, `open_ai`, `mistral` belong to unrelated crates), and litellm-rs is a
 gateway-sized crate pinned to reqwest 0.12.
 
-## Behaviors tau adopts
+## Behaviors delta adopts
 
 ### SSE
 
-- One shared byte-level decoder (`tau_ai::http::SseDecoder`) for every API: `\n`, `\r\n`
+- One shared byte-level decoder (`delta_ai::http::SseDecoder`) for every API: `\n`, `\r\n`
   and lone `\r` line ends; multi-line `data:` joined with `\n`; only one leading space
   stripped; `:` comments ignored; `event:` exposed; final event flushed at EOF; bytes
   buffered per line so UTF-8 split across chunks decodes correctly.

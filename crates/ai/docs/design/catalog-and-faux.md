@@ -2,7 +2,7 @@
 
 ## 模型目录
 
-上游在构建时从 models.dev 等来源生成每个 provider 的目录（`src/providers/data/<provider>.json`，不入库），npm 包里带有生成结果。tau 不重复上游的生成脚本，而是直接使用 npm 包里的数据：
+上游在构建时从 models.dev 等来源生成每个 provider 的目录（`src/providers/data/<provider>.json`，不入库），npm 包里带有生成结果。delta 不重复上游的生成脚本，而是直接使用 npm 包里的数据：
 
 - `crates/ai/data/providers/*.json`：从 `@earendil-works/pi-ai` npm 包复制，当前为 1.3.0，42 个 provider、1714 个模型条目（chat 1614、image 60、classifier 40）。
 - `scripts/sync-models.sh [版本]`：从指定版本的 npm 包重新同步。
