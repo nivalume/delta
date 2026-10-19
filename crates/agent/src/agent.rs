@@ -280,13 +280,26 @@ fn unknown_model() -> Model {
     }
 }
 
-/// Clears run state when a run ends, including when the run's future is dropped.
+/// Clears run state when a run ends, including when the run's future is dropped. A dropped
+/// run is also cancelled, so tools still holding its token stop.
 struct RunGuard<C: CustomMessage> {
     inner: Arc<Inner<C>>,
+    finished: bool,
+}
+
+impl<C: CustomMessage> RunGuard<C> {
+    fn finish(mut self) {
+        self.finished = true;
+    }
 }
 
 impl<C: CustomMessage> Drop for RunGuard<C> {
     fn drop(&mut self) {
+        if !self.finished
+            && let Some(cancel) = lock(&self.inner.active).as_ref()
+        {
+            cancel.cancel();
+        }
         {
             let mut state = lock(&self.inner.state);
             state.is_streaming = false;
@@ -595,7 +608,7 @@ impl<C: CustomMessage> Agent<C> {
             cancel: cancel.clone(),
         };
         let _ = run_agent_loop_continue(context, config, &sink, cancel, &stream_fn).await;
-        drop(guard);
+        guard.finish();
         Ok(())
     }
 
@@ -613,6 +626,7 @@ impl<C: CustomMessage> Agent<C> {
         state.error_message = None;
         Ok(RunGuard {
             inner: self.inner.clone(),
+            finished: false,
         })
     }
 
@@ -623,7 +637,7 @@ impl<C: CustomMessage> Agent<C> {
             cancel: cancel.clone(),
         };
         run_agent_loop(messages, context, config, &sink, cancel, &stream_fn).await;
-        drop(guard);
+        guard.finish();
     }
 
     fn prepare_run(
@@ -734,5 +748,57 @@ struct AgentSink<C: CustomMessage> {
 impl<C: CustomMessage> AgentEventSink<C> for AgentSink<C> {
     fn emit(&self, event: AgentEvent<C>) -> BoxFuture<'_, ()> {
         Box::pin(self.agent.process_event(event, &self.cancel))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tau_ai::events::MessageBuilder;
+    use tau_ai::{AssistantMessageEventStream, Message};
+
+    /// Starts a response and waits for cancellation; `started` is notified once the request
+    /// is in flight.
+    fn hanging_stream_fn(started: Arc<tokio::sync::Notify>, cancelled: Arc<tokio::sync::Notify>) -> StreamFn {
+        Arc::new(move |model, _context, options| {
+            let started = started.clone();
+            let cancelled = cancelled.clone();
+            Box::pin(async move {
+                let (sender, stream) = AssistantMessageEventStream::channel();
+                let cancel = options.base.cancel.expect("loop sets the cancel token");
+                tokio::spawn(async move {
+                    let mut builder =
+                        MessageBuilder::new(sender, AssistantMessage::empty(&model.api, &model.provider, &model.id));
+                    builder.start();
+                    started.notify_one();
+                    cancel.cancelled().await;
+                    cancelled.notify_one();
+                    builder.fail("Request aborted by user", true);
+                });
+                stream
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn dropping_the_prompt_future_cancels_the_run() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cancelled = Arc::new(tokio::sync::Notify::new());
+        let agent: Agent = Agent::new(AgentOptions::new(hanging_stream_fn(started.clone(), cancelled.clone())));
+        let run = agent.prompt_text("hi", Vec::new());
+        tokio::select! {
+            _ = run => panic!("the run cannot finish before it is cancelled"),
+            () = started.notified() => {}
+        }
+        // `run` was dropped at the end of the select.
+        tokio::time::timeout(Duration::from_secs(5), cancelled.notified())
+            .await
+            .expect("run cancelled");
+        assert!(!agent.is_streaming());
+        agent.wait_for_idle().await;
+        assert!(matches!(
+            agent.messages().last(),
+            Some(AgentMessage::Llm(Message::User(_)))
+        ));
     }
 }

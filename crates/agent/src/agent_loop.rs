@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Instant;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use tau_ai::transcript::{ToolStateChanges, get_current_tools, get_tool_state_changes};
 use tau_ai::validation::validate_tool_arguments;
@@ -95,20 +95,44 @@ fn check_continue<C: CustomMessage>(context: &AgentContext<C>) -> Result<(), Age
 
 /// Events of a loop started by [`agent_loop`] or [`agent_loop_continue`]. The stream is
 /// observational: the loop does not wait for the consumer between events.
+///
+/// Dropping the stream before the run ends cancels the run; call [`Self::result`] to let it
+/// finish without reading the events.
 #[derive(Debug)]
 pub struct AgentEventStream<C> {
     rx: mpsc::UnboundedReceiver<AgentEvent<C>>,
     task: Option<tokio::task::JoinHandle<Vec<AgentMessage<C>>>>,
+    cancel_on_drop: Option<DropGuard>,
 }
 
 impl<C: CustomMessage> AgentEventStream<C> {
+    /// Run `run` on a Tokio task with a channel sink and a child of `cancel`, so dropping the
+    /// stream cancels the run without cancelling the caller's token.
+    fn spawn<F>(cancel: &CancellationToken, run: impl FnOnce(ChannelSink<C>, CancellationToken) -> F) -> Self
+    where
+        F: Future<Output = Vec<AgentMessage<C>>> + Send + 'static,
+    {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let run_cancel = cancel.child_token();
+        let task = tokio::spawn(run(ChannelSink(tx), run_cancel.clone()));
+        Self {
+            rx,
+            task: Some(task),
+            cancel_on_drop: Some(run_cancel.drop_guard()),
+        }
+    }
+
     /// Drain the events and return the messages the run added.
     pub async fn result(mut self) -> Vec<AgentMessage<C>> {
         while self.rx.recv().await.is_some() {}
-        match self.task.take() {
+        let messages = match self.task.take() {
             Some(task) => task.await.unwrap_or_default(),
             None => Vec::new(),
+        };
+        if let Some(guard) = self.cancel_on_drop.take() {
+            guard.disarm();
         }
+        messages
     }
 }
 
@@ -129,7 +153,10 @@ impl<C: Send + 'static> AgentEventSink<C> for ChannelSink<C> {
     }
 }
 
-/// [`run_agent_loop`] on a Tokio task, as a stream of events.
+/// [`run_agent_loop`] on a Tokio task, as a stream of events. Dropping the stream cancels
+/// the run.
+// `cancel` is taken by value like the `run_*` functions; the run uses a child of it.
+#[allow(clippy::needless_pass_by_value)]
 pub fn agent_loop<C: CustomMessage>(
     prompts: Vec<AgentMessage<C>>,
     context: AgentContext<C>,
@@ -137,15 +164,15 @@ pub fn agent_loop<C: CustomMessage>(
     cancel: CancellationToken,
     stream_fn: StreamFn,
 ) -> AgentEventStream<C> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let task = tokio::spawn(async move {
-        let sink = ChannelSink(tx);
+    AgentEventStream::spawn(&cancel, move |sink, cancel| async move {
         run_agent_loop(prompts, context, config, &sink, cancel, &stream_fn).await
-    });
-    AgentEventStream { rx, task: Some(task) }
+    })
 }
 
-/// [`run_agent_loop_continue`] on a Tokio task, as a stream of events.
+/// [`run_agent_loop_continue`] on a Tokio task, as a stream of events. Dropping the stream
+/// cancels the run.
+// `cancel` is taken by value like the `run_*` functions; the run uses a child of it.
+#[allow(clippy::needless_pass_by_value)]
 pub fn agent_loop_continue<C: CustomMessage>(
     context: AgentContext<C>,
     config: AgentLoopConfig<C>,
@@ -153,14 +180,11 @@ pub fn agent_loop_continue<C: CustomMessage>(
     stream_fn: StreamFn,
 ) -> Result<AgentEventStream<C>, AgentLoopError> {
     check_continue(&context)?;
-    let (tx, rx) = mpsc::unbounded_channel();
-    let task = tokio::spawn(async move {
-        let sink = ChannelSink(tx);
+    Ok(AgentEventStream::spawn(&cancel, move |sink, cancel| async move {
         run_agent_loop_continue(context, config, &sink, cancel, &stream_fn)
             .await
             .unwrap_or_default()
-    });
-    Ok(AgentEventStream { rx, task: Some(task) })
+    }))
 }
 
 async fn poll_source<C>(source: Option<&crate::hooks::MessageSource<C>>) -> Vec<AgentMessage<C>> {
@@ -916,4 +940,60 @@ async fn emit_tool_result_message<C: CustomMessage>(message: &ToolResultMessage,
         message: message.clone().into(),
     })
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tau_ai::AssistantMessageEventStream;
+    use tau_ai::events::MessageBuilder;
+
+    use crate::types::NoCustom;
+
+    #[tokio::test]
+    async fn dropping_the_event_stream_cancels_the_run() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let seen = cancelled.clone();
+        let stream_fn: StreamFn = Arc::new(move |model, _context, options| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                let (sender, stream) = AssistantMessageEventStream::channel();
+                let cancel = options.base.cancel.expect("loop sets the cancel token");
+                tokio::spawn(async move {
+                    let mut builder =
+                        MessageBuilder::new(sender, AssistantMessage::empty(&model.api, &model.provider, &model.id));
+                    builder.start();
+                    cancel.cancelled().await;
+                    seen.store(true, Ordering::SeqCst);
+                    builder.fail("Request aborted by user", true);
+                });
+                stream
+            })
+        });
+        let model = tau_ai::providers::faux::FauxProvider::new(tau_ai::providers::faux::FauxOptions::default()).model();
+        let caller_cancel = CancellationToken::new();
+        let mut events = agent_loop::<NoCustom>(
+            vec![tau_ai::UserMessage::new("hi").into()],
+            AgentContext::default(),
+            AgentLoopConfig::new(model),
+            caller_cancel.clone(),
+            stream_fn,
+        );
+        // Wait until the request is in flight, then drop the stream.
+        while let Some(event) = events.next().await {
+            if matches!(event, AgentEvent::MessageStart { ref message } if message.as_assistant().is_some()) {
+                break;
+            }
+        }
+        drop(events);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !cancelled.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("run cancelled");
+        assert!(!caller_cancel.is_cancelled());
+    }
 }
