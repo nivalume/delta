@@ -16,6 +16,7 @@ pub mod model;
 pub mod models;
 pub mod options;
 pub mod provider;
+pub mod providers;
 pub mod simple_options;
 pub mod transcript;
 pub mod transform;
