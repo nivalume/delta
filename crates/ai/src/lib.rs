@@ -21,6 +21,7 @@ pub mod simple_options;
 pub mod transcript;
 pub mod transform;
 pub mod types;
+pub mod validation;
 
 pub use auth::{
     ApiKeyAuth, ApiKeyCredential, AuthContext, AuthResult, AuthType, Credential, CredentialStore,
