@@ -4,7 +4,8 @@
 
 ## 客户端与请求头
 
-- `http::client(&options)`：`options.http_client` 或共享的默认客户端（rustls，连接超时 30 秒，User-Agent `tau/<版本> (<os>; <arch>)`）。代理遵循 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 和系统代理设置。
+- `http::client(&options)`：`options.http_client` 或当前 Tokio 运行时的默认客户端（rustls，连接超时 30 秒，User-Agent `tau/<版本> (<os>; <arch>)`）。代理遵循 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 和系统代理设置。
+  默认客户端按运行时缓存（只保留最近一个运行时的）：连接池里的连接属于打开它的运行时，运行时关闭后这些连接失效，跨运行时复用会让请求随机失败（例如每个 `#[tokio::test]` 各有一个运行时）。不在运行时里调用时每次新建。
 - `http::build_headers([..])`：按顺序合并多个来源，名字不区分大小写，后者覆盖前者，`None` 删除前面的同名头。API 实现的顺序：API 默认头 → `options.headers`。
 
 ## 重试（`send_with_retry`）

@@ -15,6 +15,17 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+use crate::model::ThinkingLevel;
+use crate::options::{GoogleThinking, ThinkingBudgets};
+
+fn simple_thinking(
+    model: &Model,
+    reasoning: Option<ThinkingLevel>,
+    budgets: Option<&ThinkingBudgets>,
+) -> Result<GoogleThinking> {
+    simple_thinking_with(model, reasoning, budgets, get_google_budget)
+}
+
 fn model(id: &str, base_url: &str) -> Model {
     serde_json::from_value(json!({
         "id": id, "name": id, "api": "google-vertex", "provider": "google-vertex",
@@ -689,4 +700,16 @@ fn sdk_errors_map_to_http_statuses() {
     assert!(matches!(vertex_error(&timeout), Error::Message(message) if message.contains("deadline")));
     let http_error = google_cloud_aiplatform_v1::Error::http(502, ::http::HeaderMap::new(), Bytes::from_static(b"bad"));
     assert!(matches!(vertex_error(&http_error), Error::Status { status: 502, .. }));
+}
+
+#[test]
+fn user_agent_defaults_to_tau_and_headers_override_it() {
+    assert_eq!(user_agent(&StreamOptions::default()), http::user_agent());
+    let mut headers = crate::types::ProviderHeaders::new();
+    headers.insert("User-Agent".into(), Some("my-app/1.0".into()));
+    let options = StreamOptions {
+        headers: Some(headers),
+        ..StreamOptions::default()
+    };
+    assert_eq!(user_agent(&options), "my-app/1.0");
 }

@@ -21,7 +21,7 @@ default = []
 # Amazon Bedrock (bedrock-converse-stream) through the official AWS SDK for Rust.
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 # Vertex AI (google-vertex) through the official Google Cloud client libraries for Rust.
-vertex = ["dep:google-cloud-aiplatform-v1", "dep:google-cloud-auth"]
+vertex = ["dep:google-cloud-aiplatform-v1", "dep:google-cloud-auth", "dep:google-cloud-gax"]
 full = ["bedrock", "vertex"]
 
 [dependencies]
@@ -47,6 +47,7 @@ aws-sdk-bedrockruntime = { workspace = true, optional = true }
 aws-smithy-types = { workspace = true, optional = true }
 google-cloud-aiplatform-v1 = { workspace = true, optional = true }
 google-cloud-auth = { workspace = true, optional = true }
+google-cloud-gax = { workspace = true, optional = true }
 
 [dev-dependencies]
 aws-smithy-eventstream.workspace = true

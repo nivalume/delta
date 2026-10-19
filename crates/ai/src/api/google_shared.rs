@@ -237,6 +237,20 @@ pub fn simple_thinking(
     reasoning: Option<ThinkingLevel>,
     budgets: Option<&ThinkingBudgets>,
 ) -> Result<GoogleThinking> {
+    simple_thinking_with(model, reasoning, budgets, get_google_budget)
+}
+
+/// Token budget for a level, given custom budgets; `-1` is dynamic. The Gemini API and Vertex
+/// have different default tables.
+pub type GoogleBudgetFn = fn(&Model, ResolvedGoogleThinkingLevel, Option<&ThinkingBudgets>) -> i64;
+
+/// [`simple_thinking`] with the budget table of the API.
+pub fn simple_thinking_with(
+    model: &Model,
+    reasoning: Option<ThinkingLevel>,
+    budgets: Option<&ThinkingBudgets>,
+    budget: GoogleBudgetFn,
+) -> Result<GoogleThinking> {
     let disabled = GoogleThinking {
         enabled: false,
         ..GoogleThinking::default()
@@ -258,7 +272,7 @@ pub fn simple_thinking(
     }
     Ok(GoogleThinking {
         enabled: true,
-        budget_tokens: Some(get_google_budget(model, resolved, budgets)),
+        budget_tokens: Some(budget(model, resolved, budgets)),
         level: None,
     })
 }

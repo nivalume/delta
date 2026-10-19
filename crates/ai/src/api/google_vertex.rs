@@ -23,22 +23,21 @@ use google_cloud_auth::credentials::{
     self as gcp_credentials, Credentials, api_key_credentials, external_account, impersonated, service_account,
     user_account,
 };
+use google_cloud_gax::options::RequestOptionsBuilder as _;
 use serde_json::Value;
 
 use crate::api::common::{apply_on_payload, observe_provider_event, spawn_stream};
 use crate::api::google_generative_ai::request_body;
 use crate::api::google_shared::{
     Candidate, RequestSettings, ResolvedGoogleThinkingLevel, ResponseChunk, ResponseFunctionCall, ResponsePart,
-    StreamState, UsageMetadata, build_request, check_finished, resolve_google_thinking_level, retry_google_request,
-    simple_tool_choice, to_google_thinking_level, uses_google_thinking_level,
+    StreamState, UsageMetadata, build_request, check_finished, retry_google_request, simple_thinking_with,
+    simple_tool_choice,
 };
 use crate::error::{Error, Result};
 use crate::events::{AssistantMessageEventStream, MessageBuilder};
 use crate::http;
-use crate::model::{Model, ModelThinkingLevel, ThinkingLevel};
-use crate::options::{
-    ApiOptions, GoogleThinking, GoogleVertexOptions, SimpleStreamOptions, StreamOptions, ThinkingBudgets,
-};
+use crate::model::Model;
+use crate::options::{ApiOptions, GoogleVertexOptions, SimpleStreamOptions, StreamOptions, ThinkingBudgets};
 use crate::provider::ProviderStreams;
 use crate::simple_options::build_base_options;
 use crate::types::{ProviderHeaders, TranscriptContext};
@@ -121,7 +120,12 @@ pub fn stream_simple(
     options: SimpleStreamOptions,
 ) -> AssistantMessageEventStream {
     let mut base = build_base_options(model, context, &options);
-    let thinking = match simple_thinking(model, options.reasoning, options.thinking_budgets.as_ref()) {
+    let thinking = match simple_thinking_with(
+        model,
+        options.reasoning,
+        options.thinking_budgets.as_ref(),
+        get_google_budget,
+    ) {
         Ok(thinking) => thinking,
         Err(error) => {
             return spawn_stream(model, base.cancel.clone(), move |builder| async move {
@@ -135,40 +139,6 @@ pub fn stream_simple(
         ..GoogleVertexOptions::default()
     }));
     stream(model, context, base)
-}
-
-/// The `thinking` option of a simple request (upstream `streamSimple`): disabled without a
-/// reasoning level or when the model clamps it to `off`; otherwise a level for models with
-/// discrete levels and a token budget ([`get_google_budget`]) for the rest.
-fn simple_thinking(
-    model: &Model,
-    reasoning: Option<ThinkingLevel>,
-    budgets: Option<&ThinkingBudgets>,
-) -> Result<GoogleThinking> {
-    let disabled = GoogleThinking {
-        enabled: false,
-        ..GoogleThinking::default()
-    };
-    let Some(reasoning) = reasoning else {
-        return Ok(disabled);
-    };
-    let clamped = model.clamp_thinking_level(reasoning.into());
-    if clamped == ModelThinkingLevel::Off {
-        return Ok(disabled);
-    }
-    let resolved = resolve_google_thinking_level(model, clamped)?;
-    if uses_google_thinking_level(model) {
-        return Ok(GoogleThinking {
-            enabled: true,
-            budget_tokens: None,
-            level: Some(to_google_thinking_level(resolved)),
-        });
-    }
-    Ok(GoogleThinking {
-        enabled: true,
-        budget_tokens: Some(get_google_budget(model, resolved, budgets)),
-        level: None,
-    })
 }
 
 /// Default token budget for a level on budget-based Gemini models on Vertex; `-1` is dynamic.
@@ -236,14 +206,17 @@ async fn run(
     let body = apply_on_payload(options, model, request_body(&request)).await?;
     let request = proto_request(body, &target.model)?;
 
+    let user_agent = user_agent(options);
     let mut responses = retry_google_request(options, || {
         let client = client.clone();
         let request = request.clone();
+        let user_agent = user_agent.clone();
         // The SDK's request future is large; keep it off the stream task's stack.
         Box::pin(async move {
             client
                 .stream_generate_content()
                 .with_request(request)
+                .with_user_agent(user_agent)
                 .send()
                 .await
                 .map_err(|error| vertex_error(&error))
@@ -454,6 +427,20 @@ fn credentials(auth: &VertexAuth) -> Result<Credentials> {
             ))
         }),
     }
+}
+
+/// tau's User-Agent unless `options.headers` sets one, as upstream (`{User-Agent, ...headers}`).
+fn user_agent(options: &StreamOptions) -> String {
+    options
+        .headers
+        .as_ref()
+        .and_then(|headers| {
+            headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+                .and_then(|(_, value)| value.clone())
+        })
+        .unwrap_or_else(http::user_agent)
 }
 
 /// `options.headers` as client-wide request metadata. The SDK sets `user-agent`,

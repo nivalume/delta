@@ -5,7 +5,7 @@ use bytes::{Buf, BytesMut};
 use futures::{Stream, StreamExt};
 use indexmap::IndexMap;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use std::sync::LazyLock;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -22,13 +22,18 @@ pub const DEFAULT_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 /// Longest error body kept in error messages.
 pub const MAX_PROVIDER_ERROR_BODY_CHARS: usize = 4000;
 
-static DEFAULT_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+/// The default client of the runtime that last asked for one. Pooled connections belong to
+/// the runtime that opened them and fail once it shuts down, so a client is never shared
+/// across runtimes (separate `#[tokio::test]` runtimes, or an app running several).
+static DEFAULT_CLIENT: Mutex<Option<(tokio::runtime::Id, reqwest::Client)>> = Mutex::new(None);
+
+fn new_default_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(user_agent())
         .connect_timeout(Duration::from_secs(30))
         .build()
         .unwrap_or_default()
-});
+}
 
 /// `tau (<os>; <arch>)`.
 pub fn user_agent() -> String {
@@ -40,9 +45,26 @@ pub fn user_agent() -> String {
     )
 }
 
-/// The client of a request: `options.http_client` or the shared default.
+/// The client of a request: `options.http_client` or the default client of the current
+/// Tokio runtime.
 pub fn client(options: &StreamOptions) -> reqwest::Client {
-    options.http_client.clone().unwrap_or_else(|| DEFAULT_CLIENT.clone())
+    options.http_client.clone().unwrap_or_else(default_client)
+}
+
+fn default_client() -> reqwest::Client {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return new_default_client();
+    };
+    let id = runtime.id();
+    let mut slot = DEFAULT_CLIENT.lock().unwrap_or_else(PoisonError::into_inner);
+    match &*slot {
+        Some((cached, client)) if *cached == id => client.clone(),
+        _ => {
+            let client = new_default_client();
+            *slot = Some((id, client.clone()));
+            client
+        }
+    }
 }
 
 /// Merge header sources in order; later sources win, names compare case-insensitively and

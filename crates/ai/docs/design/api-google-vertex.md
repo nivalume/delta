@@ -106,7 +106,7 @@ gRPC 的路径是固定的（`/google.cloud.aiplatform.v1.PredictionService/Stre
 
 ### 请求头
 
-上游把 `{User-Agent: pi UA, ...model.headers, ...options.headers}` 设为 SDK 的 `httpOptions.headers`。这里 `options.headers`（`Models` 已合并模型的 headers；值为 `None` 的项删除）作为客户端级的请求元数据（`ClientBuilder::with_extension(HeaderMap)`）。SDK 会丢弃 `user-agent`、`authorization`、`x-goog-api-key`、`x-goog-api-client`、`x-goog-user-project`、`x-goog-request-params` 的自定义值，由它自己设置。tau 的 User-Agent 目前发不出去，见“需要的核心改动”。
+上游把 `{User-Agent: pi UA, ...model.headers, ...options.headers}` 设为 SDK 的 `httpOptions.headers`。这里 `options.headers`（`Models` 已合并模型的 headers；值为 `None` 的项删除）作为客户端级的请求元数据（`ClientBuilder::with_extension(HeaderMap)`）。SDK 会丢弃 `user-agent`、`authorization`、`x-goog-api-key`、`x-goog-api-client`、`x-goog-user-project`、`x-goog-request-params` 的自定义值，由它自己设置。User-Agent 通过 `RequestOptionsBuilder::with_user_agent` 按请求设置：默认 tau 的 User-Agent，`options.headers` 里有 `user-agent` 时用它的值，与上游一致。
 
 ### 请求体
 
@@ -167,7 +167,7 @@ gRPC 的路径是固定的（`/google.cloud.aiplatform.v1.PredictionService/Stre
 - 错误消息用 `"<status> <message>"`，上游是 SDK 拼出的 JSON 正文。
 - 重试次数默认 2（上游 Google 适配器默认 0），与 Gemini 模块相同。
 - 上游没有给 Vertex SDK 设超时；这里应用 `options.timeout`（核心的统一语义）。
-- tau 的 User-Agent 没有发出（SDK 不允许自定义 `user-agent` 元数据，需要 `google-cloud-gax` 依赖才能用 `with_user_agent`）；SDK 自己发 `x-goog-api-client`。
+- SDK 另外发送自己的 `x-goog-api-client`。
 - `options.http_client` 不使用（上游对自定义 `fetch` 报错，这里没有这个检查）。
 - 凭证文件按 `type` 分派，支持的类型同 `google-cloud-auth` 的 ADC（不含 `gdch_service_account`）；上游 `google-auth-library` 的 `keyFilename` 另外支持 `.p12`/`.pem` 等旧格式。
 - 预先取消时消息是 `Request was aborted`（上游 `buildParams` 里是 `Request aborted`）。
@@ -194,10 +194,10 @@ gRPC 的路径是固定的（`/google.cloud.aiplatform.v1.PredictionService/Stre
 - `parametersJsonSchema`：是；`$defs`/`definitions` 内联未实现（与 Gemini 模块相同，见其文档）。
 - 重试：408/409/429/5xx 重试，连接错误不重试（与上游 `retryGoogleRequest` 一致）。
 
-## 需要的核心改动（未做，留给维护者）
+## 核心改动
 
-- `crates/ai/Cargo.toml`：在 `vertex` feature 里加入可选依赖 `google-cloud-gax`（1.15，`default-features = false`），以便调用 `RequestOptionsBuilder::with_user_agent(http::user_agent())` 和按请求的 `with_custom_header`，恢复上游“默认 User-Agent，可被 `options.headers` 覆盖”的行为。目前它只是 dev-dependency（测试桩需要 `ResponseStream`、`RequestOptions`、`rpc::Status`）。
-- `google_shared::simple_thinking` 增加预算函数参数（或接受预算表），Vertex 就不必复制它和 `get_google_budget`。目前本模块私有复制了这两段逻辑。
+- `vertex` feature 引入可选依赖 `google-cloud-gax`（官方 crate，`aiplatform` 已间接依赖它），用于 `with_user_agent`。
+- `google_shared::simple_thinking_with` 接受预算函数；Vertex 传入自己的 `get_google_budget`（没有 2.5-flash-lite 行，与上游一致）。
 
 ## 待确认的改进
 
