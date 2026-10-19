@@ -80,11 +80,11 @@ pub type AgentListener<C> =
 | `continue_run()` | `continue()` | 末尾不是 assistant 时重试；是 assistant 时依次尝试一批 steering 消息、一批 follow-up 消息，都没有则 `AssistantTail` |
 | `abort()` | `abort()` | 取消当前运行 |
 | `wait_for_idle()` | `waitForIdle()` | 当前运行和它的监听器都结束后返回 |
-| `reset()` | `reset()` | 清空对话和队列，保留重放得到的 system 消息（prompt 和工具基线）。运行中调用返回 `AlreadyRunning` |
+| `reset()` | `reset()` | 清空对话和队列，保留重放得到的 system 消息（prompt 和工具基线）。运行中调用返回 `ResetWhileRunning` |
 
 `continue` 是 Rust 关键字，所以叫 `continue_run`。
 
-已有运行时 `prompt`/`continue_run` 返回 `AgentError::AlreadyRunning`，错误文本与上游相同。
+已有运行时 `prompt` 返回 `AgentError::AlreadyRunning`，`continue_run` 返回 `ContinueWhileRunning`，错误文本与上游相同。
 
 运行开始时设置 `is_streaming = true`、清空 `streaming_message` 和 `error_message`，创建本次运行的 `CancellationToken`。运行结束时由一个 drop guard 清理（`is_streaming = false`、清空 `pending_tool_calls`、通知空闲）。`prompt` 返回的 future 在运行结束前被 drop 时，guard 同样清理状态，并取消运行令牌，让仍持有令牌的工具停止；这种情况下不会发出 `AgentEnd`。
 

@@ -651,7 +651,7 @@ async fn rejects_reset_while_processing_without_corrupting_the_transcript() {
 
     assert!(agent.is_streaming());
     assert_eq!(roles(&agent.messages()), ["user"]);
-    assert_eq!(agent.reset(), Err(AgentError::AlreadyRunning));
+    assert_eq!(agent.reset(), Err(AgentError::ResetWhileRunning));
     assert!(agent.is_streaming());
     assert_eq!(roles(&agent.messages()), ["user"]);
 
@@ -685,7 +685,7 @@ async fn rejects_continue_while_streaming() {
     tick().await;
     assert!(agent.is_streaming());
 
-    assert_eq!(agent.continue_run().await, Err(AgentError::AlreadyRunning));
+    assert_eq!(agent.continue_run().await, Err(AgentError::ContinueWhileRunning));
 
     agent.abort();
     first.await.unwrap().unwrap();

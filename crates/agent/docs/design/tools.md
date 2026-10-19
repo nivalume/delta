@@ -103,7 +103,7 @@ let tool = typed_tool("get_time", "Get the current time", |args: GetTime, _ctx| 
 
 ### `run_tool_call`
 
-调用其他工具的工具（例如上游 `examples/mcp-codemode`）用 `run_tool_call` 执行嵌套调用。它走同样的第 1–6 步，所以钩子对嵌套调用同样生效，但不发事件、不产生消息，失败以 `is_error` 的结果返回。
+调用其他工具的工具（例如上游 `examples/mcp-codemode`）用 `run_tool_call` 执行嵌套调用。它走同样的第 1–6 步，所以钩子对嵌套调用同样生效，但不发事件、不产生消息，失败以 `is_error` 的结果返回。工具的中间结果交给 `RunToolCallOptions::on_update`（上游 `onUpdate`）。
 
 ## 与上游的差异
 

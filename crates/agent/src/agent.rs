@@ -28,6 +28,10 @@ pub enum AgentError {
         "Agent is already processing a prompt. Use steer() or follow_up() to queue messages, or wait for completion."
     )]
     AlreadyRunning,
+    #[error("Agent is already processing. Wait for completion before resetting.")]
+    ResetWhileRunning,
+    #[error("Agent is already processing. Wait for completion before continuing.")]
+    ContinueWhileRunning,
     #[error("No messages to continue from")]
     NoMessages,
     #[error("Cannot continue from message role: assistant")]
@@ -543,7 +547,7 @@ impl<C: CustomMessage> Agent<C> {
     /// Clear the conversation and queues, keeping the replayed prompt and tool baseline.
     pub fn reset(&self) -> Result<(), AgentError> {
         if lock(&self.inner.active).is_some() {
-            return Err(AgentError::AlreadyRunning);
+            return Err(AgentError::ResetWhileRunning);
         }
         {
             let mut state = lock(&self.inner.state);
@@ -577,7 +581,7 @@ impl<C: CustomMessage> Agent<C> {
     /// tail falls back to one queued steering batch, then one follow-up batch.
     pub async fn continue_run(&self) -> Result<(), AgentError> {
         if lock(&self.inner.active).is_some() {
-            return Err(AgentError::AlreadyRunning);
+            return Err(AgentError::ContinueWhileRunning);
         }
         let (last_role, all_system) = self.with_state(|state| {
             (

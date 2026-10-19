@@ -69,7 +69,7 @@ crates/agent/
 - 没有全局默认 `StreamFn`（上游的 `setDefaultStreamFn`）。`AgentOptions::new(stream_fn)` 和 `run_agent_loop` 都要求显式传入；`models_stream_fn(models)` 把 `Models` 适配成 `StreamFn`。
 - 循环把最终的助手消息（`Done`/`Error` 事件里的消息）写入上下文。上游写入的是流式过程中原地修改的 partial 对象，两者内容相同。
 - 钩子不返回 `Result`，没有“钩子抛异常”这条路径。上游 `Agent` 捕获循环抛出的异常并合成一条失败的助手消息；Rust 里流的失败已经编码在流里，钩子和监听器的 panic 照常传播。
-- `Agent` 的 `prompt`/`continue_run` 在已有运行时返回 `AgentError::AlreadyRunning`，不是抛异常。`prompt` 接收 `Vec<AgentMessage<C>>`，文本加图片用 `prompt_text`（上游 `prompt` 重载了字符串、单条消息、消息数组）。
+- `Agent` 的 `prompt`/`continue_run`/`reset` 在已有运行时返回 `AgentError`（`AlreadyRunning`、`ContinueWhileRunning`、`ResetWhileRunning`，文本与上游三条错误相同），不是抛异常。`prompt` 接收 `Vec<AgentMessage<C>>`，文本加图片用 `prompt_text`（上游 `prompt` 重载了字符串、单条消息、消息数组）。
 - 状态读写用 `with_state` / `with_state_mut` 闭包，避免把锁守卫交给调用方；常用字段另有 getter/setter。
 
 ## 待确认
