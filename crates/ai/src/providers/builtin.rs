@@ -27,7 +27,7 @@ use crate::api::typesafe_system_one::{self, TypeSafeSystemOneApi};
 use crate::auth::{Credential, OAuthAuth, ProviderAuth, env_api_key_auth};
 use crate::error::{ModelsError, ModelsErrorCode};
 use crate::events::AssistantMessageEventStream;
-use crate::model::Model;
+use crate::model::{AnyModel, Model, ModelType};
 use crate::models::{CreateModelsOptions, Models};
 use crate::oauth::{
     AnthropicOAuth, KimiCodingOAuth, MetaOAuth, OpenAIChatGPTOAuth, OpenAICodexOAuth, OpenRouterOAuth, XaiOAuth,
