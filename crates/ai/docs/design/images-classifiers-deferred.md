@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The framework for the operations besides chat streaming: image generation (`Models::generate_images`), structured classification (`Models::classify`) and deferred chat responses (`SimpleStreamOptions::deferred`, `Models::stream_deferred` / `fetch_deferred` / `cancel_deferred`). This layer holds the request and result types, the contracts that API implementations fulfil, provider dispatch by API id, auth resolution and the error results. The concrete image and classifier APIs (`openrouter-images`, `typesafe-system-one`, `cloudflare-workers-ai-system-one`, `openai-decisions`, `llama-cpp-classify`) are separate API modules built on these interfaces.
+The framework for the operations besides chat streaming: image generation (`Models::generate_images`), structured classification (`Models::classify`) and deferred chat responses (`SimpleStreamOptions::deferred`, `Models::stream_deferred` / `fetch_deferred` / `cancel_deferred`). This layer holds the request and result types, the contracts that API implementations fulfil, provider dispatch by API id, auth resolution and the error results. The concrete image and classifier APIs are separate API modules built on these interfaces: `openrouter-images` ([api-openrouter-images.md](api-openrouter-images.md)), `typesafe-system-one` and `cloudflare-workers-ai-system-one` ([api-system-one.md](api-system-one.md)), `openai-decisions` ([api-openai-decisions.md](api-openai-decisions.md)) and `llama-cpp-classify` ([api-llama-cpp-classify.md](api-llama-cpp-classify.md)).
 
 ## Upstream source files
 
@@ -111,7 +111,7 @@ Order of checks, as upstream:
 
 Auth goes through the same code as `stream` (`Models::resolve_request`): an explicit `api_key` wins, headers merge in the order provider auth → `model.headers` → `options.headers` → `transform_headers`, resolved `env` is overlaid by the request's `env`, and a resolved base URL replaces `model.base_url`. Auth resolution races the cancellation token (upstream passes the abort signal to `getAuth`), so a cancelled request never reaches the provider; this also applies to `stream` and `stream_simple`.
 
-Credential-specific availability needs no new code in this layer: `get_all_available` / `get_available_of_type` apply `Provider::filter_all_models`. Upstream's only rule of this kind (the `openai` provider hides its `openai-decisions` classifier models while it uses ChatGPT OAuth) lives in the provider factory and goes with the `openai-decisions` port.
+Credential-specific availability needs no new code in this layer: `get_all_available` / `get_available_of_type` apply `Provider::filter_all_models`. Upstream's only rule of this kind (the `openai` provider hides its `openai-decisions` classifier models while it uses ChatGPT OAuth) lives in the provider factory, `providers::builtin` (see [api-openai-decisions.md](api-openai-decisions.md#availability-with-chatgpt-oauth)).
 
 ## Faux provider
 
@@ -122,6 +122,18 @@ As upstream, the faux provider supports deferred responses but not images or cla
 - `fetch_deferred` counts `FauxState::deferred_fetch_count`. It answers the handle again while `pending_fetches` remain, then the stored reply (resolved once, with the usage estimate and prompt cache of the submission). Unknown handles fail with `Unknown faux deferred response: <id>`, cancelled ones with `Faux deferred response was cancelled: <id>`.
 - `cancel_deferred` records the handle in `FauxState::cancelled_deferred` and marks it cancelled.
 - `on_response` is called with status 200 for submissions, fetches and cancellations, as upstream.
+
+## Built-in implementations
+
+| Provider | Images | Classifiers |
+| --- | --- | --- |
+| `openrouter` | `openrouter-images` | `typesafe-system-one` |
+| `typesafe` | | `typesafe-system-one` |
+| `opencode`, `vercel-ai-gateway` | | `typesafe-system-one` |
+| `cloudflare-workers-ai` | | `cloudflare-workers-ai-system-one` |
+| `openai` | | `openai-decisions` (hidden for OAuth credentials) |
+
+`llama-cpp-classify` has no built-in provider; applications register it on their own (upstream registers it in the coding agent's llama extension).
 
 ## Rust-specific differences
 
@@ -137,7 +149,7 @@ As upstream, the faux provider supports deferred responses but not images or cla
 
 - `ProviderImagesOptions` (`ImagesOptions & Record<string, unknown>`): no API-specific image options exist upstream yet. If an image API needs them, `ImagesOptions` can get an `api: Option<JsonObject>` field like `StreamOptions::api`.
 - Telemetry spans for deferred polls (`pi.ai.poll`), with the rest of telemetry.
-- Tests that call a concrete API (`test/images.test.ts` is an end-to-end OpenRouter test; the TypeSafe, OpenAI Decisions and OpenAI OAuth cases of `test/classifier-models.test.ts`) go with those API ports. `test/image-model-data.test.ts` tests upstream's catalog build script, which delta does not port (see [catalog-and-faux.md](catalog-and-faux.md)).
+- `test/image-model-data.test.ts` tests upstream's catalog build script, which delta does not port (see [catalog-and-faux.md](catalog-and-faux.md)). The cases of `test/images.test.ts`, `test/images-models.test.ts` and `test/classifier-models.test.ts` that call a concrete API are ported with those APIs (`tests/openrouter_images.rs`, `tests/images_models.rs`, `tests/classifier_models.rs`).
 
 ## Improvements pending confirmation
 

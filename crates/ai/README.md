@@ -4,7 +4,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 
 `delta-ai` (imported as `delta_ai`) is the Rust port of [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai). It is part of [delta](https://github.com/nivalume/pi-rs). Serialized types (messages, models, credentials) keep upstream's JSON shape, so contexts and `auth.json` files move between pi, pi-py and delta.
 
-**Note**: The chat catalog only includes models that support tool calling. The catalog also lists image and classifier models from upstream. `Models` runs them through providers that register image or classifier implementations; the built-in image and classifier APIs are still being ported (see [Image Generation](#image-generation) and [Classification](#classification)).
+**Note**: The chat catalog only includes models that support tool calling. The catalog also lists image and classifier models from upstream; they run through [Image Generation](#image-generation) and [Classification](#classification).
 
 **Status**: in development. Nothing is published to crates.io yet. The design notes, including every difference from upstream, are in [docs/design/README.md](docs/design/README.md).
 
@@ -69,12 +69,13 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 
 | Provider | Id | API | Cargo feature |
 | --- | --- | --- | --- |
-| OpenAI | `openai` | `openai-responses` | |
+| OpenAI | `openai` | `openai-responses`; classifiers: `openai-decisions` | |
 | Ant Ling | `ant-ling` | `openai-completions` | |
 | Azure OpenAI | `azure` | `azure-openai-responses`, `openai-completions` | |
 | Radius (API key or OAuth, with a dynamically refreshed gateway catalog) | `radius` | `pi-messages` | |
 | DeepSeek | `deepseek` | `openai-completions` | |
 | NVIDIA NIM | `nvidia` | `openai-completions` | |
+| TypeSafe | `typesafe` | classifiers only: `typesafe-system-one` | |
 | Anthropic | `anthropic` | `anthropic-messages` | |
 | Google | `google` | `google-generative-ai` | |
 | Vertex AI | `google-vertex` | `google-vertex` | `vertex` |
@@ -82,10 +83,10 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 | Groq | `groq` | `openai-completions` | |
 | Cerebras | `cerebras` | `openai-completions` | |
 | Cloudflare AI Gateway | `cloudflare-ai-gateway` | `anthropic-messages`, `openai-completions`, `openai-responses` | |
-| Cloudflare Workers AI | `cloudflare-workers-ai` | `openai-completions` | |
+| Cloudflare Workers AI | `cloudflare-workers-ai` | `openai-completions`; classifiers: `cloudflare-workers-ai-system-one` | |
 | xAI | `xai` | `openai-responses` | |
-| OpenRouter | `openrouter` | `openai-completions`, `anthropic-messages` | |
-| Vercel AI Gateway | `vercel-ai-gateway` | `anthropic-messages` | |
+| OpenRouter | `openrouter` | `openai-completions`, `anthropic-messages`; images: `openrouter-images`; classifiers: `typesafe-system-one` | |
+| Vercel AI Gateway | `vercel-ai-gateway` | `anthropic-messages`; classifiers: `typesafe-system-one` | |
 | ZAI Coding Plan (Global, China) | `zai`, `zai-coding-cn` | `openai-completions` | |
 | MiniMax (Global, China) | `minimax`, `minimax-cn` | `anthropic-messages` | |
 | Together AI | `together` | `openai-completions` | |
@@ -94,8 +95,8 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 | Moonshot AI (Global, China) | `moonshotai`, `moonshotai-cn` | `openai-completions` | |
 | Amazon Bedrock | `amazon-bedrock` | `bedrock-converse-stream` | `bedrock` |
 | GitHub Copilot (OAuth, see [OAuth Providers](#oauth-providers)) | `github-copilot` | `anthropic-messages`, `openai-completions`, `openai-responses` | |
-| OpenCode Zen | `opencode` | `anthropic-messages`, `openai-completions`, `openai-responses`, `google-generative-ai` | |
-| OpenCode Go | `opencode-go` | same as OpenCode Zen | |
+| OpenCode Zen | `opencode` | `anthropic-messages`, `openai-completions`, `openai-responses`, `google-generative-ai`; classifiers: `typesafe-system-one` | |
+| OpenCode Go | `opencode-go` | the chat APIs of OpenCode Zen | |
 | Fireworks | `fireworks` | `openai-completions`, `anthropic-messages` | |
 | Kimi For Coding | `kimi-coding` | `openai-completions` | |
 | Meta | `meta` | `openai-responses` | |
@@ -104,7 +105,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 
 Any OpenAI-compatible API (Ollama, vLLM, LM Studio, and so on) works through [`create_provider()`](#create_provider).
 
-Not built in yet: OpenAI Codex and TypeSafe. Their catalogs ship with the crate, but their APIs or auth flows are not ported.
+Not built in yet: OpenAI Codex. Its catalog ships with the crate, but its API and auth flow are not ported.
 
 ## Installation
 
@@ -537,6 +538,7 @@ Built-in providers resolve these environment variables:
 | Ant Ling | `ANT_LING_API_KEY` |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_BASE_URL` (e.g. `https://{resource}.openai.azure.com`) or `AZURE_OPENAI_RESOURCE_NAME`. Root endpoints are normalized to `/openai/v1`. Optional: `AZURE_OPENAI_API_VERSION` (default `v1`), `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`. |
 | Anthropic | `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, or `ANTHROPIC_AUTH_TOKEN` (sent as a bearer token) |
+| TypeSafe | `TYPESAFE_API_KEY` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 | NVIDIA NIM | `NVIDIA_API_KEY` |
 | Google | `GEMINI_API_KEY` |
@@ -1014,10 +1016,11 @@ Check capabilities on the model metadata: `model.input` (`[Text]` or `[Text, Ima
 - Some models accept image input, others are text-to-image only. Check `model.input`.
 - Like the streaming methods, image generation supports `api_key`, `cancel`, `headers`, `on_payload` and `on_response`, and results may include `stop_reason`, `response_id` and `usage`.
 - To have a model analyze images in a conversation or call tools, use the chat methods with a model that supports image input.
+- At the moment, image generation is available through only one provider, OpenRouter.
 
 ### Image Providers
 
-Upstream generates images through one provider, OpenRouter (`openrouter-images` API). The built-in API implementation is being ported; until then the built-in `openrouter` provider lists its image models but `generate_images()` returns an error result (`Provider openrouter does not support image generation`).
+The built-in `openrouter` provider generates images with the `openrouter-images` API (`delta_ai::api::openrouter_images`, struct `OpenRouterImagesApi`). It sends one non-streaming request to OpenRouter's `/chat/completions` endpoint with `modalities` set to `["image"]`, or `["image", "text"]` when `model.output` includes text, and returns the reply's text and its data-URL images as output blocks. `usage` is priced at the model's catalog rates. As upstream, the request is retried only when `max_retries` is set.
 
 ## Classification
 
@@ -1064,9 +1067,11 @@ In Rust, `ClassifierQuestion` is an enum with `Choice`, `Score` and `Bool` varia
 
 `ClassifierResult` holds `api`, `provider`, `model`, `answers`, optional `usage`, `stop_reason` (`Stop`, `Error`, `Aborted`), `error_message` and `timestamp`. Like image generation, `classify()` returns a result with stop reason `Error` instead of failing for provider, authentication or response errors.
 
-When the service reports token counts, `result.usage` carries them with their cost at the model's catalog price, the same `Usage` shape as chat messages.
+The public contract uses `bool` questions and `Bool { probability }` answers. The TypeSafe adapter translates those to and from its `noul` wire representation.
 
-`ClassifierOptions::temperature` divides the answer logits by the given value before they are normalized; values above 1 soften the distribution. APIs that cannot apply it ignore it.
+When the service reports token counts, `result.usage` carries them with their cost at the model's catalog price, the same `Usage` shape as chat messages. All System One services report token counts; a request that was answered with malformed answers keeps its usage. Local classifiers such as `llama-cpp-classify` report no usage.
+
+`ClassifierOptions::temperature` divides the answer logits by the given value before they are normalized; values above 1 soften the distribution. APIs that cannot apply it, such as System One and OpenAI Decisions, ignore it.
 
 `ClassifierContext::images` holds image blocks judged together with the state. Only models whose `input` includes `Image` accept them; `classify()` returns an error result (`Model <provider>/<id> does not accept image input`) for other models without calling the provider.
 
@@ -1109,15 +1114,61 @@ let provider = create_provider(
 
 ### Built-in Classifier Providers
 
-Upstream serves TypeSafe's Jev, Cloudflare's Clef and OpenAI's GPT-6 Luna through the `typesafe`, `openrouter`, `cloudflare-workers-ai`, `vercel-ai-gateway`, `opencode` and `openai` providers, with the `typesafe-system-one`, `cloudflare-workers-ai-system-one` and `openai-decisions` APIs. The catalog lists these models; the built-in API implementations are being ported, and until then `classify()` returns an error result for them.
+TypeSafe's Jev model, Cloudflare's Clef models and OpenAI's GPT-6 Luna are available from these built-in providers:
+
+| Provider | Model ids | Auth |
+| --- | --- | --- |
+| `typesafe` | `jev-latest` | `TYPESAFE_API_KEY` |
+| `openrouter` | `typesafe/jev-1.13`, `~typesafe/jev-latest` and other System One models | `OPENROUTER_API_KEY` or OpenRouter OAuth |
+| `cloudflare-workers-ai` | `typesafe/jev`, `@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash` | `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID` |
+| `vercel-ai-gateway` | `typesafe-ai/jev` and other System One models | `AI_GATEWAY_API_KEY` |
+| `opencode` | `jev-1.13`, `jev-1.13-free` | `OPENCODE_API_KEY` |
+| `openai` | `gpt-6-luna` | `OPENAI_API_KEY` |
+
+The `typesafe`, `openrouter`, `vercel-ai-gateway` and `opencode` providers use the `typesafe-system-one` API (`POST <baseUrl>/systemone`, module `delta_ai::api::typesafe_system_one`). `cloudflare-workers-ai` uses `cloudflare-workers-ai-system-one`, which posts to the account's Workers AI `/ai/run` endpoint and unwraps Cloudflare's response envelope. System One APIs do not accept images.
 
 ### OpenAI Decisions
 
-The built-in API implementation is being ported.
+The `openai-decisions` API (`delta_ai::api::openai_decisions`) calls OpenAI's [Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`POST /v1/decisions`). GPT-6 Luna is its only model. The state is sent as JSON text; with images, the input is one user message with the state followed by the images as data URLs (at most 128). `choice` and `score` questions map to the Decisions types of the same name. `bool` questions become `predicate` questions; predicates have no criteria field, so the meanings of true and false are appended to the instructions. If OpenAI refuses to answer a question, the whole result is an error. Usage reports input tokens only, priced at the catalog input rate with OpenAI's long-context rate above 272K input tokens.
+
+The endpoint needs an OpenAI API key; Sign in with ChatGPT credentials are rejected, so the `openai` provider hides `gpt-6-luna` from `get_available_of_type(ModelType::Classifier, ..)` while its stored credential is an OAuth credential. The API rejects inputs above 922K tokens, but requests that run longer than about five seconds, currently above roughly 600K input tokens, fail with a gateway timeout (504). That status is not retried.
 
 ### Chat models on llama.cpp
 
-The built-in API implementation (`llama-cpp-classify`) is being ported.
+llama.cpp also serves decision models such as Julia-1 or Kev natively through `/v1/systemone`. Since llama.cpp 0.6.0, `GET /models` lists `decisions` in a model's `architecture.output_modalities` for these models. They use the `typesafe-system-one` API with the server's `/v1` URL as `base_url` (for example `http://127.0.0.1:8080/v1`); it needs an `api_key`, which llama.cpp ignores unless it was started with `--api-key`. The `llama-cpp-classify` API is the fallback for chat models.
+
+The `llama-cpp-classify` API (`delta_ai::api::llama_cpp_classify`) turns a chat model served by llama.cpp's `llama-server` into a classifier. Each question becomes one chat prompt: the state, every question of the request, the state again, and the question with its answers under single-token labels (letters for a choice, `Yes`/`No` for a bool, digits for a score). The prompt up to the final question is shared by all questions of a request, so the server's prompt cache evaluates the state once per request. The server returns the log-probabilities of the next token, and the answer is the softmax over the label tokens. Choices support up to 62 options and scores up to 10 levels. The model's `base_url` is the server URL; a trailing `/v1` is ignored. In router mode, the model id selects the model.
+
+```rust
+use delta_ai::api::llama_cpp_classify::LlamaCppClassifyApi;
+use delta_ai::{ClassifierModel, CreateProviderOptions, InputModality, ModelCost, ProviderApi, ProviderAuth, create_provider};
+
+let provider = create_provider(
+    CreateProviderOptions::new(
+        "local-llama",
+        ProviderAuth::keyless("llama.cpp"),
+        vec![
+            ClassifierModel {
+                id: "qwen3-4b".into(),
+                name: "Qwen3 4B".into(),
+                api: "llama-cpp-classify".into(),
+                provider: "local-llama".into(),
+                base_url: "http://127.0.0.1:8080".into(),
+                input: vec![InputModality::Text],
+                input_limits: None,
+                cost: ModelCost::default(),
+                headers: None,
+                context_window: 32768,
+            }
+            .into(),
+        ],
+        ProviderApi::none(),
+    )
+    .classifier("llama-cpp-classify", LlamaCppClassifyApi),
+);
+```
+
+Raw label probabilities are usually overconfident; pass `temperature` above 1 to soften them.
 
 ## Thinking/Reasoning
 
@@ -1803,6 +1854,8 @@ Built-in API implementations:
 | `mistral-conversations` | `api::mistral_conversations` | `MistralConversationsApi` | `MistralConversations(MistralOptions)` |
 | `bedrock-converse-stream` (feature `bedrock`) | `api::bedrock_converse_stream` | `BedrockConverseStreamApi` | `BedrockConverseStream(BedrockOptions)` |
 | `pi-messages` | `api::pi_messages` | `PiMessagesApi` | `PiMessages(PiMessagesOptions)` |
+
+Image and classifier APIs follow the same pattern with a `generate_images` or `classify` function and a struct that implements `ProviderImages` or `ProviderClassifier`: `api::openrouter_images` (`OpenRouterImagesApi`), `api::typesafe_system_one` (`TypeSafeSystemOneApi`), `api::cloudflare_workers_ai_system_one` (`CloudflareWorkersAiSystemOneApi`, with a resolved base URL), `api::openai_decisions` (`OpenAIDecisionsApi`) and `api::llama_cpp_classify` (`LlamaCppClassifyApi`).
 
 `openai-codex-responses` is not ported. The hand-written APIs (Anthropic, OpenAI, Google Generative AI, Mistral, pi-messages) are always compiled; they use `reqwest` and the helpers in `delta_ai::http`. Bedrock and Vertex use the vendors' official Rust SDKs. Upstream's custom `fetch` and injected SDK `client` options map to `StreamOptions::http_client` (a `reqwest::Client`).
 

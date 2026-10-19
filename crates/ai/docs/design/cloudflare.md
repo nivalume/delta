@@ -5,26 +5,26 @@
 Two built-in providers route requests through Cloudflare:
 
 - `cloudflare-ai-gateway`: Cloudflare AI Gateway. Anthropic models go through the gateway's Anthropic passthrough (`anthropic-messages`), OpenAI models through its OpenAI passthrough (`openai-responses`), and Workers AI models (`workers-ai/@cf/...`) through the Unified API `/compat` endpoint (`openai-completions`).
-- `cloudflare-workers-ai`: Workers AI's OpenAI-compatible endpoint (`openai-completions`). Its catalog also lists the System One classifier models (`@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`, `typesafe/jev`); the classifier API is not ported yet.
+- `cloudflare-workers-ai`: Workers AI's OpenAI-compatible endpoint (`openai-completions`) for chat models, and the REST `/ai/run` endpoint (`cloudflare-workers-ai-system-one`, see [api-system-one.md](api-system-one.md)) for the System One classifier models (`@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`, `typesafe/jev`).
 
-Neither provider has its own wire protocol. Both reuse the existing API implementations and add two things: auth that resolves an account id (and a gateway id) next to the API token, and a `ProviderStreams` wrapper that fills the account and gateway ids into the model's base URL.
+Neither provider has its own chat wire protocol. Both reuse the existing API implementations and add two things: auth that resolves an account id (and a gateway id) next to the API token, and wrappers (`CloudflareStreams` for chat, `CloudflareClassifier` for classifiers) that fill the account and gateway ids into the model's base URL.
 
 Code:
 
 - `crates/ai/src/api/cloudflare.rs`: endpoint templates.
-- `crates/ai/src/providers/cloudflare.rs`: auth, the stream wrapper, the provider factories.
+- `crates/ai/src/providers/cloudflare.rs`: auth, the stream and classifier wrappers, the provider factories.
 - `crates/ai/src/providers/builtin.rs`: `builtin_provider("cloudflare-ai-gateway" | "cloudflare-workers-ai")`.
 
 ## Upstream source files
 
 - `packages/ai/src/api/cloudflare.ts`: endpoint templates → `api::cloudflare` constants.
 - `packages/ai/src/providers/cloudflare-auth.ts` → `CloudflareWorkersAiAuth`, `CloudflareAiGatewayAuth` (`cloudflare_workers_ai_auth()`, `cloudflare_ai_gateway_auth()`).
-- `packages/ai/src/providers/cloudflare-stream.ts` → `resolve_cloudflare_model`, `resolve_cloudflare_base_url`, `CloudflareStreams` (`cloudflare_streams()`). `cloudflareClassifier` is not ported (see below).
+- `packages/ai/src/providers/cloudflare-stream.ts` → `resolve_cloudflare_model`, `resolve_cloudflare_base_url`, `CloudflareStreams` (`cloudflare_streams()`), `CloudflareClassifier` (`cloudflare_classifier()`).
 - `packages/ai/src/providers/cloudflare-ai-gateway.ts` (+ `.models.ts`) → `cloudflare_ai_gateway_provider()`.
 - `packages/ai/src/providers/cloudflare-workers-ai.ts` (+ `.models.ts`) → `cloudflare_workers_ai_provider()`.
 - Catalog data: `data/providers/cloudflare-ai-gateway.json`, `data/providers/cloudflare-workers-ai.json` (already synced).
 - `packages/ai/src/api/cloudflare-ai-binding.ts`: not ported (see below).
-- Tests: `test/cloudflare-stream.test.ts`, the two Cloudflare cases of `test/providers.test.ts`, the Cloudflare cases of `test/openai-completions-empty-tools.test.ts` and `test/openai-responses-compat.test.ts`. `test/cloudflare-utils.ts` only gates the live-network suites (`stream.test.ts`, `empty.test.ts`), which are not ported because tests must not hit the network.
+- Tests: `test/cloudflare-stream.test.ts`, `test/cloudflare-workers-ai-system-one.test.ts` (in `tests/cloudflare_workers_ai_system_one.rs`), the two Cloudflare cases of `test/providers.test.ts`, the Cloudflare cases of `test/openai-completions-empty-tools.test.ts` and `test/openai-responses-compat.test.ts`. `test/cloudflare-utils.ts` only gates the live-network suites (`stream.test.ts`, `empty.test.ts`), which are not ported because tests must not hit the network.
 
 ## Endpoints
 
@@ -64,15 +64,9 @@ The gateway provider maps all three APIs (`anthropic-messages`, `openai-completi
 
 The `openai-completions` compat detection for both providers (no `store`, no developer role, `max_tokens` and no `reasoning_effort` on the gateway, no long cache retention) was already ported in `api::openai_completions`.
 
-## Reuse by the classifier API
+## Classifier models
 
-The `cloudflare-workers-ai-system-one` classifier API is ported separately. It can reuse:
-
-- `providers::cloudflare::cloudflare_workers_ai_auth()` / `CloudflareWorkersAiAuth`: the same auth; the provider already registers it.
-- `providers::cloudflare::resolve_cloudflare_base_url(base_url, &env) -> String`: the placeholder fill-in for a `ClassifierModel::base_url` (upstream `cloudflareClassifier` calls `resolveCloudflareModel` on the classifier model).
-- `api::cloudflare::CLOUDFLARE_WORKERS_AI_REST_BASE_URL` and the `CLOUDFLARE_*` env-name constants in `providers::cloudflare`.
-
-`cloudflare_workers_ai_provider()` then needs its classifier map, once `create_provider` supports classifiers.
+`cloudflare_workers_ai_provider()` registers `cloudflare-workers-ai-system-one` (see [api-system-one.md](api-system-one.md)) wrapped in `CloudflareClassifier` (upstream `cloudflareClassifier`). The classifier models use the same auth as the chat models. Before `classify`, the wrapper fills `{CLOUDFLARE_ACCOUNT_ID}` in `model.base_url` from `options.base.env` with `resolve_cloudflare_base_url`; the catalog base URL is `CLOUDFLARE_WORKERS_AI_REST_BASE_URL`, so requests go to `https://api.cloudflare.com/client/v4/accounts/<account>/ai/run`. Without `options.base.env`, or when nothing changes, the model is passed through unchanged.
 
 ## Rust-specific differences
 
@@ -85,7 +79,6 @@ The `cloudflare-workers-ai-system-one` classifier API is ported separately. It c
 ## Not ported
 
 - `api/cloudflare-ai-binding.ts` (`createAiBindingFetch`, `AiBinding`, `CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL`) and its test `test/cloudflare-ai-binding.test.ts`. The module adapts the Workers runtime's `env.AI` binding (`env.AI.fetch()`) into a `fetch` function, so a Worker can reach its gateway without an API token. That binding exists only inside a Cloudflare Worker (JavaScript, `workerd`). A native Rust process has no `env.AI` binding, and delta has no pluggable `fetch` (`StreamOptions::http_client` takes a `reqwest::Client`). The sentinel constant alone has no use without the binding. Outside the Workers runtime, the gateway is reached over HTTPS with `cf-aig-authorization`, which is what these providers do.
-- `cloudflareClassifier` and the provider's `classifiers` map: classifiers are not ported yet (the System One API is a separate task, see "Reuse by the classifier API").
 - Live-network tests gated by `test/cloudflare-utils.ts`.
 
 ## Improvements pending confirmation
