@@ -1715,7 +1715,7 @@ Rules:
 - The default build has no vendor SDK dependencies.
 - `bedrock` and `vertex` add the official AWS and Google Cloud SDKs. Without the feature, the API module does not exist and `builtin_provider()` returns `None` for that provider. Its catalog entries stay listed in `providers::catalog`.
 - Every catalog is embedded with `include_str!` (about 1700 entries at pi-ai 1.3.0). A provider's catalog is parsed the first time it is read.
-- The linker drops code you do not call, so registering a few providers with `builtin_provider()` keeps the other providers' code out of the binary. The embedded catalog data stays.
+- There is no per-provider split. `builtin_provider()` matches on the id, so calling it links every built-in provider of the enabled features.
 
 ### Provider-Scoped Environment Overrides
 

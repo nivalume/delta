@@ -44,3 +44,7 @@ pub use types::{
     TextContent, ThinkingContent, Tool, ToolCall, ToolResultMessage, TranscriptContext, Usage, UserBlock, UserContent,
     UserMessage,
 };
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
