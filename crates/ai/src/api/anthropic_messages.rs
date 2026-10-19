@@ -11,9 +11,14 @@ use futures::StreamExt;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::api::anthropic_federation::{
+    ANTHROPIC_FEDERATION_RULE_ID_ENV, ANTHROPIC_IDENTITY_TOKEN_FILE_ENV, ANTHROPIC_ORGANIZATION_ID_ENV,
+    ANTHROPIC_SERVICE_ACCOUNT_ID_ENV, ANTHROPIC_WORKSPACE_ID_ENV, AnthropicFederationConfig, federation_token_cache,
+};
 use crate::api::common::{self, spawn_stream};
 use crate::api::constrained_sampling::{get_json_schema_tool_parameters, resolve_json_schema_strict_sampling};
 use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input};
+use crate::auth::env_value;
 use crate::compat::{AnthropicAllowedFallbackModel, ModelCompat, SessionAffinityFormat};
 use crate::error::{Error, Result};
 use crate::events::{AssistantMessageEventStream, MessageBuilder};
@@ -33,8 +38,8 @@ use crate::transcript::{
 use crate::transform::{split_error_tool_result_images, transform_messages};
 use crate::types::{
     AssistantBlock, AssistantMessage, AssistantMessageDiagnostic, ConstrainedSampling, ImageContent, JsonObject,
-    Message, ProviderHeaders, StopReason, StrictMode, Tool, ToolResultMessage, TranscriptContext, UserBlock,
-    UserContent,
+    Message, ProviderEnv, ProviderHeaders, StopReason, StrictMode, Tool, ToolResultMessage, TranscriptContext,
+    UserBlock, UserContent,
 };
 
 /// The `anthropic-messages` API implementation.
@@ -248,6 +253,45 @@ fn has_request_auth(api_key: Option<&str>, headers: Option<&ProviderHeaders>) ->
         || has_header(headers, "authorization")
         || has_header(headers, "x-api-key")
         || has_header(headers, "cf-aig-authorization")
+}
+
+/// Workload identity federation config from the `ANTHROPIC_*` federation variables (in
+/// `env`, else the process environment); the token exchange and refresh live in
+/// [`crate::api::anthropic_federation`]. Only for the `anthropic` provider, since the exchange
+/// is an Anthropic API endpoint, and only when no key or auth header was resolved.
+fn get_anthropic_federation(
+    model: &Model,
+    api_key: Option<&str>,
+    headers: Option<&ProviderHeaders>,
+    env: Option<&ProviderEnv>,
+) -> Option<AnthropicFederationConfig> {
+    if model.provider != "anthropic" || has_request_auth(api_key, headers) {
+        return None;
+    }
+    Some(AnthropicFederationConfig {
+        federation_rule_id: env_value(env, ANTHROPIC_FEDERATION_RULE_ID_ENV)?,
+        organization_id: env_value(env, ANTHROPIC_ORGANIZATION_ID_ENV)?,
+        identity_token_file: env_value(env, ANTHROPIC_IDENTITY_TOKEN_FILE_ENV)?,
+        workspace_id: env_value(env, ANTHROPIC_WORKSPACE_ID_ENV),
+        service_account_id: env_value(env, ANTHROPIC_SERVICE_ACCOUNT_ID_ENV),
+    })
+}
+
+/// Add the OAuth beta to `anthropic-beta` unless it is there, after every other header
+/// source, as the SDK does for requests authenticated from its token cache.
+fn append_oauth_beta(headers: &mut reqwest::header::HeaderMap) -> Result<()> {
+    let mut betas: Vec<String> = headers
+        .get("anthropic-beta")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(',').map(|beta| http::js_trim(beta).to_owned()).collect())
+        .unwrap_or_default();
+    if !betas.iter().any(|beta| beta == OAUTH_BETA) {
+        betas.push(OAUTH_BETA.to_owned());
+        let value = reqwest::header::HeaderValue::from_str(&betas.join(","))
+            .map_err(|_| Error::msg("Invalid value for header anthropic-beta"))?;
+        headers.insert("anthropic-beta", value);
+    }
+    Ok(())
 }
 
 /// Whether `api_key` is a Claude Code OAuth access token.
@@ -1131,9 +1175,8 @@ async fn run(
     let api = api_options(options);
 
     let api_key = options.api_key.as_deref().filter(|key| !key.is_empty());
-    // Not ported: workload identity federation (ANTHROPIC_FEDERATION_RULE_ID & co.), which
-    // upstream delegates to the Anthropic SDK's token exchange.
-    if !has_request_auth(api_key, options.headers.as_ref()) {
+    let federation = get_anthropic_federation(model, api_key, options.headers.as_ref(), options.env.as_ref());
+    if federation.is_none() && !has_request_auth(api_key, options.headers.as_ref()) {
         return Err(Error::msg(format!("No API key for provider: {}", model.provider)));
     }
     let mode = auth_mode(model, api_key);
@@ -1156,6 +1199,9 @@ async fn run(
         ..options.clone()
     };
     let client = http::client(options);
+    // One token cache per federation config, shared across requests (upstream keeps one SDK
+    // client per config).
+    let federation = federation.map(|config| federation_token_cache(base_url, &config));
 
     let mut disable_preferred_strict_tools = false;
     let response = loop {
@@ -1171,13 +1217,36 @@ async fn run(
             body.insert("stream".into(), Value::Bool(true));
         }
         let request_headers = take_request_headers(&mut params);
-        let headers = http::build_headers(header_sources.iter().chain(std::iter::once(&request_headers)))?;
+        // A federated request authenticates with the cached access token, in the SDK's auth
+        // header position (after its defaults), and carries the OAuth beta.
+        let token_source = match &federation {
+            Some(cache) => {
+                let token = http::or_cancel(options.cancel.as_ref(), cache.get_token(&client)).await?;
+                Some(http::headers_of([("Authorization", &format!("Bearer {token}"))]))
+            }
+            None => None,
+        };
+        let (defaults, rest) = header_sources.split_at(1);
+        let mut headers = http::build_headers(
+            defaults
+                .iter()
+                .chain(token_source.iter())
+                .chain(rest)
+                .chain(std::iter::once(&request_headers)),
+        )?;
+        if federation.is_some() {
+            append_oauth_beta(&mut headers)?;
+        }
         let body = serde_json::to_vec(&params)?;
         let sent = http::send_with_retry(&retry_options, || {
             Ok(client.post(&url).headers(headers.clone()).body(body.clone()))
         })
         .await
         .map_err(format_http_error);
+        // The SDK drops its cached token when the server rejects it with a 401.
+        if let (Some(cache), Err(Error::Status { status: 401, .. })) = (&federation, &sent) {
+            cache.invalidate();
+        }
         match sent {
             Ok(response) => break response,
             Err(error) => {

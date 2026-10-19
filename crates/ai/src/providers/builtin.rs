@@ -443,7 +443,8 @@ pub fn openai_codex_provider() -> BuiltProvider {
 }
 
 /// Anthropic: `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, or `ANTHROPIC_AUTH_TOKEN` sent as a
-/// bearer token; OAuth login with a Claude Pro/Max subscription.
+/// bearer token, else workload identity federation; OAuth login with a Claude Pro/Max
+/// subscription.
 pub fn anthropic_provider() -> BuiltProvider {
     catalog_provider(
         "anthropic",
@@ -456,12 +457,17 @@ pub fn anthropic_provider() -> BuiltProvider {
 
 mod anthropic_auth {
     use super::BoxFuture;
+    use crate::api::anthropic_federation::{
+        ANTHROPIC_FEDERATION_RULE_ID_ENV, ANTHROPIC_IDENTITY_TOKEN_FILE_ENV, ANTHROPIC_ORGANIZATION_ID_ENV,
+        ANTHROPIC_SERVICE_ACCOUNT_ID_ENV, ANTHROPIC_WORKSPACE_ID_ENV,
+    };
     use crate::auth::{ApiKeyAuth, ApiKeyCredential, ApiKeyInput, AuthInteraction, AuthPrompt, AuthResult, ModelAuth};
     use crate::error::ModelsError;
     use crate::http::headers_of;
+    use crate::types::ProviderEnv;
 
     /// Upstream order: stored key, `ANTHROPIC_AUTH_TOKEN` (bearer), `ANTHROPIC_OAUTH_TOKEN`,
-    /// `ANTHROPIC_API_KEY`. Workload identity federation is not ported.
+    /// `ANTHROPIC_API_KEY`, then workload identity federation.
     #[derive(Debug)]
     pub(super) struct AnthropicApiKeyAuth;
 
@@ -506,7 +512,32 @@ mod anthropic_auth {
                         }));
                     }
                 }
-                Ok(None)
+
+                // Workload identity federation: the token exchange and refresh run per request
+                // in `api::anthropic_federation`. Last in line so keys and
+                // ANTHROPIC_AUTH_TOKEN keep winning, as in the SDK. The ids are provider
+                // config rather than auth, so they travel in `env`.
+                let mut federation = ProviderEnv::new();
+                for var in [
+                    ANTHROPIC_FEDERATION_RULE_ID_ENV,
+                    ANTHROPIC_ORGANIZATION_ID_ENV,
+                    ANTHROPIC_IDENTITY_TOKEN_FILE_ENV,
+                ] {
+                    let Some(value) = input.ctx.env(var) else {
+                        return Ok(None);
+                    };
+                    federation.insert(var.into(), value);
+                }
+                for var in [ANTHROPIC_SERVICE_ACCOUNT_ID_ENV, ANTHROPIC_WORKSPACE_ID_ENV] {
+                    if let Some(value) = input.ctx.env(var) {
+                        federation.insert(var.into(), value);
+                    }
+                }
+                Ok(Some(AuthResult {
+                    auth: ModelAuth::default(),
+                    env: Some(federation),
+                    source: Some("workload identity federation".into()),
+                }))
             })
         }
 

@@ -6,6 +6,7 @@
 pub mod common;
 pub mod constrained_sampling;
 
+pub mod anthropic_federation;
 pub mod anthropic_messages;
 pub mod azure_openai_responses;
 #[cfg(feature = "bedrock")]
