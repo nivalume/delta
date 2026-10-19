@@ -872,6 +872,8 @@ pub struct RunToolCallOptions<'a, C: CustomMessage> {
     pub context: &'a AgentContext<C>,
     pub config: &'a AgentLoopConfig<C>,
     pub cancel: CancellationToken,
+    /// Receives the tool's partial results while it runs.
+    pub on_update: Option<&'a (dyn Fn(AgentToolResult) + Send + Sync)>,
 }
 
 impl<C: CustomMessage> std::fmt::Debug for RunToolCallOptions<'_, C> {
@@ -883,7 +885,8 @@ impl<C: CustomMessage> std::fmt::Debug for RunToolCallOptions<'_, C> {
 }
 
 /// Run one tool call through the same steps as a model-issued call (argument preparation,
-/// validation, `before_tool_call`, execution, `after_tool_call`) without events or messages.
+/// validation, `before_tool_call`, execution, `after_tool_call`) without events or messages;
+/// partial results go to `on_update`.
 /// Tools that call other tools use this so the hooks apply to those calls too. Failures come
 /// back as `is_error` outcomes.
 pub async fn run_tool_call<C: CustomMessage>(
@@ -896,13 +899,28 @@ pub async fn run_tool_call<C: CustomMessage>(
         context,
         config,
         cancel,
+        on_update,
     } = options;
     match prepare_tool_call(context, assistant_message, call, tools, config, &cancel).await {
         Prepared::Immediate(outcome) => outcome,
         Prepared::Ready(prepared) => {
-            let executed = execute_prepared::<C>(&prepared, &cancel, None).await;
+            let sink = on_update.map(UpdateSink);
+            let sink = sink.as_ref().map(|sink| sink as &dyn AgentEventSink<C>);
+            let executed = execute_prepared::<C>(&prepared, &cancel, sink).await;
             finalize(context, assistant_message, &prepared, executed, config, &cancel).await
         }
+    }
+}
+
+/// Forwards the partial results of a [`run_tool_call`] to its `on_update` callback.
+struct UpdateSink<'a>(&'a (dyn Fn(AgentToolResult) + Send + Sync));
+
+impl<C> AgentEventSink<C> for UpdateSink<'_> {
+    fn emit(&self, event: AgentEvent<C>) -> BoxFuture<'_, ()> {
+        if let AgentEvent::ToolExecutionUpdate { partial_result, .. } = event {
+            (self.0)(partial_result);
+        }
+        Box::pin(async {})
     }
 }
 
