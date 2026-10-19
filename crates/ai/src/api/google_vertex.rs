@@ -590,6 +590,8 @@ fn vertex_error(error: &google_cloud_aiplatform_v1::Error) -> Error {
         Some((status, message)) => Error::Status {
             status,
             message: format!("{status} {message}"),
+            // gRPC errors carry a status message, not a response body.
+            body: None,
             retry_after_ms: None,
         },
         None => Error::msg(error.to_string()),

@@ -684,6 +684,7 @@ fn sdk_errors_map_to_http_statuses() {
                 status: actual,
                 message,
                 retry_after_ms,
+                ..
             } => {
                 assert_eq!(actual, status, "{code:?}");
                 assert_eq!(message, format!("{status} boom"));
