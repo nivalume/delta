@@ -114,21 +114,42 @@ pub struct PrepareRequestContext<'a, C = NoCustom> {
 }
 
 /// Replacement state for the request being prepared and later requests of the run.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AgentRequestUpdate<C = NoCustom> {
     pub context: Option<AgentContext<C>>,
     pub model: Option<Model>,
     pub thinking_level: Option<ModelThinkingLevel>,
 }
 
+impl<C> Default for AgentRequestUpdate<C> {
+    fn default() -> Self {
+        Self {
+            context: None,
+            model: None,
+            thinking_level: None,
+        }
+    }
+}
+
 /// Replacement state for the next turn.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AgentLoopTurnUpdate<C = NoCustom> {
     pub context: Option<AgentContext<C>>,
     /// Messages to append before the next request, with normal lifecycle events.
     pub messages: Option<Vec<AgentMessage<C>>>,
     pub model: Option<Model>,
     pub thinking_level: Option<ModelThinkingLevel>,
+}
+
+impl<C> Default for AgentLoopTurnUpdate<C> {
+    fn default() -> Self {
+        Self {
+            context: None,
+            messages: None,
+            model: None,
+            thinking_level: None,
+        }
+    }
 }
 
 /// Application hooks of the agent loop. Every method has a default; implement the ones you
