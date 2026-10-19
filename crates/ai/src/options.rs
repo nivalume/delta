@@ -276,6 +276,7 @@ pub enum ApiOptions {
     GoogleVertex(GoogleVertexOptions),
     MistralConversations(MistralOptions),
     BedrockConverseStream(BedrockOptions),
+    PiMessages(PiMessagesOptions),
     /// Options of a custom API.
     Custom(JsonObject),
 }
@@ -480,4 +481,15 @@ pub struct BedrockOptions {
     pub request_metadata: Option<IndexMap<String, String>>,
     /// Bedrock API key; bypasses SigV4 signing.
     pub bearer_token: Option<String>,
+}
+
+/// Options of the `pi-messages` API. They are forwarded to the backend as they are.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PiMessagesOptions {
+    pub reasoning: Option<ThinkingLevel>,
+    /// Raw `toolChoice` value: `"auto"`, `"none"`, `"required"` or
+    /// `{"type": "function", "function": {"name": ...}}`.
+    pub tool_choice: Option<Value>,
+    /// Ask the backend for debug metadata (e.g. routing response headers).
+    pub debug: Option<bool>,
 }
