@@ -1,77 +1,77 @@
-# delta-agent（`delta_agent`）设计文档
+# delta-agent (`delta_agent`) design notes
 
-`delta-agent` 是 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent) 的 Rust 移植，代码里 `use delta_agent::...`。它在 [`delta_ai`](../../../ai/docs/design/README.md) 之上实现有状态的 agent：维护对话记录、执行工具调用、处理 steering 与 follow-up 队列、发出生命周期事件。
+`delta-agent` is the Rust port of [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent). Code imports it as `use delta_agent::...`. It builds a stateful agent on top of [`delta_ai`](../../../ai/docs/design/README.md): it keeps the transcript, runs tool calls, handles the steering and follow-up queues, and emits lifecycle events.
 
-设计以上游为准。Rust 语言层面必须改写的地方在各文档的“与上游的差异”里列出；属于改进或行为变化的放在“待确认”，确认前不实现。
+The design follows upstream. Changes that Rust forces are listed under "Differences from upstream" in each document. Improvements or behavior changes go under "Pending confirmation" and are not implemented until confirmed.
 
-## 文档索引
+## Document index
 
-| 文档 | 模块 | 内容 |
+| Document | Module | Contents |
 | --- | --- | --- |
-| [types.md](types.md) | `types` | `AgentMessage<C>`、自定义消息、事件、工具结果、钩子返回值 |
-| [tools.md](tools.md) | `tool` | `AgentTool` trait、`FnTool`、`typed_tool`、工具执行的各个步骤 |
-| [loop.md](loop.md) | `agent_loop`、`hooks` | 底层循环、`AgentHooks`、`StreamFn`、工具声明变更 |
-| [agent.md](agent.md) | `agent` | `Agent` 句柄、状态归约、监听器、队列、中止与空闲 |
-| [proxy.md](proxy.md) | `proxy` | 通过应用自己的服务器转发模型请求的 `stream_proxy` |
+| [types.md](types.md) | `types` | `AgentMessage<C>`, custom messages, events, tool results, hook return values |
+| [tools.md](tools.md) | `tool` | `AgentTool` trait, `FnTool`, `typed_tool`, the steps of tool execution |
+| [loop.md](loop.md) | `agent_loop`, `hooks` | Low-level loop, `AgentHooks`, `StreamFn`, tool declaration changes |
+| [agent.md](agent.md) | `agent` | `Agent` handle, state reduction, listeners, queues, abort and idle |
+| [proxy.md](proxy.md) | `proxy` | `stream_proxy`, which forwards model requests through the application's own server |
 
-## 总体结构
+## Overall structure
 
-两层，与上游相同：
+Two layers, same as upstream:
 
-1. **底层循环**（`run_agent_loop` / `agent_loop`）：无状态函数。输入上下文、配置、事件接收端、取消令牌和 `StreamFn`，输出本次运行新增的消息。
-2. **`Agent`**：持有状态的句柄。把状态和队列转成循环的配置，把循环事件归约进状态，再按订阅顺序交给监听器。
+1. **Low-level loop** (`run_agent_loop` / `agent_loop`): a stateless function. Input: context, config, event sink, cancellation token and `StreamFn`. Output: the messages this run added.
+2. **`Agent`**: a handle that holds state. It turns state and queues into loop config, reduces loop events into state, then passes them to listeners in subscription order.
 
-循环在内部一直使用 `AgentMessage<C>`，只在请求 provider 前经 `transform_context` → `convert_to_llm` → `normalize_context` 转成 LLM 消息。
+Inside the loop, messages are always `AgentMessage<C>`. They are converted to LLM messages only before the provider request, via `transform_context` → `convert_to_llm` → `normalize_context`.
 
-一次运行的流程：
+Flow of one run:
 
-![agent loop 流程](diagrams/agent-loop.png)
+![agent loop flow](diagrams/agent-loop.png)
 
-（可交互版本：[diagrams/agent-loop.html](diagrams/agent-loop.html)）
+(Interactive version: [diagrams/agent-loop.html](diagrams/agent-loop.html))
 
-- 每一轮（turn）是一次助手回复加上它的工具调用。
-- 回复以 `error` 或 `aborted` 结束时，发出 `TurnEnd` 和 `AgentEnd` 后结束运行，不执行工具、不读队列。
-- 一轮结束后先读 steering 队列；只有在没有工具调用要继续、也没有 steering 消息时才读 follow-up 队列。
+- Each turn is one assistant reply plus its tool calls.
+- When the reply ends with `error` or `aborted`, the run emits `TurnEnd` and `AgentEnd` and stops. It does not run tools or read the queues.
+- After a turn, the steering queue is read first. The follow-up queue is read only when there are no tool calls to continue with and no steering messages.
 
-## crate 组织
+## Crate layout
 
 ```
 crates/agent/
-  docs/design/     # 本目录
+  docs/design/     # this directory
   src/
-    types.rs       # 消息、事件、工具结果
-    tool.rs        # AgentTool trait 与便捷实现
-    hooks.rs       # StreamFn、AgentHooks、AgentLoopConfig
-    agent_loop.rs  # 底层循环与工具执行
-    agent.rs       # Agent 句柄
+    types.rs       # messages, events, tool results
+    tool.rs        # AgentTool trait and convenience implementations
+    hooks.rs       # StreamFn, AgentHooks, AgentLoopConfig
+    agent_loop.rs  # low-level loop and tool execution
+    agent.rs       # Agent handle
     proxy.rs       # stream_proxy
-  tests/           # 移植自上游 test/
+  tests/           # ported from upstream test/
 ```
 
-| feature | 默认 | 内容 |
+| feature | Default | Contents |
 | --- | --- | --- |
-| `schemars` | 开 | `typed_tool` 与 `schema_for`：从 Rust 类型生成工具参数的 JSON Schema |
+| `schemars` | on | `typed_tool` and `schema_for`: generate the JSON Schema of tool parameters from Rust types |
 
-## 已确认的设计决定
+## Confirmed design decisions
 
-| 问题 | 决定 |
+| Question | Decision |
 | --- | --- |
-| 自定义消息 | 泛型参数：`AgentMessage<C = NoCustom>`，`C: CustomMessage`。上游用 TypeScript 声明合并扩展 `AgentMessage`。见 [types.md](types.md) |
-| 工具定义 | `AgentTool` trait；另有 `FnTool`（声明 + 闭包）和 `typed_tool`（参数类型由 schemars 生成 schema，feature 可关）。见 [tools.md](tools.md) |
-| 丢弃事件流 | 与 `delta_ai` 一致：drop 即取消。`agent_loop` 返回的 `AgentEventStream` 在运行结束前被 drop 时取消本次运行（取消的是调用方令牌的子令牌）；需要跑完时调用 `result()` |
-| `MessageUpdate` 里的消息 | `Arc<AssistantMessage>` 快照，每个更新事件克隆一次当前消息。上游直接传可变的 partial 引用 |
-| 包名 | crates.io 包名 `delta-agent`，库名 `delta_agent` |
+| Custom messages | Generic parameter: `AgentMessage<C = NoCustom>`, `C: CustomMessage`. Upstream extends `AgentMessage` with TypeScript declaration merging. See [types.md](types.md) |
+| Tool definition | `AgentTool` trait; also `FnTool` (declaration + closure) and `typed_tool` (schema generated by schemars from the parameter type; the feature can be turned off). See [tools.md](tools.md) |
+| Dropping the event stream | Same as `delta_ai`: drop means cancel. If the `AgentEventStream` returned by `agent_loop` is dropped before the run ends, the run is cancelled (what gets cancelled is a child token of the caller's token). Call `result()` to run to completion |
+| Message in `MessageUpdate` | An `Arc<AssistantMessage>` snapshot; the current message is cloned once per update event. Upstream passes the mutable partial by reference |
+| Package name | crates.io package `delta-agent`, library `delta_agent` |
 
-## 与上游的差异（Rust 语言层面）
+## Differences from upstream (Rust language)
 
-- 上游的各个回调（`convertToLlm`、`transformContext`、`getApiKey`、`beforeToolCall`、`afterToolCall`、`finishTurn`、`prepareRequest`、`prepareNextTurn`）合并成一个 `AgentHooks<C>` trait，每个方法都有默认实现。钩子的输入是借用的上下文结构体，放在一个 trait 对象里比八个独立的 `Arc<dyn Fn>` 更容易表达生命周期。
-- `AbortSignal` → `CancellationToken`。监听器收到 `(Arc<AgentEvent<C>>, CancellationToken)`。
-- 没有全局默认 `StreamFn`（上游的 `setDefaultStreamFn`）。`AgentOptions::new(stream_fn)` 和 `run_agent_loop` 都要求显式传入；`models_stream_fn(models)` 把 `Models` 适配成 `StreamFn`。
-- 循环把最终的助手消息（`Done`/`Error` 事件里的消息）写入上下文。上游写入的是流式过程中原地修改的 partial 对象，两者内容相同。
-- 钩子不返回 `Result`，没有“钩子抛异常”这条路径。上游 `Agent` 捕获循环抛出的异常并合成一条失败的助手消息；Rust 里流的失败已经编码在流里，钩子和监听器的 panic 照常传播。
-- `Agent` 的 `prompt`/`continue_run`/`reset` 在已有运行时返回 `AgentError`（`AlreadyRunning`、`ContinueWhileRunning`、`ResetWhileRunning`，文本与上游三条错误相同），不是抛异常。`prompt` 接收 `Vec<AgentMessage<C>>`，文本加图片用 `prompt_text`（上游 `prompt` 重载了字符串、单条消息、消息数组）。
-- 状态读写用 `with_state` / `with_state_mut` 闭包，避免把锁守卫交给调用方；常用字段另有 getter/setter。
+- Upstream's callbacks (`convertToLlm`, `transformContext`, `getApiKey`, `beforeToolCall`, `afterToolCall`, `finishTurn`, `prepareRequest`, `prepareNextTurn`) are merged into one `AgentHooks<C>` trait. Every method has a default implementation. Hook inputs are borrowed context structs; lifetimes are easier to express in one trait object than in eight separate `Arc<dyn Fn>`.
+- `AbortSignal` → `CancellationToken`. Listeners receive `(Arc<AgentEvent<C>>, CancellationToken)`.
+- No global default `StreamFn` (upstream's `setDefaultStreamFn`). Both `AgentOptions::new(stream_fn)` and `run_agent_loop` require it explicitly. `models_stream_fn(models)` adapts `Models` into a `StreamFn`.
+- The loop writes the final assistant message (the message in the `Done`/`Error` event) into the context. Upstream writes the partial object that was mutated in place during streaming. The content is the same.
+- Hooks do not return `Result`, so there is no "hook throws" path. Upstream `Agent` catches exceptions thrown by the loop and synthesizes a failed assistant message. In Rust, stream failures are already encoded in the stream; panics in hooks and listeners propagate as usual.
+- When a run is already active, `Agent`'s `prompt`/`continue_run`/`reset` return `AgentError` (`AlreadyRunning`, `ContinueWhileRunning`, `ResetWhileRunning`, with the same text as upstream's three errors) instead of throwing. `prompt` takes `Vec<AgentMessage<C>>`; for text plus images use `prompt_text` (upstream `prompt` is overloaded for a string, a single message and a message array).
+- State is read and written through `with_state` / `with_state_mut` closures, so lock guards are never handed to the caller. Common fields also have getters/setters.
 
-## 待确认
+## Pending confirmation
 
-- 上游 `examples/mcp-codemode` 和 `test/e2e.test.ts`（需要真实 API key）不移植。
+- Upstream `examples/mcp-codemode` and `test/e2e.test.ts` (which needs a real API key) are not ported.

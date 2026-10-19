@@ -1,46 +1,46 @@
-# API：openai-responses（含 Responses 共享层）
+# API: openai-responses (including the shared Responses layer)
 
-## 目的
+## Purpose
 
-实现 OpenAI Responses API（`POST {baseUrl}/responses`，SSE 流式）。模块分两层：
+Implements the OpenAI Responses API (`POST {baseUrl}/responses`, SSE streaming). The module has two layers:
 
-- `api::openai_responses_shared`：Responses 家族共用的输入项转换、工具转换和流事件处理。`openai-responses` 与 `azure-openai-responses` 都用它，以后的 `openai-codex-responses` 也可以复用。
-- `api::openai_responses`：单元结构体 `OpenAIResponsesApi`，负责兼容配置、请求体、请求头、缓存与会话亲和、服务等级计价，以及 `stream` / `stream_simple`。
+- `api::openai_responses_shared`: input item conversion, tool conversion and stream event handling shared by the Responses family. Both `openai-responses` and `azure-openai-responses` use it, and a future `openai-codex-responses` can reuse it.
+- `api::openai_responses`: the unit struct `OpenAIResponsesApi`. It handles compat configuration, the request body, request headers, cache and session affinity, service tier pricing, and `stream` / `stream_simple`.
 
-客户端手写在 `reqwest` + `delta_ai::http` 之上，不依赖 OpenAI SDK。
+The client is hand-written on `reqwest` + `delta_ai::http` and does not depend on the OpenAI SDK.
 
-## 上游源文件
+## Upstream source files
 
-- `packages/ai/src/api/openai-responses-shared.ts`：`convertResponsesMessages`、`convertResponsesTools`、`processResponsesStream`、`mapStopReason`。
-- `packages/ai/src/api/openai-responses.ts`：`getCompat`、`buildParams`、`createClient`、`stream`、`streamSimple`、服务等级计价。
-- `packages/ai/src/api/constrained-sampling.ts`：严格 JSON Schema 与语法（grammar）工具，在共享模块 `api::constrained_sampling` 中。
-- `packages/ai/src/api/openai-prompt-cache.ts`：`prompt_cache_key` 截断到 64 个码点。
-- `packages/ai/src/utils/hash.ts`：`shortHash`，在 `api::common::short_hash`，与 TypeScript 逐位一致（按 UTF-16 码元、`Math.imul` 语义、36 进制输出）。
-- 测试参照：`test/openai-responses-*.test.ts`、`test/cache-retention.test.ts`（Responses 部分）、`test/xai-responses.test.ts`（请求部分），以及 pi-py 的 `tests/test_openai_responses.py`。
+- `packages/ai/src/api/openai-responses-shared.ts`: `convertResponsesMessages`, `convertResponsesTools`, `processResponsesStream`, `mapStopReason`.
+- `packages/ai/src/api/openai-responses.ts`: `getCompat`, `buildParams`, `createClient`, `stream`, `streamSimple`, service tier pricing.
+- `packages/ai/src/api/constrained-sampling.ts`: strict JSON Schema and grammar tools, in the shared module `api::constrained_sampling`.
+- `packages/ai/src/api/openai-prompt-cache.ts`: truncates `prompt_cache_key` to 64 code points.
+- `packages/ai/src/utils/hash.ts`: `shortHash`, in `api::common::short_hash`, bit-for-bit identical to TypeScript (over UTF-16 code units, `Math.imul` semantics, base-36 output).
+- Test references: `test/openai-responses-*.test.ts`, `test/cache-retention.test.ts` (the Responses part), `test/xai-responses.test.ts` (the request part), and pi-py's `tests/test_openai_responses.py`.
 
-## 请求映射
+## Request mapping
 
-### URL 与请求头
+### URL and request headers
 
-- URL：`join_url(model.base_url, "responses")`。
-- 请求头合并顺序（后者覆盖前者，名字不区分大小写，`None` 删除）：
-  1. API 默认：`Authorization: Bearer <api_key>`（没有 key 但有 `authorization` / `cf-aig-authorization` 头时用 `unused`）、`Accept`、`Content-Type: application/json`、`User-Agent: delta/...`；
-  2. `model.headers`；
-  3. 会话亲和头（见下）；
-  4. `options.headers`。
-- 没有 API key、也没有 `authorization` / `cf-aig-authorization` 头时报错 `No API key for provider: <provider>`。
-- 会话亲和：只有 `session_id` 存在且缓存保留不是 `none` 时才发送。格式取 `compat.sessionAffinityFormat`，未设置时 provider 为 `openrouter` 或 baseUrl 含 `openrouter.ai` 用 `openrouter`，否则用 `openai`。
-  - `openai`：`session_id` 和 `x-client-request-id`；
-  - `openai-nosession`：只发 `x-client-request-id`；
-  - `openrouter`：`x-session-id`。
+- URL: `join_url(model.base_url, "responses")`.
+- Header merge order (later entries override earlier ones, names are case-insensitive, `None` deletes):
+  1. API defaults: `Authorization: Bearer <api_key>` (`unused` when there is no key but there is an `authorization` / `cf-aig-authorization` header), `Accept`, `Content-Type: application/json`, `User-Agent: delta/...`;
+  2. `model.headers`;
+  3. Session affinity headers (see below);
+  4. `options.headers`.
+- With no API key and no `authorization` / `cf-aig-authorization` header, the error is `No API key for provider: <provider>`.
+- Session affinity: sent only when `session_id` is present and cache retention is not `none`. The format comes from `compat.sessionAffinityFormat`. When it is not set, `openrouter` is used if the provider is `openrouter` or the baseUrl contains `openrouter.ai`; otherwise `openai`.
+  - `openai`: `session_id` and `x-client-request-id`;
+  - `openai-nosession`: only `x-client-request-id`;
+  - `openrouter`: `x-session-id`.
 
-### 兼容配置默认值
+### Compat defaults
 
-| 字段 | 默认 |
+| Field | Default |
 | --- | --- |
-| `supportsDeveloperRole` | true（推理模型的指令用 `developer` 角色，否则 `system`） |
-| `supportsMidConvoSystemMessages` | false（为 false 时后续 system 消息折叠进开头的提示词） |
-| `sessionAffinityFormat` | 按 provider / baseUrl 推断 |
+| `supportsDeveloperRole` | true (instructions for reasoning models use the `developer` role, otherwise `system`) |
+| `supportsMidConvoSystemMessages` | false (when false, later system messages are folded into the initial prompt) |
+| `sessionAffinityFormat` | Inferred from provider / baseUrl |
 | `supportsLongCacheRetention` | true |
 | `supportsStrictMode` | false |
 | `supportsOpenAIGrammarTools` | false |
@@ -49,146 +49,146 @@
 | `supportsMaxOutputTokens` | true |
 | `supportsMidConvoEffort` | false |
 
-模型的 `compat` 若不是 Responses 结构（例如自定义 JSON），会被宽松地按 Responses 结构重读，失败时用默认值。
+If the model's `compat` does not have the Responses shape (for example custom JSON), it is re-read leniently as the Responses shape; on failure, the defaults are used.
 
-### 请求体字段（按插入顺序）
+### Request body fields (in insertion order)
 
-| 字段 | 规则 |
+| Field | Rule |
 | --- | --- |
 | `model` | `model.id` |
-| `input` | 见“输入项转换” |
+| `input` | See "Input item conversion" |
 | `stream` | `true` |
-| `prompt_cache_key` | 缓存保留不是 `none` 时取 `session_id`，截断到 64 个码点 |
-| `prompt_cache_retention` | 保留为 `long`、`supportsLongCacheRetention` 且不是显式缓存模式时为 `"24h"` |
-| `prompt_cache_options` | 仅显式缓存模式：保留 `none` → `{"mode":"explicit"}`；`long` 且支持长缓存 → `{"ttl":"30m"}` |
+| `prompt_cache_key` | `session_id` when cache retention is not `none`, truncated to 64 code points |
+| `prompt_cache_retention` | `"24h"` when retention is `long`, `supportsLongCacheRetention` is set, and explicit cache mode is not used |
+| `prompt_cache_options` | Explicit cache mode only: retention `none` → `{"mode":"explicit"}`; `long` with long cache support → `{"ttl":"30m"}` |
 | `store` | `false` |
-| `max_output_tokens` | `max_tokens > 0` 且 `supportsMaxOutputTokens` 时发送，最小 16 |
-| `temperature` | 设置时发送 |
+| `max_output_tokens` | Sent when `max_tokens > 0` and `supportsMaxOutputTokens`; minimum 16 |
+| `temperature` | Sent when set |
 | `service_tier` | `OpenAIResponsesOptions::service_tier` |
-| `tools` | 请求级工具（见“工具转换”），为空时不发 |
-| `tool_choice` | 原样发送 `OpenAIResponsesOptions::tool_choice` |
-| `reasoning` / `include` | 见下 |
-| 采样参数 | 最后合并 `resolve_sampling_params(model, level, options.sampling_params)`，已有的键原位覆盖 |
+| `tools` | Request-level tools (see "Tool conversion"); not sent when empty |
+| `tool_choice` | `OpenAIResponsesOptions::tool_choice` sent as is |
+| `reasoning` / `include` | See below |
+| Sampling parameters | `resolve_sampling_params(model, level, options.sampling_params)` merged last; existing keys are overwritten in place |
 
-缓存保留：`options.cache_retention`，否则 `PI_CACHE_RETENTION=long` 时为 `long`，否则 `short`。
+Cache retention: `options.cache_retention`; otherwise `long` when `PI_CACHE_RETENTION=long`; otherwise `short`.
 
-推理参数（仅 `model.reasoning`）：
+Reasoning parameters (only when `model.reasoning`):
 
-- 实际 effort = `reasoning_effort`，没有时若设置了非空 `reasoning_summary` 则为 `medium`。
-- 有 effort：`reasoning = {effort, summary}`，effort 经 `thinkingLevelMap` 映射（映射值为 `null` 时用原值），summary 默认 `auto`；同时 `include = ["reasoning.encrypted_content"]`。
-- 没有 effort：provider 不是 `github-copilot` 且 `thinkingLevelMap.off` 不为 `null` 时发送 `reasoning = {effort: thinkingLevelMap.off ?? "none"}`。
-- provider 为 `xai` 时总是 `include = ["reasoning.encrypted_content"]`。
-- 对话中途改 effort（`supportsMidConvoEffort` 且请求了 effort）：`reasoning.effort` 固定为 `medium`，真实等级写进 `configuration_update` 输入项（见下），并记入输出消息的 `provider_thinking_level`。这样之前的输入不会变，前缀缓存不失效。
+- The actual effort is `reasoning_effort`; when it is absent and a non-empty `reasoning_summary` is set, it is `medium`.
+- With an effort: `reasoning = {effort, summary}`. The effort is mapped through `thinkingLevelMap` (the original value is used when the mapped value is `null`); summary defaults to `auto`. Also `include = ["reasoning.encrypted_content"]`.
+- Without an effort: when the provider is not `github-copilot` and `thinkingLevelMap.off` is not `null`, send `reasoning = {effort: thinkingLevelMap.off ?? "none"}`.
+- When the provider is `xai`, always `include = ["reasoning.encrypted_content"]`.
+- Changing effort mid-conversation (`supportsMidConvoEffort` and an effort was requested): `reasoning.effort` is fixed to `medium`, and the real level is written into a `configuration_update` input item (see below) and recorded in the output message's `provider_thinking_level`. This way the earlier input does not change and the prefix cache stays valid.
 
-### 输入项转换（`convert_responses_messages`）
+### Input item conversion (`convert_responses_messages`)
 
-1. `resolve_transcript` 按 `supportsMidConvoSystemMessages` 保留或折叠后续 system 消息。
-2. `transform_messages` 处理跨模型交接，工具调用 id 规范化规则：
-   - 目标 provider 不在允许列表（OpenAI：`openai`、`openai-codex`、`opencode`）或 id 里没有 `|`：把 `[^a-zA-Z0-9_-]` 替换成 `_`（按 UTF-16 码元计），截断 64，去掉结尾 `_`。
-   - 否则 id 是 `call_id|item_id`：`call_id` 同上规范化；来自其他 provider 或 API 的 `item_id` 变成 `fc_<shortHash>`，否则规范化；不以 `fc_` 开头的再补上 `fc_`。
-3. 逐条消息（`msg_index` 只对非开头 system 消息计数，`continue` 跳过的消息不计数，与上游一致）：
-   - 开头 system 消息：`{role: developer|system, content: 提示词全文}`（`include_system_prompt` 为 false 时省略）。
-   - 后续 system 消息：先按需输出工具新增项（见下），再输出 `render_system_message_update` 渲染的文本。
-   - user：字符串 → 一个 `input_text`；块列表 → `input_text` / `input_image`（`detail: auto`，data URL）；空块列表跳过。
-   - assistant：
-     - thinking：签名是 Responses 推理项的 JSON，原样解析回输入项（含 `encrypted_content`）；
-     - text：从 `textSignature` 解析消息 id 和 phase（`TextSignatureV1` JSON 或旧的纯字符串 id；只保留 `commentary` / `final_answer`）。没有 id 时用 `msg_pi_<i>`，同一条消息的第 N 个文本块用 `msg_pi_<i>_<N>`；超过 64 个字符的 id 变为 `msg_<shortHash>`；
-     - toolCall：语法工具发 `custom_tool_call`（`input` 取对应参数），否则 `function_call`（`arguments` 为紧凑 JSON）。同 provider/API 但不同模型时去掉 item id；item id 前缀与类型不符（`fc_` / `ctc_`）也去掉。`namespace` 只回放给同一模型；
-     - 输出为空的 assistant 消息跳过；需要时在它前面插入 `configuration_update`（同一模型且记录了 `provider_thinking_level`）。
-   - toolResult：`function_call_output` 或 `custom_tool_call_output`，`call_id` 取 `|` 前的部分。输出：无图片或模型不支持图片时为字符串（文本为空白时为 `(no tool output)`，只有图片时为 `(see attached image)`）；否则为 `input_text` + `input_image` 数组。
-4. 最后若启用中途 effort，追加 `{type: configuration_update, reasoning: {effort}}`。
+1. `resolve_transcript` keeps or folds later system messages according to `supportsMidConvoSystemMessages`.
+2. `transform_messages` handles cross-model handoff. Tool call id normalization rules:
+   - The target provider is not on the allow list (OpenAI: `openai`, `openai-codex`, `opencode`) or the id has no `|`: replace `[^a-zA-Z0-9_-]` with `_` (per UTF-16 code unit), truncate to 64, and strip trailing `_`.
+   - Otherwise the id is `call_id|item_id`: `call_id` is normalized as above; an `item_id` from another provider or API becomes `fc_<shortHash>`, otherwise it is normalized; if it does not start with `fc_`, `fc_` is prepended.
+3. For each message (`msg_index` counts only non-initial system messages; messages skipped with `continue` are not counted, same as upstream):
+   - Initial system message: `{role: developer|system, content: full prompt text}` (omitted when `include_system_prompt` is false).
+   - Later system messages: first output tool addition items if needed (see below), then the text rendered by `render_system_message_update`.
+   - user: string → one `input_text`; block list → `input_text` / `input_image` (`detail: auto`, data URL); empty block lists are skipped.
+   - assistant:
+     - thinking: the signature is the JSON of a Responses reasoning item and is parsed back into an input item as is (including `encrypted_content`);
+     - text: the message id and phase are parsed from `textSignature` (`TextSignatureV1` JSON or an old plain-string id; only `commentary` / `final_answer` are kept). Without an id, `msg_pi_<i>` is used, and the Nth text block of the same message uses `msg_pi_<i>_<N>`; ids longer than 64 characters become `msg_<shortHash>`;
+     - toolCall: grammar tools send `custom_tool_call` (`input` taken from the matching argument), otherwise `function_call` (`arguments` is compact JSON). For the same provider/API but a different model, the item id is dropped; an item id whose prefix does not match the type (`fc_` / `ctc_`) is also dropped. `namespace` is replayed only to the same model;
+     - assistant messages with empty output are skipped; when needed, a `configuration_update` is inserted before the message (same model and `provider_thinking_level` recorded).
+   - toolResult: `function_call_output` or `custom_tool_call_output`; `call_id` is the part before `|`. Output: a string when there are no images or the model does not support images (`(no tool output)` when the text is blank, `(see attached image)` when there are only images); otherwise an array of `input_text` + `input_image`.
+4. Finally, if mid-conversation effort is enabled, append `{type: configuration_update, reasoning: {effort}}`.
 
-工具新增项（`supportsAdditionalTools` 或 `supportsToolSearch`，且工具历史只有新增时）：请求级 `tools` 只放开头 system 消息的工具，后续 system 消息新增的工具在原位置加载：
+Tool addition items (`supportsAdditionalTools` or `supportsToolSearch`, and the tool history has only additions): request-level `tools` holds only the tools of the initial system message, and tools added by later system messages are loaded at their original position:
 
-- `supportsAdditionalTools`：`{type: additional_tools, role: developer, tools}`；
-- 否则 `supportsToolSearch`：一对 `tool_search_call` / `tool_search_output`（`execution: client`、`status: completed`），`call_id = pi_tool_load_<shortHash("system:<i>:<names>")>`，输出里的工具带 `defer_loading: true`。
+- `supportsAdditionalTools`: `{type: additional_tools, role: developer, tools}`;
+- otherwise `supportsToolSearch`: a `tool_search_call` / `tool_search_output` pair (`execution: client`, `status: completed`), `call_id = pi_tool_load_<shortHash("system:<i>:<names>")>`; tools in the output carry `defer_loading: true`.
 
-### 工具转换（`convert_responses_tools`）
+### Tool conversion (`convert_responses_tools`)
 
-- 语法工具（`constrainedSampling.type = grammar` 且支持 grammar 工具）：`{type: custom, name, description, format: {type: grammar, syntax: lark|regex, definition}}`。优先 lark。参数 schema 必须是只有一个必填字符串属性的对象，否则报错。
-- 其他工具：`{type: function, name, description, parameters, strict?}`。
-  - `constrainedSampling.type = json_schema` 且支持严格模式、schema 可转为严格子集时 `strict = true`，`parameters` 换成严格 schema（所有属性必填，原本可选的属性改成 `anyOf [原 schema, null]`，`additionalProperties: false`）。
-  - `strict: require` 而无法满足时报错；`prefer` 退回非严格。
-  - 支持严格模式时才发送 `strict` 键。
+- Grammar tools (`constrainedSampling.type = grammar` and grammar tools are supported): `{type: custom, name, description, format: {type: grammar, syntax: lark|regex, definition}}`. lark is preferred. The parameter schema must be an object with exactly one required string property; otherwise it is an error.
+- Other tools: `{type: function, name, description, parameters, strict?}`.
+  - When `constrainedSampling.type = json_schema`, strict mode is supported, and the schema can be converted to the strict subset: `strict = true`, and `parameters` is replaced with the strict schema (all properties required, originally optional properties changed to `anyOf [original schema, null]`, `additionalProperties: false`).
+  - When `strict: require` cannot be satisfied, it is an error; `prefer` falls back to non-strict.
+  - The `strict` key is sent only when strict mode is supported.
 
-## 流事件映射
+## Stream event mapping
 
-SSE 层先模拟 OpenAI SDK：`data: [DONE]` 结束读取；无法解析为 JSON 的数据报错；带非空 `error` 字段的负载以其 `error.message` 报错（不交给回调）。其余负载先交给 `on_provider_stream_event`，再归一化。未知事件类型和条目类型直接跳过。
+The SSE layer first mimics the OpenAI SDK: `data: [DONE]` stops reading; data that cannot be parsed as JSON is an error; a payload with a non-empty `error` field reports its `error.message` (it is not passed to the callback). Other payloads are passed to `on_provider_stream_event` first, then normalized. Unknown event types and item types are skipped.
 
-| Responses 事件 | 处理 |
+| Responses event | Handling |
 | --- | --- |
-| `response.created` | 记录 `response_id` |
-| `response.output_item.added`（reasoning） | 新建 thinking 块，`thinking_start` |
-| `response.output_item.added`（message） | 新建 text 块，`text_start`；`phase = final_answer` 时临时把停止原因设为 `stop` |
-| `response.output_item.added`（function_call） | 新建工具调用，id 为 `call_id|id`，`toolcall_start` |
-| `response.output_item.added`（custom_tool_call） | 新建工具调用，参数为 `{<输入属性>: input}`，`toolcall_start` |
+| `response.created` | Record `response_id` |
+| `response.output_item.added` (reasoning) | New thinking block, `thinking_start` |
+| `response.output_item.added` (message) | New text block, `text_start`; when `phase = final_answer`, temporarily set the stop reason to `stop` |
+| `response.output_item.added` (function_call) | New tool call with id `call_id|id`, `toolcall_start` |
+| `response.output_item.added` (custom_tool_call) | New tool call with arguments `{<input property>: input}`, `toolcall_start` |
 | `response.reasoning_summary_text.delta` / `response.reasoning_text.delta` | `thinking_delta` |
 | `response.reasoning_summary_part.done` | `thinking_delta("\n\n")` |
 | `response.output_text.delta` / `response.refusal.delta` | `text_delta` |
-| `response.function_call_arguments.delta` | 追加参数 JSON，`toolcall_delta` |
-| `response.function_call_arguments.done` | 以完整参数替换；若是已收到内容的延续，补发剩余部分为 `toolcall_delta` |
-| `response.custom_tool_call_input.delta` / `.done` | 原始输入重新编码为 `{"<属性>":"..."}` 的 JSON 增量，`toolcall_delta`；输入必须单调增长 |
-| `response.output_item.done`（reasoning） | 文本取 summary（`\n\n` 连接），否则 content，否则已累积文本；签名为整个推理项的 JSON；`thinking_end` |
-| `response.output_item.done`（message） | 文本取 `output_text` / `refusal` 拼接；签名 `{"v":1,"id":...,"phase":...}`；`text_end` |
-| `response.output_item.done`（function_call / custom_tool_call） | 用条目的最终参数解析（失败时 `arguments_error`），设置 `namespace`，`toolcall_end` |
-| `response.completed` / `response.incomplete` | 终止事件：回填推理项的 `encrypted_content`、`response_id`、用量、费用、停止原因 |
-| `response.failed` | 报错 `<code>: <message>`，或 `incomplete: <reason>`，或 `Unknown error (no error details in response)`；记录 `raw_stop_reason` |
-| `error` | 报错 `Error Code <code>: <message>` |
+| `response.function_call_arguments.delta` | Append argument JSON, `toolcall_delta` |
+| `response.function_call_arguments.done` | Replace with the full arguments; if it continues the content already received, emit the rest as a `toolcall_delta` |
+| `response.custom_tool_call_input.delta` / `.done` | The raw input is re-encoded as a JSON delta `{"<property>":"..."}`, `toolcall_delta`; the input must grow monotonically |
+| `response.output_item.done` (reasoning) | Text from summary (joined with `\n\n`), otherwise content, otherwise the accumulated text; the signature is the JSON of the whole reasoning item; `thinking_end` |
+| `response.output_item.done` (message) | Text is the concatenation of `output_text` / `refusal`; signature `{"v":1,"id":...,"phase":...}`; `text_end` |
+| `response.output_item.done` (function_call / custom_tool_call) | Parse the item's final arguments (`arguments_error` on failure), set `namespace`, `toolcall_end` |
+| `response.completed` / `response.incomplete` | Terminal event: backfill the reasoning items' `encrypted_content`, `response_id`, usage, cost, stop reason |
+| `response.failed` | Error `<code>: <message>`, or `incomplete: <reason>`, or `Unknown error (no error details in response)`; record `raw_stop_reason` |
+| `error` | Error `Error Code <code>: <message>` |
 
-槽位按事件的 `output_index` 区分。缺少 `output_index` 的事件共用一个槽位（与上游 `Map` 的 `undefined` 键一致），因此并行工具调用缺少 `output_index` 时会留下未完成的调用并报错，而不是把参数混在一起执行。
+Slots are keyed by the event's `output_index`. Events without `output_index` share one slot (matching the `undefined` key of upstream's `Map`). So when parallel tool calls lack `output_index`, an unfinished call is left and an error is reported, instead of mixing their arguments together and running them.
 
-### 用量与费用
+### Usage and cost
 
-- `input = input_tokens - cached_tokens - cache_write_tokens`（不小于 0），`cache_read = cached_tokens`，`cache_write = cache_write_tokens`，`output = output_tokens`，`reasoning = reasoning_tokens`（总是设置），`total_tokens` 用服务端的 `total_tokens`（不重新计算）。
-- 费用由 `calculate_cost` 计算；`openai-responses` 再按服务等级乘系数：`flex` ×0.5，`priority` / `fast` ×2（`gpt-5.5` 为 ×2.5）。服务等级优先取响应里的 `service_tier`，没有时取请求的。
+- `input = input_tokens - cached_tokens - cache_write_tokens` (not below 0), `cache_read = cached_tokens`, `cache_write = cache_write_tokens`, `output = output_tokens`, `reasoning = reasoning_tokens` (always set), and `total_tokens` uses the server's `total_tokens` (not recomputed).
+- Cost is computed by `calculate_cost`; `openai-responses` then applies a service tier multiplier: `flex` ×0.5, `priority` / `fast` ×2 (×2.5 for `gpt-5.5`). The service tier is taken from the response's `service_tier` first, and from the request when absent.
 
-### 停止原因
+### Stop reasons
 
-| `status` | 结果 |
+| `status` | Result |
 | --- | --- |
-| 缺失、`completed`、`in_progress`、`queued` | `stop` |
+| Missing, `completed`, `in_progress`, `queued` | `stop` |
 | `incomplete` + `max_output_tokens` | `length` |
-| `incomplete` + 其他原因 | `error`，`Response incomplete: <reason>` |
-| `incomplete` 无原因 | `error`，`Response incomplete without a provider reason` |
-| `failed`、`cancelled` | `error`（无消息，最终为 `An unknown error occurred`） |
-| 其他 | 报错 `Unhandled stop reason: <status>` |
+| `incomplete` + other reason | `error`, `Response incomplete: <reason>` |
+| `incomplete` with no reason | `error`, `Response incomplete without a provider reason` |
+| `failed`, `cancelled` | `error` (no message; ends up as `An unknown error occurred`) |
+| Other | Error `Unhandled stop reason: <status>` |
 
-`raw_stop_reason` 为 `status`，有 incomplete 原因时为 `<status>.<reason>`。结果为 `stop` 且有工具调用时改为 `toolUse`。
+`raw_stop_reason` is `status`, or `<status>.<reason>` when there is an incomplete reason. When the result is `stop` and there are tool calls, it becomes `toolUse`.
 
-流结束时：没有收到终止事件报错 `OpenAI Responses stream ended before a terminal response event`；停止原因为 `toolUse` 但有工具调用没收到 `output_item.done` 时报错 `OpenAI Responses stream completed with an unfinished tool call: <name> (<id>)`。
+At stream end: if no terminal event was received, error `OpenAI Responses stream ended before a terminal response event`; if the stop reason is `toolUse` but a tool call did not receive `output_item.done`, error `OpenAI Responses stream completed with an unfinished tool call: <name> (<id>)`.
 
-## 错误与重试
+## Errors and retries
 
-- 发送使用 `http::send_with_retry`：重试 408/409/429/5xx 和连接错误，遵守 `retry-after-ms` / `retry-after` 和 `max_retry_delay`，可被 `options.cancel` 中断。
-- HTTP 错误格式与上游 `formatProviderError(normalizeProviderError(error), "<前缀> API error")` 一致：正文的 `error` 是非空对象时为 `<前缀> API error (<status>): <error JSON>`，否则为 `<前缀> API error (<status>): <SDK 消息>`（如 `... (502): 502 Bad Gateway`）。前缀在 provider 为 `openai` 时是 `OpenAI`，否则是 provider id。原始正文来自 `Error::Status.body`。其他错误（流内错误、配置错误）保留原消息。
-- `start` 事件在响应被接受、`on_response` 回调之后发出。之后的失败以 `error` 事件结束并带上已收到的内容；取消时停止原因为 `aborted`，消息为 `Request was aborted`；消费方丢弃流时读循环返回 `Error::Aborted` 并停止。
+- Sending uses `http::send_with_retry`: retries 408/409/429/5xx and connection errors, honors `retry-after-ms` / `retry-after` and `max_retry_delay`, and can be interrupted by `options.cancel`.
+- The HTTP error format matches upstream `formatProviderError(normalizeProviderError(error), "<prefix> API error")`: when the body's `error` is a non-empty object, `<prefix> API error (<status>): <error JSON>`; otherwise `<prefix> API error (<status>): <SDK message>` (for example `... (502): 502 Bad Gateway`). The prefix is `OpenAI` when the provider is `openai`, otherwise the provider id. The raw body comes from `Error::Status.body`. Other errors (in-stream errors, configuration errors) keep their original message.
+- The `start` event is emitted after the response is accepted and the `on_response` callback has run. Later failures end with an `error` event carrying the content already received. On cancellation the stop reason is `aborted` with the message `Request was aborted`; when the consumer drops the stream, the read loop returns `Error::Aborted` and stops.
 
-## Rust 特有差异
+## Rust-specific differences
 
-1. 事件不携带共享的 `partial`。`phase = final_answer` 设置的临时 `stop` 停止原因只体现在最终消息里，消费方的 partial 看不到这个中间状态。
-2. `MessageBuilder::end_tool_call` 会用它自己累积的流式 JSON 解析参数。上游用 `output_item.done` 里的完整参数。实现上先设置、调用 `end_tool_call` 后再覆盖一次，所以最终消息与上游一致；但当服务端最终参数不是已流式内容的延续时（例如参数格式错误的用例），`toolcall_end` 事件里的参数是按流式内容解析的。见“需要的核心改动”。
-3. `output_item.added` 里已带的函数参数会作为一个 `toolcall_delta` 发出（上游只放进 `partialJson`，不发事件），这样 builder 解析的 JSON 与上游的 `partialJson` 一致。
-4. `MessageBuilder` 跳过空的 text/thinking/toolcall 增量，上游会发出空增量事件。
-5. 停止原因为 `length` 时，`spawn_stream` 会对仍未完成的工具调用调用 `end_open_tool_calls` 发出 `toolcall_end`；上游不发。
-6. HTTP 错误正文先去掉首尾空白并截断到 4000 字符（`Error::Status.body`）：超过 4000 字符的 JSON 正文无法解析，按文本处理；`error` 对象由 `serde_json` 重新序列化，浮点数写法可能与 `JSON.stringify` 不同。
-7. `sanitizeSurrogates` 不需要：Rust 字符串不会含孤立代理项。
-8. `stream_simple` 缺少 API key 时上游同步抛错，这里返回以同样消息结束的错误流。
-9. 约束采样在 `api::constrained_sampling`，`shortHash` 在 `api::common`；`openai_responses_shared` 重新导出 `short_hash` 和 `create_grammar_tool_input_properties`。prompt cache key 截断仍是本模块的公开辅助函数。
-10. SSE 数据不是 JSON 时的错误消息格式为 `Could not parse message into JSON: <原因>: <数据>`（SDK 抛出的是 JSON 解析异常本身）。
-11. 用量字段接受浮点数并取整，负数按 0 处理。
+1. Events do not carry a shared `partial`. The temporary `stop` stop reason set by `phase = final_answer` only shows up in the final message; the consumer's partial does not see this intermediate state.
+2. `MessageBuilder::end_tool_call` parses arguments from the streamed JSON it has accumulated itself. Upstream uses the full arguments in `output_item.done`. The implementation sets them first, calls `end_tool_call`, and then overwrites them again, so the final message matches upstream. But when the server's final arguments do not continue the streamed content (for example the malformed-arguments test case), the arguments in the `toolcall_end` event are parsed from the streamed content. See "Required core changes".
+3. Function arguments already present in `output_item.added` are emitted as one `toolcall_delta` (upstream only puts them into `partialJson` and emits no event), so the JSON parsed by the builder matches upstream's `partialJson`.
+4. `MessageBuilder` skips empty text/thinking/toolcall deltas; upstream emits empty delta events.
+5. When the stop reason is `length`, `spawn_stream` calls `end_open_tool_calls` for tool calls still unfinished and emits `toolcall_end`; upstream does not.
+6. The HTTP error body is first trimmed and truncated to 4000 characters (`Error::Status.body`): a JSON body longer than 4000 characters cannot be parsed and is treated as text; the `error` object is re-serialized by `serde_json`, so float formatting may differ from `JSON.stringify`.
+7. `sanitizeSurrogates` is not needed: Rust strings never contain lone surrogates.
+8. When `stream_simple` has no API key, upstream throws synchronously; here an error stream ending with the same message is returned.
+9. Constrained sampling is in `api::constrained_sampling` and `shortHash` is in `api::common`; `openai_responses_shared` re-exports `short_hash` and `create_grammar_tool_input_properties`. Prompt cache key truncation is still a public helper of this module.
+10. When SSE data is not JSON, the error message format is `Could not parse message into JSON: <reason>: <data>` (the SDK throws the JSON parse exception itself).
+11. Usage fields accept floats and round them to integers; negative values are treated as 0.
 
-## 未移植
+## Not ported
 
-- Sign in with ChatGPT：上游对 `provider = openai`、`baseUrl = https://api.openai.com/v1` 且 key 不以 `sk-` 开头的请求省略 `prompt_cache_retention`、`prompt_cache_options`、`max_output_tokens`、`temperature`，不发 `configuration_update`，并在 `subscription_sharing_usage_limit_exceeded` 错误后追加 ChatGPT 用量链接。按本次范围未移植，代码中有 `// Not ported` 注释。
-- GitHub Copilot 动态请求头（`X-Initiator`、`Copilot-Vision-Request`）。
-- OpenAI Codex（ChatGPT 订阅）API `openai-codex-responses`、WebSocket 传输、遥测、`fetch` 选项（由 `StreamOptions::http_client` 替代）。
+- Sign in with ChatGPT: for requests with `provider = openai`, `baseUrl = https://api.openai.com/v1` and a key that does not start with `sk-`, upstream omits `prompt_cache_retention`, `prompt_cache_options`, `max_output_tokens` and `temperature`, does not send `configuration_update`, and appends a ChatGPT usage link after a `subscription_sharing_usage_limit_exceeded` error. Not ported because it is out of scope for this work; the code has a `// Not ported` comment.
+- GitHub Copilot dynamic request headers (`X-Initiator`, `Copilot-Vision-Request`).
+- The OpenAI Codex (ChatGPT subscription) API `openai-codex-responses`, WebSocket transport, telemetry, the `fetch` option (replaced by `StreamOptions::http_client`).
 
-## 需要的核心改动（未在本次实现）
+## Required core changes (not implemented in this work)
 
-- `events.rs`：给 `MessageBuilder` 增加 `end_tool_call_with(index: usize, arguments: JsonObject, arguments_error: Option<String>)`（或替换已累积 JSON 的方法），让 `toolcall_end` 事件直接带上 API 给出的最终参数，消除差异 2。
+- `events.rs`: add `end_tool_call_with(index: usize, arguments: JsonObject, arguments_error: Option<String>)` to `MessageBuilder` (or a method that replaces the accumulated JSON), so that the `toolcall_end` event carries the final arguments given by the API directly. This removes difference 2.
 
-## 待确认的改进
+## Improvements pending confirmation
 
-- 未知 `status` 目前按上游报错（`Unhandled stop reason`）。provider-references 建议未知结束原因不应是硬错误，可以改为 `stop` 并保留 `raw_stop_reason`。
-- `function_call_arguments.done` / `custom_tool_call_input.done` 缺少参数字段时目前忽略（上游会抛 TypeError）；可以考虑明确报错。
-- 缺少 `item.id` 的工具调用 id 会是 `call_x|undefined`（与上游和 pi-py 一致），可以考虑改为只用 `call_id`。
+- An unknown `status` currently reports an error as upstream does (`Unhandled stop reason`). provider-references suggests that an unknown finish reason should not be a hard error; it could become `stop` while keeping `raw_stop_reason`.
+- When `function_call_arguments.done` / `custom_tool_call_input.done` lack the argument field, it is currently ignored (upstream throws TypeError); an explicit error could be considered.
+- A tool call id with a missing `item.id` becomes `call_x|undefined` (same as upstream and pi-py); using only `call_id` could be considered.

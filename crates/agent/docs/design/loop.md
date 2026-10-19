@@ -1,25 +1,25 @@
-# 底层循环与钩子（`agent_loop`、`hooks`）
+# Low-level loop and hooks (`agent_loop`, `hooks`)
 
-对应上游 `src/agent-loop.ts`、`src/stream-fn.ts` 和 `types.ts` 里的 `AgentLoopConfig`。
+Corresponds to upstream `src/agent-loop.ts`, `src/stream-fn.ts` and `AgentLoopConfig` in `types.ts`.
 
-## 入口
+## Entry points
 
-| 函数 | 上游 | 说明 |
+| Function | Upstream | Notes |
 | --- | --- | --- |
-| `run_agent_loop(prompts, context, config, sink, cancel, stream_fn)` | `runAgentLoop` | 把 `prompts` 加入上下文并发出事件，然后进入循环。返回本次新增的消息 |
-| `run_agent_loop_continue(context, config, sink, cancel, stream_fn)` | `runAgentLoopContinue` | 不加新消息，从当前上下文继续（重试）。最后一条消息不能是 assistant，否则 `AgentLoopError` |
-| `agent_loop(..)` / `agent_loop_continue(..)` | `agentLoop` / `agentLoopContinue` | 在 Tokio 任务里运行上面两个函数，返回 `AgentEventStream` |
+| `run_agent_loop(prompts, context, config, sink, cancel, stream_fn)` | `runAgentLoop` | Adds `prompts` to the context and emits their events, then enters the loop. Returns the messages added in this run |
+| `run_agent_loop_continue(context, config, sink, cancel, stream_fn)` | `runAgentLoopContinue` | Adds no new messages and continues from the current context (retry). The last message must not be assistant, otherwise `AgentLoopError` |
+| `agent_loop(..)` / `agent_loop_continue(..)` | `agentLoop` / `agentLoopContinue` | Run the two functions above in a Tokio task and return an `AgentEventStream` |
 
-`run_*` 版本把事件交给 `AgentEventSink`，并 await 每次 `emit`：事件接收端处理完一个事件，循环才继续。`Agent` 用这个保证监听器按顺序执行且计入运行结束（见 [agent.md](agent.md)）。
+The `run_*` versions hand events to an `AgentEventSink` and await every `emit`: the loop continues only after the sink has processed the event. `Agent` relies on this so that listeners run in order and count toward the end of the run (see [agent.md](agent.md)).
 
-`agent_loop` 版本把事件放进无界通道，循环不等消费者。`AgentEventStream` 实现 `Stream<Item = AgentEvent<C>>`；`result()` 排空事件并返回新增消息。运行结束前 drop 这个流会取消运行：循环拿到的是调用方令牌的子令牌，drop 只取消子令牌，不影响调用方的令牌。
+The `agent_loop` versions put events into an unbounded channel; the loop does not wait for the consumer. `AgentEventStream` implements `Stream<Item = AgentEvent<C>>`; `result()` drains the events and returns the added messages. Dropping this stream before the run ends cancels the run: the loop gets a child token of the caller's token, and drop cancels only the child token, not the caller's token.
 
-## 配置
+## Config
 
 ```rust
 pub struct AgentLoopConfig<C> {
     pub model: Model,
-    pub stream_options: SimpleStreamOptions,   // reasoning 即思考级别；cancel、api_key 每次请求由循环设置
+    pub stream_options: SimpleStreamOptions,   // reasoning is the thinking level; cancel and api_key are set by the loop for each request
     pub tool_execution: ToolExecutionMode,
     pub hooks: Arc<dyn AgentHooks<C>>,
     pub get_steering_messages: Option<MessageSource<C>>,
@@ -27,7 +27,7 @@ pub struct AgentLoopConfig<C> {
 }
 ```
 
-上游 `AgentLoopConfig` 继承 `SimpleStreamOptions`，并把各个回调平铺在同一个对象上。delta 把请求选项放在 `stream_options` 字段，把回调收进 `hooks`。`MessageSource<C>` 是返回 `BoxFuture<Vec<AgentMessage<C>>>` 的闭包，对应上游的 `getSteeringMessages` / `getFollowUpMessages`。
+Upstream `AgentLoopConfig` extends `SimpleStreamOptions` and puts all callbacks flat on the same object. delta puts the request options in the `stream_options` field and collects the callbacks in `hooks`. `MessageSource<C>` is a closure that returns `BoxFuture<Vec<AgentMessage<C>>>`, corresponding to upstream's `getSteeringMessages` / `getFollowUpMessages`.
 
 ## `StreamFn`
 
@@ -37,57 +37,57 @@ pub type StreamFn = Arc<
 >;
 ```
 
-- 输入是已规范化的 `TranscriptContext`（system prompt 和工具声明都在 system 消息里）。
-- 失败必须编码在返回的流里（`Error` 事件），不能 panic。
-- `models_stream_fn(models)` 把 `delta_ai::Models::stream_simple` 适配成 `StreamFn`，是常规用法；`stream_proxy`（见 [proxy.md](proxy.md)）是另一种实现；测试里直接构造。
-- 上游有全局的 `setDefaultStreamFn`，调用方不传 `streamFn` 时使用。delta 不设全局状态，`StreamFn` 必须显式传入。
+- The input is a normalized `TranscriptContext` (the system prompt and tool declarations are in system messages).
+- Failures must be encoded in the returned stream (an `Error` event), not raised as a panic.
+- `models_stream_fn(models)` adapts `delta_ai::Models::stream_simple` into a `StreamFn`; this is the normal usage. `stream_proxy` (see [proxy.md](proxy.md)) is another implementation. Tests construct one directly.
+- Upstream has a global `setDefaultStreamFn`, used when the caller passes no `streamFn`. delta keeps no global state; `StreamFn` must be passed explicitly.
 
 ## `AgentHooks<C>`
 
-上游的回调合并成一个 trait，每个方法都有默认实现，应用只实现需要的方法：
+Upstream's callbacks are merged into one trait. Every method has a default implementation, and an application implements only the methods it needs:
 
-| 方法 | 上游 | 调用时机 | 默认 |
+| Method | Upstream | When called | Default |
 | --- | --- | --- | --- |
-| `convert_to_llm(messages)` | `convertToLlm` | 每次请求前，`transform_context` 之后 | 保留 LLM 消息，丢弃自定义消息 |
-| `transform_context(messages, cancel)` | `transformContext` | 每次请求前，在 `convert_to_llm` 之前（裁剪、注入上下文） | 原样返回 |
-| `get_api_key(provider)` | `getApiKey` | 每次请求前，用于短期 token | `None`：使用 `stream_options` 里配置的 key |
-| `before_tool_call(ctx, cancel)` | `beforeToolCall` | 参数校验后、执行前 | 不拦截 |
-| `after_tool_call(ctx, cancel)` | `afterToolCall` | 执行后、`ToolExecutionEnd` 前 | 不覆盖 |
-| `finish_turn(turn, cancel)` | `finishTurn` | 本轮助手消息和工具结果都已加入上下文、`TurnEnd` 之前 | 不干预。回复失败时决定被忽略 |
-| `prepare_request(request, cancel)` | `prepareRequest` | 每次请求前（包括第一次），待追加消息已加入之后 | 不修改。不读队列 |
-| `prepare_next_turn(turn, cancel)` | `prepareNextTurn` | 循环继续时，`TurnEnd` 之后、下一轮 `TurnStart` 之前 | 不修改 |
+| `convert_to_llm(messages)` | `convertToLlm` | Before each request, after `transform_context` | Keep LLM messages, drop custom messages |
+| `transform_context(messages, cancel)` | `transformContext` | Before each request, before `convert_to_llm` (trim, inject context) | Return unchanged |
+| `get_api_key(provider)` | `getApiKey` | Before each request, for short-lived tokens | `None`: use the key configured in `stream_options` |
+| `before_tool_call(ctx, cancel)` | `beforeToolCall` | After argument validation, before execution | Do not block |
+| `after_tool_call(ctx, cancel)` | `afterToolCall` | After execution, before `ToolExecutionEnd` | Do not override |
+| `finish_turn(turn, cancel)` | `finishTurn` | After this turn's assistant message and tool results are in the context, before `TurnEnd` | Do not intervene. The decision is ignored when the reply failed |
+| `prepare_request(request, cancel)` | `prepareRequest` | Before each request (including the first), after pending messages are added | Do not modify. Does not read the queues |
+| `prepare_next_turn(turn, cancel)` | `prepareNextTurn` | When the loop continues, after `TurnEnd` and before the next `TurnStart` | Do not modify |
 
-钩子的输入是借用的上下文结构体（`BeforeToolCallContext<'a, C>`、`AgentTurnContext<'a, C>` 等），方法签名形如 `fn(&'a self, ctx: Ctx<'a, C>, cancel: &'a CancellationToken) -> BoxFuture<'a, Option<R>>`。把这八个回调写成独立的 `Arc<dyn Fn>` 需要每个都带高阶生命周期约束，trait 方法更好写也更好实现。`DefaultHooks` 是全部使用默认实现的空结构体。
+Hook inputs are borrowed context structs (`BeforeToolCallContext<'a, C>`, `AgentTurnContext<'a, C>` and so on). Method signatures look like `fn(&'a self, ctx: Ctx<'a, C>, cancel: &'a CancellationToken) -> BoxFuture<'a, Option<R>>`. Writing these eight callbacks as separate `Arc<dyn Fn>` would need a higher-ranked lifetime bound on each; trait methods are easier to write and to implement. `DefaultHooks` is an empty struct that uses all the default implementations.
 
-`prepare_request` 返回 `AgentRequestUpdate { context, model, thinking_level }`，`prepare_next_turn` 返回 `AgentLoopTurnUpdate`（多一个 `messages`：下一次请求前要追加的消息，会正常发出生命周期事件）。替换的值对本次及之后的请求都生效。
+`prepare_request` returns `AgentRequestUpdate { context, model, thinking_level }`. `prepare_next_turn` returns `AgentLoopTurnUpdate`, which has one more field, `messages`: messages to append before the next request; they emit lifecycle events as usual. Replaced values apply to this request and all later ones.
 
-## 循环
+## The loop
 
-流程图见 [README.md](README.md#总体结构)。和上游逐步对应：
+The flow chart is in [README.md](README.md#overall-structure). Step by step, matching upstream:
 
-1. **开始**：`AgentStart`、`TurnStart`。`run_agent_loop` 先把 prompts 经 `declare_tool_changes` 处理后加入上下文并发出 `MessageStart`/`MessageEnd`。然后读一次 steering 队列（运行启动前排队的消息）。
-2. **准备本轮**：不是第一轮时调用 `prepare_next_turn`；如果此时没有待处理消息，再读一次 steering 队列（准备可能很慢，例如压缩上下文），然后发 `TurnStart`。
-3. **追加待处理消息**：`prepare_next_turn` 给的消息加上队列消息，经 `declare_tool_changes` 后逐条发事件并加入上下文。
-4. **`prepare_request`**。
-5. **流式请求**：`transform_context` → `convert_to_llm` → `normalize_context`，解析 API key，调用 `StreamFn`。provider 事件转成 `MessageStart` / `MessageUpdate` / `MessageEnd`。流在没有 `Done`/`Error` 的情况下结束时，记为错误 `Stream ended without a final message`。最终消息的 `thinking_level` 记录请求的级别。
-6. **失败**：回复以 `error`/`aborted` 结束时，调用 `finish_turn`（忽略决定），发 `TurnEnd`、`AgentEnd`，结束。
-7. **工具**：有工具调用时执行（见 [tools.md](tools.md)），结果加入上下文。全部结果都要求 `terminate` 时，本批之后不再因工具调用而继续。
-8. **结束本轮**：`finish_turn`，`TurnEnd`。决定为 `End` 时发 `AgentEnd` 并结束。
-9. **继续条件**：读 steering 队列。还有工具调用要继续或有 steering 消息时回到第 2 步。否则读 follow-up 队列，有消息时回到第 2 步；都没有但 `finish_turn` 返回了 `Continue` 时，再跑一轮只用当前上下文的请求；否则发 `AgentEnd` 结束。
+1. **Start**: `AgentStart`, `TurnStart`. `run_agent_loop` first passes the prompts through `declare_tool_changes`, adds them to the context and emits `MessageStart`/`MessageEnd`. Then it reads the steering queue once (messages queued before the run started).
+2. **Prepare the turn**: if this is not the first turn, call `prepare_next_turn`. If there are no pending messages at this point, read the steering queue once more (preparation can be slow, for example when compacting the context), then emit `TurnStart`.
+3. **Append pending messages**: the messages from `prepare_next_turn` plus the queued messages go through `declare_tool_changes`, then each one emits its events and is added to the context.
+4. **`prepare_request`**.
+5. **Streaming request**: `transform_context` → `convert_to_llm` → `normalize_context`, resolve the API key, call `StreamFn`. Provider events become `MessageStart` / `MessageUpdate` / `MessageEnd`. If the stream ends without `Done`/`Error`, it is recorded as the error `Stream ended without a final message`. The final message's `thinking_level` records the requested level.
+6. **Failure**: when the reply ends with `error`/`aborted`, call `finish_turn` (decision ignored), emit `TurnEnd` and `AgentEnd`, and stop.
+7. **Tools**: if there are tool calls, run them (see [tools.md](tools.md)) and add the results to the context. When all results request `terminate`, the loop does not continue because of tool calls after this batch.
+8. **End the turn**: `finish_turn`, `TurnEnd`. If the decision is `End`, emit `AgentEnd` and stop.
+9. **Continue condition**: read the steering queue. If there are tool calls to continue with or steering messages, go back to step 2. Otherwise read the follow-up queue; if it has messages, go back to step 2. If neither has messages but `finish_turn` returned `Continue`, run one more request with only the current context. Otherwise emit `AgentEnd` and stop.
 
-### 工具声明变更（`declare_tool_changes`）
+### Tool declaration changes (`declare_tool_changes`)
 
-`context.tools` 是运行时可以执行的工具；对话记录里的 system 消息声明模型可以调用哪些工具（`delta_ai` 的 transcript 设计，见 [delta_ai transcript.md](../../../ai/docs/design/transcript.md)）。两者不一致时（例如应用调用了 `Agent::set_tools`），下一次请求前把差异写成 system 消息上的 `tools_added` / `tools_removed`：
+`context.tools` holds the tools that can run at runtime. System messages in the transcript declare which tools the model may call (the `delta_ai` transcript design, see [delta_ai transcript.md](../../../ai/docs/design/transcript.md)). When the two disagree (for example after the application calls `Agent::set_tools`), the difference is written as `tools_added` / `tools_removed` on a system message before the next request:
 
-- 待追加的消息里有 system 消息时，改写最后一条：它的工具字段替换为差异。
-- 否则在第一条非 system 消息前插入一条新的 system 消息。
-- 没有差异且调用方的 system 消息本身没声明变更时，原样保留。
+- If the messages to append include a system message, rewrite the last one: its tool fields are replaced by the difference.
+- Otherwise insert a new system message before the first non-system message.
+- If there is no difference and the caller's system message declares no change itself, keep it unchanged.
 
-这个函数是公开的，与上游一样，应用可以在自己构造消息时使用。
+This function is public, as upstream, so applications can use it when they build messages themselves.
 
-## 与上游的差异
+## Differences from upstream
 
-- 配置拆成 `stream_options` + `hooks` + 队列来源，见上。
-- 没有全局默认 `StreamFn`。
-- 上下文里存的是 `Done`/`Error` 事件携带的最终消息；上游存的是流式过程中原地修改的 partial 对象，内容相同。
-- `agent_loop` 返回的流被 drop 时取消运行；上游的 `EventStream` 没有取消语义。
+- Config is split into `stream_options` + `hooks` + queue sources; see above.
+- No global default `StreamFn`.
+- The context stores the final message carried by the `Done`/`Error` event. Upstream stores the partial object mutated in place during streaming. The content is the same.
+- Dropping the stream returned by `agent_loop` cancels the run. Upstream's `EventStream` has no cancellation semantics.

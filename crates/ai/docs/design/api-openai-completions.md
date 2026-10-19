@@ -1,210 +1,252 @@
 # openai-completions API
 
-## 目的
+## Purpose
 
-`openai-completions` 是 OpenAI Chat Completions 协议的实现，也覆盖所有 OpenAI 兼容端点
-（DeepSeek、z.ai、Moonshot、Together、OpenRouter、Vercel AI Gateway、Cloudflare、NVIDIA NIM、
-vLLM、llama.cpp、SGLang 等）。服务端之间的差异由模型上的 `OpenAICompletionsCompat` 描述；
-未设置的字段按 provider id 和 base URL 自动探测。
+`openai-completions` implements the OpenAI Chat Completions protocol. It also covers all
+OpenAI-compatible endpoints (DeepSeek, z.ai, Moonshot, Together, OpenRouter, Vercel AI Gateway,
+Cloudflare, NVIDIA NIM, vLLM, llama.cpp, SGLang, and others). Differences between servers are
+described by `OpenAICompletionsCompat` on the model; fields that are not set are detected
+automatically from the provider id and the base URL.
 
-模块：`crates/ai/src/api/openai_completions.rs`（单元结构体 `OpenAICompletionsApi`，实现
-`ProviderStreams`）。严格 JSON schema 工具和 OpenAI grammar 自定义工具在共享模块
-`api/constrained_sampling.rs`，`shortHash` 在 `api::common::short_hash`；为兼容旧路径，本模块重新导出
-`openai_completions::constrained_sampling` 和 `openai_completions::short_hash`。选项为
-`ApiOptions::OpenAICompletions(OpenAICompletionsOptions)`。
+Module: `crates/ai/src/api/openai_completions.rs` (unit struct `OpenAICompletionsApi`, which
+implements `ProviderStreams`). Strict JSON schema tools and OpenAI grammar custom tools live in the
+shared module `api/constrained_sampling.rs`, and `shortHash` is in `api::common::short_hash`. For
+compatibility with the old paths, this module re-exports `openai_completions::constrained_sampling`
+and `openai_completions::short_hash`. Options are
+`ApiOptions::OpenAICompletions(OpenAICompletionsOptions)`.
 
-## 上游源文件
+## Upstream source files
 
-- `packages/ai/src/api/openai-completions.ts`（主体：compat 探测、请求参数、消息转换、流处理）
-- `packages/ai/src/api/openai-prompt-cache.ts`（`prompt_cache_key` 截断到 64 个字符）
-- `packages/ai/src/api/constrained-sampling.ts`（严格 schema 转换、grammar 工具）
-- `packages/ai/src/utils/hash.ts`（`shortHash`，用于工具调用 id 归一化）
-- 参考测试：`test/openai-completions-*.test.ts`、`constrained-sampling.test.ts`；pi-py 的
-  `tests/test_openai_completions.py`。
+- `packages/ai/src/api/openai-completions.ts` (main body: compat detection, request parameters,
+  message conversion, stream handling)
+- `packages/ai/src/api/openai-prompt-cache.ts` (truncates `prompt_cache_key` to 64 characters)
+- `packages/ai/src/api/constrained-sampling.ts` (strict schema conversion, grammar tools)
+- `packages/ai/src/utils/hash.ts` (`shortHash`, used to normalize tool call ids)
+- Reference tests: `test/openai-completions-*.test.ts`, `constrained-sampling.test.ts`; pi-py's
+  `tests/test_openai_completions.py`.
 
-## Compat 解析
+## Compat resolution
 
-`get_compat(model)` = `detect_compat(model)` 被 `model.compat` 中显式设置的字段逐项覆盖
-（`vllmPriority` 只取显式值）。探测规则与上游一致：
+`get_compat(model)` = `detect_compat(model)`, overridden field by field by the fields explicitly set
+in `model.compat` (`vllmPriority` only takes an explicit value). The detection rules match upstream:
 
-| 条件 | 结果 |
+| Condition | Result |
 | --- | --- |
-| 非标准端点：NVIDIA、Cerebras、xAI、Together、chutes.ai、DeepSeek、z.ai、Moonshot、OpenCode、Cloudflare Workers AI / AI Gateway、Ant Ling | 不发 `store`；不用 developer 角色 |
-| chutes.ai、DeepSeek、Moonshot、Cloudflare AI Gateway、Together、NVIDIA、Ant Ling、z.ai | 用 `max_tokens`，否则 `max_completion_tokens` |
-| xAI、z.ai、Moonshot、Together、AI Gateway、NVIDIA、Ant Ling | 不支持 `reasoning_effort` |
-| OpenRouter | `thinkingFormat=openrouter`；默认发会话亲和头（`x-session-id`）；只有 `anthropic/`、`openai/` 模型用 developer 角色 |
-| provider 为 `openrouter` 且模型 id 以 `anthropic/` 开头 | `cacheControlFormat=anthropic` |
-| DeepSeek / z.ai / Together / Ant Ling | 对应的 `thinkingFormat`；DeepSeek 还要求 assistant 消息带 `reasoning_content` |
-| Together、Cloudflare、NVIDIA、Ant Ling | 不支持长缓存保留 |
-| 其他 | `thinkingFormat=openai`，`supportsStrictMode=false`（OpenAI 兼容不代表支持严格工具） |
+| Non-standard endpoints: NVIDIA, Cerebras, xAI, Together, chutes.ai, DeepSeek, z.ai, Moonshot, OpenCode, Cloudflare Workers AI / AI Gateway, Ant Ling | Do not send `store`; do not use the developer role |
+| chutes.ai, DeepSeek, Moonshot, Cloudflare AI Gateway, Together, NVIDIA, Ant Ling, z.ai | Use `max_tokens`; otherwise `max_completion_tokens` |
+| xAI, z.ai, Moonshot, Together, AI Gateway, NVIDIA, Ant Ling | `reasoning_effort` not supported |
+| OpenRouter | `thinkingFormat=openrouter`; sends the session affinity header (`x-session-id`) by default; only `anthropic/` and `openai/` models use the developer role |
+| provider is `openrouter` and the model id starts with `anthropic/` | `cacheControlFormat=anthropic` |
+| DeepSeek / z.ai / Together / Ant Ling | The matching `thinkingFormat`; DeepSeek also requires `reasoning_content` on assistant messages |
+| Together, Cloudflare, NVIDIA, Ant Ling | Long cache retention not supported |
+| Other | `thinkingFormat=openai`, `supportsStrictMode=false` (being OpenAI-compatible does not mean strict tools are supported) |
 
-## 请求映射
+## Request mapping
 
-`POST {baseUrl}/chat/completions`（`baseUrl` 为空时用 `https://api.openai.com/v1`，与 OpenAI SDK 一致）。
+`POST {baseUrl}/chat/completions` (when `baseUrl` is empty, `https://api.openai.com/v1` is used,
+same as the OpenAI SDK).
 
-请求头按顺序合并（后者覆盖前者，`None` 删除）：`Accept`/`Content-Type: application/json`、
-`Authorization: Bearer <key>`、`User-Agent`、`model.headers`、会话亲和头、`options.headers`。
-没有 API key 时，若 `authorization` 或 `cf-aig-authorization` 头非空，key 记为 `unused`（与上游
-相同，可用 `Authorization: None` 删除默认头）；否则流以 `No API key for provider: <p>` 失败。
+Request headers are merged in order (later entries override earlier ones, `None` deletes):
+`Accept`/`Content-Type: application/json`, `Authorization: Bearer <key>`, `User-Agent`,
+`model.headers`, session affinity headers, `options.headers`. When there is no API key but the
+`authorization` or `cf-aig-authorization` header is non-empty, the key is recorded as `unused` (same
+as upstream; the default header can be deleted with `Authorization: None`). Otherwise the stream
+fails with `No API key for provider: <p>`.
 
-会话亲和头只在 `sendSessionAffinityHeaders` 且缓存保留不为 `none` 且有 `session_id` 时发送：
-`openrouter` 格式发 `x-session-id`；其他格式发 `x-client-request-id`、`x-session-affinity`，
-`openai` 格式另加 `session_id`。
+Session affinity headers are sent only when `sendSessionAffinityHeaders` is set, cache retention is
+not `none`, and there is a `session_id`. The `openrouter` format sends `x-session-id`; other formats
+send `x-client-request-id` and `x-session-affinity`, and the `openai` format also adds `session_id`.
 
-请求体字段（顺序与上游相同）：
+Request body fields (same order as upstream):
 
-| 字段 | 来源 |
+| Field | Source |
 | --- | --- |
-| `model`、`messages`、`stream: true` | 模型 id、转换后的消息 |
-| `prompt_cache_key` | base URL 含 `api.openai.com` 且保留不为 `none`，或长保留且 `supportsLongCacheRetention`；值为截断到 64 字符的 `session_id` |
-| `prompt_cache_retention: "24h"` | 长保留且 `supportsLongCacheRetention` |
-| `stream_options.include_usage` | `supportsUsageInStreaming` 不为 false |
+| `model`, `messages`, `stream: true` | Model id, converted messages |
+| `prompt_cache_key` | The base URL contains `api.openai.com` and retention is not `none`, or retention is long and `supportsLongCacheRetention`; the value is `session_id` truncated to 64 characters |
+| `prompt_cache_retention: "24h"` | Long retention and `supportsLongCacheRetention` |
+| `stream_options.include_usage` | `supportsUsageInStreaming` is not false |
 | `store: false` | `supportsStore` |
-| `max_tokens` / `max_completion_tokens` | `options.max_tokens`（大于 0 时），字段名由 `maxTokensField` 决定 |
+| `max_tokens` / `max_completion_tokens` | `options.max_tokens` (when greater than 0); the field name is decided by `maxTokensField` |
 | `temperature` | `options.temperature` |
-| `tools` | 当前工具（见下）；没有工具但历史中有工具调用/结果时发 `tools: []`（LiteLLM 代理 Anthropic 时需要） |
-| `tool_stream: true` | 有工具且 `zaiToolStream` |
-| `tool_choice` | API 选项中的原始值 |
+| `tools` | Current tools (see below); when there are no tools but the history has tool calls/results, send `tools: []` (needed when LiteLLM proxies Anthropic) |
+| `tool_stream: true` | Has tools and `zaiToolStream` |
+| `tool_choice` | Raw value from the API options |
 | `priority` | `vllmPriority` |
-| 推理字段 | 见下表 |
-| `thinking_token_budget` / `thinking_budget` / `thinking_budget_tokens` | `thinkingTokenBudgetField`（`supportsThinkingTokenBudget` 时默认第一个）且有预算 |
-| `provider` | 显式 `openRouterRouting` |
-| `providerOptions.gateway` | 显式 `vercelGatewayRouting` 的 `only`/`order` |
-| 采样参数 | 最后合并：模型 `samplingParams`、按推理级别的覆盖、请求 `sampling_params`，覆盖同名字段 |
+| Reasoning fields | See the table below |
+| `thinking_token_budget` / `thinking_budget` / `thinking_budget_tokens` | `thinkingTokenBudgetField` (defaults to the first one when `supportsThinkingTokenBudget`) and there is a budget |
+| `provider` | Explicit `openRouterRouting` |
+| `providerOptions.gateway` | `only`/`order` of explicit `vercelGatewayRouting` |
+| Sampling parameters | Merged last: model `samplingParams`, per-reasoning-level overrides, request `sampling_params`; they overwrite fields with the same name |
 
-缓存保留：`options.cache_retention`，否则环境变量 `PI_CACHE_RETENTION=long`，否则 `short`。
+Cache retention: `options.cache_retention`; otherwise the environment variable
+`PI_CACHE_RETENTION=long`; otherwise `short`.
 
-推理字段（仅 `model.reasoning` 时；`effort` 为请求的推理级别，`map[x]` 为 `thinkingLevelMap`）：
+Reasoning fields (only when `model.reasoning`; `effort` is the requested reasoning level, `map[x]` is
+`thinkingLevelMap`):
 
-| `thinkingFormat` | 字段 |
+| `thinkingFormat` | Fields |
 | --- | --- |
-| `zai` | `thinking: {type: enabled, clear_thinking: false}` 或 `{type: disabled}`；支持时 `reasoning_effort`（未映射用级别名，映射为 null 则不发） |
-| `qwen` | `enable_thinking`；支持时 `reasoning_effort = map[effort] ?? effort` |
+| `zai` | `thinking: {type: enabled, clear_thinking: false}` or `{type: disabled}`; `reasoning_effort` when supported (the level name when unmapped; not sent when mapped to null) |
+| `qwen` | `enable_thinking`; `reasoning_effort = map[effort] ?? effort` when supported |
 | `qwen-chat-template` | `chat_template_kwargs: {enable_thinking, preserve_thinking: true}` |
-| `chat-template` | `chat_template_kwargs`：字面值原样；`$var` 为 `thinking.enabled`（布尔）、`thinking.effort`（映射值或级别名）、`thinking.budget`（截断后的预算）；`omitWhenOff` 在关闭推理时省略 |
-| `baseten` | `chat_template_args`（同上），支持时 `reasoning_effort`（关闭时取 `map.off`） |
-| `deepseek` | `thinking: {type: enabled}`，关闭时 `{type: disabled}`（`map.off` 为 null 则不发）；支持时 `reasoning_effort` |
-| `openrouter` | `reasoning: {effort}`，关闭时 `{effort: map.off ?? "none"}`（`map.off` 为 null 则不发） |
-| `ant-ling` | 只在 `map[effort]` 为字符串时发 `reasoning: {effort}` |
-| `together` | `reasoning: {enabled}`；支持时 `reasoning_effort` |
-| `string-thinking` | `thinking: map[effort] ?? effort`，关闭时 `map.off ?? "none"` |
-| `openai` | 支持时 `reasoning_effort = map[effort] ?? effort`；关闭时只在 `map.off` 是字符串时发送 |
+| `chat-template` | `chat_template_kwargs`: literals as is; `$var` is `thinking.enabled` (boolean), `thinking.effort` (mapped value or level name), `thinking.budget` (budget after clamping); `omitWhenOff` omits it when reasoning is off |
+| `baseten` | `chat_template_args` (same as above), `reasoning_effort` when supported (`map.off` when off) |
+| `deepseek` | `thinking: {type: enabled}`, `{type: disabled}` when off (not sent when `map.off` is null); `reasoning_effort` when supported |
+| `openrouter` | `reasoning: {effort}`, `{effort: map.off ?? "none"}` when off (not sent when `map.off` is null) |
+| `ant-ling` | Sends `reasoning: {effort}` only when `map[effort]` is a string |
+| `together` | `reasoning: {enabled}`; `reasoning_effort` when supported |
+| `string-thinking` | `thinking: map[effort] ?? effort`, `map.off ?? "none"` when off |
+| `openai` | `reasoning_effort = map[effort] ?? effort` when supported; when off, sent only if `map.off` is a string |
 
-思考预算：只在有推理级别时计算，`xhigh`/`max` 按 `high`，上限为 `max_tokens`（未给出时为模型
-`maxTokens`）减 1024，结果为 0 时不发。
+Thinking budget: computed only when there is a reasoning level. `xhigh`/`max` count as `high`. The
+upper limit is `max_tokens` (the model's `maxTokens` when not given) minus 1024. Nothing is sent when
+the result is 0.
 
-### 工具
+### Tools
 
-`convert_tools`：`supportsOpenAIGrammarTools` 且工具声明 grammar 约束时发
-`{type: custom, custom: {name, description, format: {type: grammar, grammar: {syntax, definition}}}}`
-（lark 优先，其次 regex；没有可用变体或参数 schema 不是“恰好一个必填字符串属性”时报错）。
-否则发 function 工具；`supportsStrictMode` 时带 `strict`，`json_schema` 约束可转换时为 `true` 并发送
-严格化后的 schema（所有属性必填、可选属性改为 `anyOf [..., null]`、`additionalProperties: false`），
-`require` 而无法满足时请求失败。
+`convert_tools`: when `supportsOpenAIGrammarTools` is set and a tool declares a grammar constraint,
+send `{type: custom, custom: {name, description, format: {type: grammar, grammar: {syntax, definition}}}}`
+(lark first, then regex; error when no variant is usable or the parameter schema is not "exactly one
+required string property"). Otherwise send a function tool. With `supportsStrictMode` it carries
+`strict`; when the `json_schema` constraint can be converted, it is `true` and the strict schema is
+sent (all properties required, optional properties changed to `anyOf [..., null]`,
+`additionalProperties: false`). When `require` cannot be satisfied, the request fails.
 
-`supportsMidConvoSystemMessages` 且 `supportsMidConvoToolAdditions`，且工具历史只有新增时，顶层
-`tools` 只发初始工具，后续系统消息新增的工具在原位置以 `{role: system, tools: [...]}`（Kimi 风格）
-插入；否则 `tools` 为当前完整工具列表。
+When `supportsMidConvoSystemMessages` and `supportsMidConvoToolAdditions` are set and the tool
+history has only additions, top-level `tools` sends only the initial tools. Tools added by later
+system messages are inserted at their original position as `{role: system, tools: [...]}` (Kimi
+style). Otherwise `tools` is the full current tool list.
 
-### 消息转换
+### Message conversion
 
-先 `resolve_transcript`（不支持中途系统消息时合并为一条），再 `transform_messages`，工具调用 id
-归一化：含 `|` 的 Responses 风格 id 拼成 `{call}_{item}`（非 `[a-zA-Z0-9_-]` 按 UTF-16 单元替换为
-`_`），超过 40 字符时取前缀加 `shortHash` 前 8 位；provider 为 `openai` 的其他 id 截断到 40 个
-UTF-16 单元。
+First `resolve_transcript` (merged into one message when mid-conversation system messages are not
+supported), then `transform_messages`. Tool call id normalization: a Responses-style id containing
+`|` is joined as `{call}_{item}` (anything not in `[a-zA-Z0-9_-]` is replaced with `_` per UTF-16
+unit). When longer than 40 characters, it becomes a prefix plus the first 8 characters of
+`shortHash`. Other ids for provider `openai` are truncated to 40 UTF-16 units.
 
-- 系统消息：第一条发完整文本（含 sections），之后的发 `render_system_message_update`；角色在
-  推理模型且 `supportsDeveloperRole` 时为 `developer`，否则 `system`。
-- 用户消息：字符串原样；块列表去掉空文本，图片为 `image_url` data URL；全空时跳过。
-- assistant：文本块（去掉空白文本）拼成字符串 `content`；无内容时为 `null`（
-  `requiresAssistantAfterToolResult` 时为 `""`）。思考：`requiresThinkingAsText` 时作为文本 part 放在
-  最前；否则若第一个思考块的签名是 `reasoning_content`/`reasoning`/`reasoning_text`，以该字段回放
-  （opencode-go 的 `reasoning` 改为 `reasoning_content`）。签名为 `reasoning_details` JSON 时回放
-  `reasoning_details`（优先于原始字段）；老记录中工具调用 `thoughtSignature` 里的加密 detail 也会回放。
-  `requiresReasoningContentOnAssistantMessages` 时补 `reasoning_content: ""`。grammar 工具调用回放为
-  `{type: custom, custom: {name, input}}`。既无内容也无工具调用的消息跳过。
-- 工具结果：连续的结果逐条发 `role: tool`（文本为空时用 `(see attached image)` 或
-  `(no tool output)`，`requiresToolResultName` 时带 `name`）；模型支持图片时，图片在这批结果之后
-  合并为一条用户消息 `Attached image(s) from tool result:`。
-- `requiresAssistantAfterToolResult`：工具结果后紧跟用户消息时插入
-  `I have processed the tool results.`。
-- `cacheControlFormat=anthropic` 且保留不为 `none`：给第一条 system/developer 消息、最后一个工具、
-  最后一条带文本的 user/assistant/tool 消息加 `cache_control: {type: ephemeral}`（长保留且支持时
-  加 `ttl: "1h"`），字符串内容先转成单个文本 part。
+- System messages: the first one sends the full text (including sections); later ones send
+  `render_system_message_update`. The role is `developer` for reasoning models with
+  `supportsDeveloperRole`, otherwise `system`.
+- User messages: strings as is; block lists drop empty text, images become `image_url` data URLs;
+  skipped when everything is empty.
+- assistant: text blocks (blank text removed) are joined into a string `content`; with no content it
+  is `null` (`""` with `requiresAssistantAfterToolResult`). Thinking: with `requiresThinkingAsText`,
+  it goes first as a text part. Otherwise, if the signature of the first thinking block is
+  `reasoning_content`/`reasoning`/`reasoning_text`, it is replayed in that field (opencode-go's
+  `reasoning` is changed to `reasoning_content`). When the signature is `reasoning_details` JSON,
+  `reasoning_details` is replayed (taking precedence over the raw field); encrypted details in a tool
+  call's `thoughtSignature` from old transcripts are also replayed. With
+  `requiresReasoningContentOnAssistantMessages`, `reasoning_content: ""` is added. Grammar tool calls
+  are replayed as `{type: custom, custom: {name, input}}`. Messages with neither content nor tool
+  calls are skipped.
+- Tool results: consecutive results are sent one by one as `role: tool` (when the text is empty,
+  `(see attached image)` or `(no tool output)` is used; with `requiresToolResultName` they carry
+  `name`). When the model supports images, the images are merged after this batch of results into
+  one user message `Attached image(s) from tool result:`.
+- `requiresAssistantAfterToolResult`: when a user message directly follows tool results,
+  `I have processed the tool results.` is inserted.
+- `cacheControlFormat=anthropic` and retention is not `none`: add `cache_control: {type: ephemeral}`
+  to the first system/developer message, the last tool, and the last user/assistant/tool message
+  with text (with `ttl: "1h"` for long retention when supported). String content is first converted
+  to a single text part.
 
-## 流事件映射
+## Stream event mapping
 
-SSE 每个 `data:` 是一个 chunk；`[DONE]` 结束读取，空 data 跳过，无法解析的 JSON 使请求失败。
-`on_provider_stream_event` 对每个解析出的 chunk 调用（包括 `null`），错误 chunk 除外。
+Each SSE `data:` is one chunk. `[DONE]` stops reading, empty data is skipped, and JSON that cannot be
+parsed fails the request. `on_provider_stream_event` is called for every parsed chunk (including
+`null`), except error chunks.
 
-| Chunk 内容 | 处理 |
+| Chunk content | Handling |
 | --- | --- |
-| HTTP 响应被接受 | `on_response`，然后 `start` |
-| 非空 `error` | 请求失败：`error.message`（非字符串时 JSON 化，无 message 时整个 error JSON 化）；`error.metadata.raw` 不在消息中时换行追加 |
-| 没有 `choices`/`usage`/`id`，但有 `detail`、`message` 或 `object: "error"` | 请求失败，消息为 `detail`/`message` |
-| `id` | 第一个非空值成为 `response_id` |
-| `model` | 与请求的模型 id 不同且非空时成为 `response_model`（只取第一个） |
-| `usage`（或 `choices[0].usage`，Moonshot） | 覆盖 usage：缓存读取取 `prompt_tokens_details.cached_tokens` → `prompt_cache_hit_tokens` → `cached_tokens`；缓存写入取 `prompt_tokens_details.cache_write_tokens`；`input = prompt - 读 - 写`；`reasoning = completion_tokens_details.reasoning_tokens`（缺省 0）；按模型价格计费 |
-| `finish_reason` | `raw_stop_reason`；`stop`/`end` → stop，`length` → length，`tool_calls`/`function_call` → toolUse，其他 → error（`Provider finish_reason: <x>`） |
-| `delta.reasoning_content` / `reasoning` / `reasoning_text` | 第一个非空字段 → `thinking_start`（签名为字段名）/`thinking_delta` |
-| `delta.reasoning_details` | 合法条目保存在内存（相邻 text/summary 合并，加密条目独立）；必要时开始思考块；块结束时 JSON 化写入思考签名 |
-| `delta.content` | `text_start` / `text_delta`（思考先于文本处理） |
-| `delta.tool_calls[]` | 先按 `index`、再按 `id` 找调用；都没有且只有一个调用时归入该调用，多个时请求失败；找不到则 `toolcall_start`。迟到的 id 补给匿名调用，名称只在非空时设置。`function.arguments` → `toolcall_delta`；`custom.input` 渲染为 `{"<属性>":"<转义输入>"}` 的增量 JSON |
-| 流结束 | 按内容顺序 `text_end`/`thinking_end`/`toolcall_end`（参数解析失败记入 `arguments_error`） |
+| HTTP response accepted | `on_response`, then `start` |
+| Non-empty `error` | Request fails: `error.message` (JSON-encoded when not a string; the whole error JSON-encoded when there is no message); `error.metadata.raw` is appended on a new line when it is not already in the message |
+| No `choices`/`usage`/`id`, but has `detail`, `message` or `object: "error"` | Request fails; the message is `detail`/`message` |
+| `id` | The first non-empty value becomes `response_id` |
+| `model` | Becomes `response_model` when non-empty and different from the requested model id (only the first one) |
+| `usage` (or `choices[0].usage`, Moonshot) | Overwrites usage: cache read from `prompt_tokens_details.cached_tokens` → `prompt_cache_hit_tokens` → `cached_tokens`; cache write from `prompt_tokens_details.cache_write_tokens`; `input = prompt - read - write`; `reasoning = completion_tokens_details.reasoning_tokens` (default 0); cost from the model's pricing |
+| `finish_reason` | `raw_stop_reason`; `stop`/`end` → stop, `length` → length, `tool_calls`/`function_call` → toolUse, other → error (`Provider finish_reason: <x>`) |
+| `delta.reasoning_content` / `reasoning` / `reasoning_text` | The first non-empty field → `thinking_start` (signature is the field name)/`thinking_delta` |
+| `delta.reasoning_details` | Valid entries are kept in memory (adjacent text/summary entries merged, encrypted entries kept separate); a thinking block is started when needed; when the block ends, they are JSON-encoded into the thinking signature |
+| `delta.content` | `text_start` / `text_delta` (thinking is handled before text) |
+| `delta.tool_calls[]` | Find the call by `index` first, then by `id`. If neither matches and there is only one call, it goes to that call; with several calls the request fails; if none is found, `toolcall_start`. A late id is filled in for an anonymous call; the name is set only when non-empty. `function.arguments` → `toolcall_delta`; `custom.input` is rendered as incremental JSON `{"<property>":"<escaped input>"}` |
+| Stream end | `text_end`/`thinking_end`/`toolcall_end` in content order (argument parse failures are recorded in `arguments_error`) |
 
-结束规则：取消 → aborted；没有 `finish_reason` 且 `supportsFinishReason=false` → 有工具调用为
-toolUse，否则 stop；stop reason 为 error → 以其消息失败；`supportsFinishReason` 而没收到
-`finish_reason` → `Stream ended without finish_reason`。工具调用无论 finish reason 是什么都会发出。
+End rules: cancelled → aborted; no `finish_reason` and `supportsFinishReason=false` → toolUse if
+there are tool calls, otherwise stop; stop reason is error → fail with its message;
+`supportsFinishReason` but no `finish_reason` received → `Stream ended without finish_reason`. Tool
+calls are emitted whatever the finish reason is.
 
-## 错误与重试
+## Errors and retries
 
-- 请求通过 `http::send_with_retry`：408/409/429/5xx 与连接错误重试，遵守 `retry-after-ms` /
-  `retry-after`，超过 `max_retry_delay` 立即失败；取消随时生效。
-- HTTP 错误消息与上游一致：先按 OpenAI SDK 得到 `APIError`（消息 `"<status> <error.message>"`，正文
-  没有 `error` 对象时为 `"<status> <文本>"` 或 `"<status> status code (no body)"`），再按
-  `formatProviderError`：正文的 `error` 是非空对象且消息里不含它时为 `"<status>: <error JSON>"`，否则为
-  SDK 消息。OpenRouter 的 `error.metadata.raw` 不在消息里时另起一行追加。原始正文来自
-  `Error::Status.body`，辅助函数在 `api::common`（`openai_sdk_error`、`format_provider_error`）。
-- 失败时（包括 HTTP 错误前、流中错误、取消）流以 `error` 事件结束，保留已收到的内容；已收集的
-  `reasoning_details` 仍写入思考签名。
-- 取消：读取循环结束，已打开的块正常结束，然后以 `Request was aborted`（aborted）失败，与上游
-  （SDK 在取消时静默结束迭代）事件顺序一致。
+- Requests go through `http::send_with_retry`: 408/409/429/5xx and connection errors are retried,
+  `retry-after-ms` / `retry-after` are honored, and the request fails immediately when the delay
+  exceeds `max_retry_delay`. Cancellation takes effect at any time.
+- HTTP error messages match upstream. First an `APIError` is built as in the OpenAI SDK (message
+  `"<status> <error.message>"`; when the body has no `error` object, `"<status> <text>"` or
+  `"<status> status code (no body)"`). Then `formatProviderError` is applied: when the body's `error`
+  is a non-empty object not already contained in the message, the result is
+  `"<status>: <error JSON>"`, otherwise the SDK message. OpenRouter's `error.metadata.raw` is
+  appended on a new line when it is not in the message. The raw body comes from
+  `Error::Status.body`; the helpers are in `api::common` (`openai_sdk_error`,
+  `format_provider_error`).
+- On failure (including before an HTTP error, in-stream errors, and cancellation) the stream ends
+  with an `error` event and keeps the content already received; collected `reasoning_details` are
+  still written into the thinking signature.
+- Cancellation: the read loop ends, open blocks end normally, and then the stream fails with
+  `Request was aborted` (aborted). The event order matches upstream (the SDK ends the iteration
+  silently on cancellation).
 
-## Rust 特有差异
+## Rust-specific differences
 
-- 事件通过 `MessageBuilder` 产生：空的 `toolcall_delta`（上游在只带 id/name 的 chunk 上也会发空增量）
-  不发出；`thinking_start` 事件携带签名。
-- grammar 工具调用的参数由 builder 解析流出的 JSON 得到，结果与上游 `{property: input}` 相同。
-  若同一个调用先以 function 增量开始、后改为 custom（上游会丢弃已有的 function 参数缓冲），
-  builder 中已累积的 JSON 无法清除，参数可能解析失败。
-- HTTP 错误正文先去掉首尾空白并截断到 4000 字符（`Error::Status.body`）：超过 4000 字符的 JSON 正文
-  无法解析，按文本处理；`error` 对象由 `serde_json` 重新序列化，浮点数写法可能与 `JSON.stringify`
-  不同（如 `1.0`）。连接错误的文本来自 reqwest 而不是 SDK 的 `Connection error.`。
-- 默认重试次数由核心决定（`DEFAULT_MAX_RETRIES = 2`），上游 `retryProviderRequest` 默认不重试。
-- 不发送 OpenAI SDK 的 `X-Stainless-*` 头；`User-Agent` 为核心的 `delta/<版本> (...)`。
-- Rust 字符串不含孤立代理项，`sanitizeSurrogates` 无需移植。
-- JavaScript 语义：`trim()` 的空白集合（含 `\u{feff}`、不含 `\u{85}`）、`shortHash` 按 UTF-16 单元、
-  `??=`/`||=` 对 `reasoning_details` 字段的赋值（来源缺失时删除字段）都按上游实现。
-- 整数值的 `f64`（如 `vllmPriority`、`temperature`）序列化为整数，与 `JSON.stringify` 一致。
-- `ChatTemplateKwargValue::Literal` 中的对象原样发送（上游把任何对象都当作 `$var` 引用处理）。
-- `ReasoningEffort::None` / `Other(s)` 按字符串处理：作为推理已开启，按名称查 `thinkingLevelMap`，
-  不在级别中的名称没有思考预算，采样参数按 `off` 级别解析——与上游传入非标准字符串时相同。
-- 未移植：GitHub Copilot 动态头（`x-initiator`、`openai-intent`、视觉请求头）、遥测。
+- Events are produced through `MessageBuilder`: an empty `toolcall_delta` is not emitted (upstream
+  also emits an empty delta on chunks that carry only id/name); the `thinking_start` event carries
+  the signature.
+- The arguments of grammar tool calls come from the builder parsing the streamed JSON; the result is
+  the same as upstream `{property: input}`. If the same call starts with function deltas and later
+  switches to custom (upstream drops the existing function argument buffer), the JSON already
+  accumulated in the builder cannot be cleared, and argument parsing may fail.
+- The HTTP error body is first trimmed and truncated to 4000 characters (`Error::Status.body`): a
+  JSON body longer than 4000 characters cannot be parsed and is treated as text; the `error` object
+  is re-serialized by `serde_json`, so float formatting may differ from `JSON.stringify` (for
+  example `1.0`). Connection error texts come from reqwest, not the SDK's `Connection error.`.
+- The default retry count is decided by the core (`DEFAULT_MAX_RETRIES = 2`); upstream
+  `retryProviderRequest` does not retry by default.
+- The OpenAI SDK's `X-Stainless-*` headers are not sent; `User-Agent` is the core's
+  `delta/<version> (...)`.
+- Rust strings do not contain lone surrogates, so `sanitizeSurrogates` does not need to be ported.
+- JavaScript semantics follow upstream: the whitespace set of `trim()` (includes `\u{feff}`,
+  excludes `\u{85}`), `shortHash` over UTF-16 units, and `??=`/`||=` assignments to the
+  `reasoning_details` field (the field is deleted when the source is missing).
+- Integer-valued `f64` values (such as `vllmPriority`, `temperature`) are serialized as integers,
+  matching `JSON.stringify`.
+- Objects in `ChatTemplateKwargValue::Literal` are sent as is (upstream treats any object as a `$var`
+  reference).
+- `ReasoningEffort::None` / `Other(s)` are handled as strings: reasoning counts as on, the name is
+  looked up in `thinkingLevelMap`, names that are not levels get no thinking budget, and sampling
+  parameters resolve at the `off` level. This is the same as upstream when given a non-standard
+  string.
+- Not ported: GitHub Copilot dynamic headers (`x-initiator`, `openai-intent`, vision request
+  header), telemetry.
 
-以下行为来自 `docs/research/provider-references.md`，只让客户端对非法输入更宽容或报错更明确，
-不改变合法输入的结果：
+The following behaviors come from `docs/research/provider-references.md`. They only make the client
+more tolerant of invalid input or give clearer errors, and do not change the result for valid input:
 
-- 工具调用 `index` 为负数时视为缺失（上游会按 `-1` 合并所有调用）。
-- 既无 id 也无 index 的增量归入唯一进行中的调用；有多个调用时报错（上游会新建一个匿名调用）。
-- `function.arguments` 不是字符串时按 JSON 文本追加（上游会拼出 `[object Object]`）。
-- 没有补全字段的错误包（`{"detail": ...}`、`{"object": "error"}`）直接报错，而不是以
-  `Stream ended without finish_reason` 结束。
+- A negative tool call `index` is treated as missing (upstream would merge all calls under `-1`).
+- A delta with neither id nor index goes to the only call in progress; with several calls it is an
+  error (upstream would create a new anonymous call).
+- When `function.arguments` is not a string, it is appended as JSON text (upstream would produce
+  `[object Object]`).
+- Error packets without completion fields (`{"detail": ...}`, `{"object": "error"}`) are reported as
+  errors directly, instead of ending with `Stream ended without finish_reason`.
 
-注意：provider-references 中“同一 index 上出现不同 id 时开始新调用”的规则与上游冲突——上游测试
-（Kimi 流中途更换 id）要求按 index 合并，这里遵循上游。
+Note: the provider-references rule "start a new call when a different id appears on the same index"
+conflicts with upstream. An upstream test (Kimi changes the id mid-stream) requires merging by
+index; this module follows upstream.
 
-## 待确认的改进
+## Improvements pending confirmation
 
-- 流内 `overloaded`/`529` 类错误是否按可重试处理（上游不重试）。
-- provider-references 的“同一 index 不同 id 视为新调用”规则是否需要对某些 provider 生效
-  （与上游 Kimi 行为冲突，目前未采用）。
+- Whether in-stream `overloaded`/`529` errors should be treated as retryable (upstream does not
+  retry).
+- Whether the provider-references rule "a different id on the same index is a new call" should apply
+  to some providers (it conflicts with upstream's Kimi behavior and is not adopted for now).
