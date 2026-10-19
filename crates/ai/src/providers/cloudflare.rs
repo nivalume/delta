@@ -1,7 +1,7 @@
 //! Cloudflare AI Gateway and Cloudflare Workers AI.
 //!
 //! Ports upstream `providers/cloudflare-auth.ts` (auth), `providers/cloudflare-stream.ts`
-//! (endpoint placeholders), `providers/cloudflare-ai-gateway.ts` and
+//! (endpoint placeholders, for chat and classifier requests), `providers/cloudflare-ai-gateway.ts` and
 //! `providers/cloudflare-workers-ai.ts` (provider factories). The endpoints themselves live in
 //! [`crate::api::cloudflare`].
 //!
@@ -16,15 +16,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::api::anthropic_messages::AnthropicMessagesApi;
+use crate::api::cloudflare_workers_ai_system_one::CloudflareWorkersAiSystemOneApi;
 use crate::api::openai_completions::OpenAICompletionsApi;
 use crate::api::openai_responses::OpenAIResponsesApi;
 use crate::auth::{
     ApiKeyAuth, ApiKeyCredential, ApiKeyInput, AuthContext, AuthInteraction, AuthPrompt, AuthResult, ModelAuth,
     ProviderAuth,
 };
+use crate::classifier::{ClassifierContext, ClassifierOptions, ClassifierResult, ProviderClassifier};
 use crate::error::ModelsError;
 use crate::events::AssistantMessageEventStream;
-use crate::model::{AnyModel, Model, ModelType};
+use crate::model::{AnyModel, ClassifierModel, Model, ModelType};
 use crate::options::{SimpleStreamOptions, StreamOptions};
 use crate::provider::{BuiltProvider, CreateProviderOptions, ProviderApi, ProviderStreams, create_provider};
 use crate::providers::catalog::all_builtin_models;
@@ -305,6 +307,50 @@ impl ProviderStreams for CloudflareStreams {
     }
 }
 
+/// Classifier counterpart of [`CloudflareStreams`] (upstream `cloudflareClassifier`): fills in
+/// the endpoint placeholders of `model.base_url` from `options.base.env` before dispatch.
+#[derive(Clone)]
+pub struct CloudflareClassifier {
+    inner: Arc<dyn ProviderClassifier>,
+}
+
+impl std::fmt::Debug for CloudflareClassifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CloudflareClassifier").finish_non_exhaustive()
+    }
+}
+
+/// Wrap `inner` in [`CloudflareClassifier`].
+pub fn cloudflare_classifier(inner: impl ProviderClassifier + 'static) -> CloudflareClassifier {
+    CloudflareClassifier { inner: Arc::new(inner) }
+}
+
+impl ProviderClassifier for CloudflareClassifier {
+    fn classify<'a>(
+        &'a self,
+        model: &'a ClassifierModel,
+        context: &'a ClassifierContext,
+        options: ClassifierOptions,
+    ) -> BoxFuture<'a, ClassifierResult> {
+        let resolved = options
+            .base
+            .env
+            .as_ref()
+            .map(|env| resolve_cloudflare_base_url(&model.base_url, env))
+            .filter(|base_url| *base_url != model.base_url);
+        match resolved {
+            None => self.inner.classify(model, context, options),
+            Some(base_url) => {
+                let model = ClassifierModel {
+                    base_url,
+                    ..model.clone()
+                };
+                Box::pin(async move { self.inner.classify(&model, context, options).await })
+            }
+        }
+    }
+}
+
 fn catalog_models(provider: &str, types: &[ModelType]) -> Vec<AnyModel> {
     all_builtin_models(provider)
         .iter()
@@ -343,8 +389,8 @@ pub fn cloudflare_ai_gateway_provider() -> BuiltProvider {
     )
 }
 
-/// Cloudflare Workers AI: chat models over the OpenAI-compatible endpoint. The catalog's
-/// classifier models are listed too; the classifier API is not ported yet.
+/// Cloudflare Workers AI: chat models over the OpenAI-compatible endpoint and System One
+/// classifier models over the REST `/ai/run` endpoint.
 pub fn cloudflare_workers_ai_provider() -> BuiltProvider {
     create_provider(
         CreateProviderOptions::new(
@@ -353,7 +399,11 @@ pub fn cloudflare_workers_ai_provider() -> BuiltProvider {
             catalog_models("cloudflare-workers-ai", &[ModelType::Chat, ModelType::Classifier]),
             ProviderApi::single(cloudflare_streams(OpenAICompletionsApi)),
         )
-        .name("Cloudflare Workers AI"),
+        .name("Cloudflare Workers AI")
+        .classifier(
+            crate::api::cloudflare_workers_ai_system_one::API,
+            cloudflare_classifier(CloudflareWorkersAiSystemOneApi),
+        ),
     )
 }
 

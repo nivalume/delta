@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 use crate::events::{AssistantMessageEventStream, MessageBuilder};
 use crate::http;
 use crate::model::{Model, calculate_cost};
-use crate::options::StreamOptions;
+use crate::options::{ProviderResponse, RequestOptions, StreamOptions};
 use crate::types::{AssistantMessage, StopReason, Usage};
 
 /// A fresh, pending output message for `model`.
@@ -100,6 +100,32 @@ pub async fn notify_response(options: &StreamOptions, model: &Model, response: &
 pub async fn observe_provider_event(options: &StreamOptions, model: &Model, event: &Value) -> Result<()> {
     if let Some(hook) = &options.on_provider_stream_event {
         hook(event, model)
+            .await
+            .map_err(|error| Error::msg(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// [`apply_on_payload`] for image, classifier and deferred requests ([`RequestOptions`]).
+pub async fn apply_request_on_payload<M>(options: &RequestOptions<M>, model: &M, payload: Value) -> Result<Value> {
+    match &options.on_payload {
+        Some(hook) => match hook(&payload, model).await {
+            Ok(Some(replaced)) => Ok(replaced),
+            Ok(None) => Ok(payload),
+            Err(error) => Err(Error::msg(error.to_string())),
+        },
+        None => Ok(payload),
+    }
+}
+
+/// [`notify_response`] for image, classifier and deferred requests ([`RequestOptions`]).
+pub async fn notify_request_response<M>(
+    options: &RequestOptions<M>,
+    model: &M,
+    response: &ProviderResponse,
+) -> Result<()> {
+    if let Some(hook) = &options.on_response {
+        hook(response, model)
             .await
             .map_err(|error| Error::msg(error.to_string()))?;
     }

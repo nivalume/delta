@@ -540,6 +540,5 @@ async fn builtin_models_expose_openrouter_image_models_under_the_openrouter_prov
         key(models.get_model_auth(&chat.into(), &defaults).await.unwrap()).as_deref(),
         Some("or-key")
     );
-    // Upstream also checks `provider.generateImages`; the `openrouter-images` API is not
-    // ported yet.
+    assert!(provider.supports_images());
 }

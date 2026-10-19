@@ -6,8 +6,7 @@
 //! The Cloudflare providers live in [`crate::providers::cloudflare`], GitHub Copilot in
 //! [`crate::providers::github_copilot`], Radius in [`crate::providers::radius`].
 //!
-//! Not built in yet: providers whose APIs or auth flows are not ported (OpenAI Codex,
-//! TypeSafe). OAuth login is ported for Anthropic, OpenRouter, xAI, Kimi For Coding, Meta,
+//! Not built in yet: providers whose APIs or auth flows are not ported (OpenAI Codex). OAuth login is ported for Anthropic, OpenRouter, xAI, Kimi For Coding, Meta,
 //! GitHub Copilot and Radius ([`crate::oauth`]); the other providers that offer it upstream
 //! authenticate with API keys until their flows are ported.
 
@@ -20,11 +19,14 @@ use crate::api::azure_openai_responses::{AzureOpenAIResponsesApi, resolve_azure_
 use crate::api::google_generative_ai::GoogleGenerativeAiApi;
 use crate::api::mistral_conversations::MistralConversationsApi;
 use crate::api::openai_completions::OpenAICompletionsApi;
+use crate::api::openai_decisions::{self, OpenAIDecisionsApi};
 use crate::api::openai_responses::OpenAIResponsesApi;
-use crate::auth::{OAuthAuth, ProviderAuth, env_api_key_auth};
+use crate::api::openrouter_images::{self, OpenRouterImagesApi};
+use crate::api::typesafe_system_one::{self, TypeSafeSystemOneApi};
+use crate::auth::{Credential, OAuthAuth, ProviderAuth, env_api_key_auth};
 use crate::error::{ModelsError, ModelsErrorCode};
 use crate::events::AssistantMessageEventStream;
-use crate::model::Model;
+use crate::model::{AnyModel, Model, ModelType};
 use crate::models::{CreateModelsOptions, Models};
 use crate::oauth::{AnthropicOAuth, KimiCodingOAuth, MetaOAuth, OpenRouterOAuth, XaiOAuth};
 use crate::options::{AzureOpenAIResponsesOptions, OnPayload, SimpleStreamOptions, StreamOptions};
@@ -292,7 +294,54 @@ fn catalog_provider(
 ) -> BuiltProvider {
     let mut options = CreateProviderOptions::new(id, auth, all_builtin_models(id).to_vec(), api).name(name);
     options.base_url = base_url.map(str::to_owned);
-    create_provider(options)
+    create_provider(with_operations(id, options))
+}
+
+/// The image and classifier implementations of a built-in provider (upstream `images` and
+/// `classifiers` in `src/providers/<id>.ts`). The Cloudflare providers register theirs in
+/// [`crate::providers::cloudflare`].
+fn with_operations(id: &str, options: CreateProviderOptions) -> CreateProviderOptions {
+    match id {
+        // OpenRouter also serves TypeSafe's System One protocol at /api/v1/systemone.
+        "openrouter" => options
+            .images(openrouter_images::API, OpenRouterImagesApi)
+            .classifier(typesafe_system_one::API, TypeSafeSystemOneApi),
+        // OpenCode Zen serves System One at /inference/v1/systemone, AI Gateway at
+        // /typesafe/v1/systemone.
+        "typesafe" | "opencode" | "vercel-ai-gateway" => {
+            options.classifier(typesafe_system_one::API, TypeSafeSystemOneApi)
+        }
+        "openai" => {
+            let mut options = options.classifier(openai_decisions::API, OpenAIDecisionsApi);
+            options.filter_all_models = Some(Arc::new(openai_filter_all_models));
+            options
+        }
+        _ => options,
+    }
+}
+
+/// Sign in with ChatGPT tokens only reach the Responses API; the Decisions API rejects them,
+/// so the `openai` provider hides its classifier models while it uses an OAuth credential.
+fn openai_filter_all_models(models: &[AnyModel], credential: Option<&Credential>) -> Vec<AnyModel> {
+    match credential {
+        Some(Credential::OAuth(_)) => models
+            .iter()
+            .filter(|model| model.model_type() != ModelType::Classifier)
+            .cloned()
+            .collect(),
+        _ => models.to_vec(),
+    }
+}
+
+/// TypeSafe: System One classifier models only (`TYPESAFE_API_KEY`).
+pub fn typesafe_provider() -> BuiltProvider {
+    catalog_provider(
+        "typesafe",
+        "TypeSafe",
+        None,
+        ProviderAuth::api_key(env_api_key_auth("TypeSafe API key", &["TYPESAFE_API_KEY"])),
+        ProviderApi::none(),
+    )
 }
 
 /// A built-in provider by id, or `None` for unknown or not yet ported providers.
@@ -313,6 +362,7 @@ pub fn builtin_provider(id: &str) -> Option<Arc<dyn Provider>> {
         "radius" => Arc::new(crate::providers::radius::radius_provider(
             crate::providers::radius::RadiusProviderOptions::default(),
         )),
+        "typesafe" => Arc::new(typesafe_provider()),
         #[cfg(feature = "bedrock")]
         "amazon-bedrock" => Arc::new(cloud::amazon_bedrock_provider()),
         #[cfg(feature = "vertex")]

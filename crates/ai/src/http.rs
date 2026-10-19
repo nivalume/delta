@@ -227,7 +227,8 @@ pub fn is_retryable_status(status: u16, headers: &HeaderMap) -> bool {
     matches!(status, 408 | 409 | 429) || status >= 500
 }
 
-fn backoff(retry_index: u32) -> Duration {
+/// Exponential backoff with jitter of the vendor SDK retry policy.
+pub(crate) fn backoff(retry_index: u32) -> Duration {
     let base = (0.5 * 2f64.powi(retry_index as i32)).min(8.0);
     // Deterministic jitter source without a RNG dependency.
     let nanos = std::time::SystemTime::now()
@@ -237,7 +238,8 @@ fn backoff(retry_index: u32) -> Duration {
     Duration::from_secs_f64(base * (1.0 - jitter))
 }
 
-async fn sleep_or_cancel(delay: Duration, cancel: Option<&CancellationToken>) -> Result<()> {
+/// Sleep for `delay` unless `cancel` fires first (`Error::Aborted`).
+pub(crate) async fn sleep_or_cancel(delay: Duration, cancel: Option<&CancellationToken>) -> Result<()> {
     match cancel {
         Some(cancel) => tokio::select! {
             () = cancel.cancelled() => Err(Error::Aborted),
