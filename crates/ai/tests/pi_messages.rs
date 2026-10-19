@@ -648,6 +648,7 @@ async fn sends_reasoning_temperature_cache_retention_and_tool_choice() {
             reasoning: Some(ThinkingLevel::Minimal),
             tool_choice: Some(ToolChoice::None),
             thinking_budgets: None,
+            deferred: None,
         },
     )
     .result()
