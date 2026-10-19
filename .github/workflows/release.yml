@@ -1,0 +1,83 @@
+name: Release
+
+# Publish the workspace version to crates.io, either by pushing a tag like v0.1.0 or by
+# running this workflow manually (Actions -> Release -> Run workflow), which then creates
+# the tag itself.
+#
+# Auth: crates.io Trusted Publishing (configure the repository and this workflow under
+# each crate's settings on crates.io). The first release of a new crate cannot use Trusted
+# Publishing; set a CARGO_REGISTRY_TOKEN repository secret for it, which takes precedence.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Read the workspace version
+        id: version
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match workspace version ${version}" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" != "tag" ] && git ls-remote --exit-code --tags origin "v${version}" >/dev/null; then
+            echo "Tag v${version} already exists; bump the version in Cargo.toml first" >&2
+            exit 1
+          fi
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - run: cargo package --workspace
+
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+    permissions:
+      id-token: write # crates.io Trusted Publishing
+    env:
+      HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+        if: env.HAS_TOKEN != 'true'
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || steps.auth.outputs.token }}
+        # cargo publish --workspace publishes members in dependency order and skips
+        # crates marked publish = false.
+        run: cargo publish --workspace
+
+  tag:
+    # Manual runs tag the published commit.
+    if: github.ref_type != 'tag'
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git tag "v${{ needs.check.outputs.version }}"
+          git push origin "v${{ needs.check.outputs.version }}"

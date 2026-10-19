@@ -1,0 +1,60 @@
+[package]
+name = "tau-llm"
+description = "Unified LLM API for Rust: provider collections, auth resolution, streaming events, token and cost tracking, tool calling and cross-provider hand-off (Rust port of pi-ai)"
+readme = "README.md"
+keywords = ["llm", "ai", "anthropic", "openai", "gemini"]
+categories = ["api-bindings", "asynchronous"]
+include = ["src/**", "data/**", "docs/**", "README.md", "README.zh-CN.md", "CHANGELOG.md", "LICENSE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "tau_ai"
+
+[features]
+default = []
+# Amazon Bedrock (bedrock-converse-stream) through the official AWS SDK for Rust.
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+# Vertex AI (google-vertex) through the official Google Cloud client libraries for Rust.
+vertex = ["dep:google-cloud-aiplatform-v1", "dep:google-cloud-auth"]
+full = ["bedrock", "vertex"]
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+http.workspace = true
+indexmap.workspace = true
+jsonschema.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+aws-config = { workspace = true, optional = true }
+aws-sdk-bedrockruntime = { workspace = true, optional = true }
+aws-smithy-types = { workspace = true, optional = true }
+google-cloud-aiplatform-v1 = { workspace = true, optional = true }
+google-cloud-auth = { workspace = true, optional = true }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+wiremock.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true
