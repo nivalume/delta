@@ -127,7 +127,7 @@ After the stream ends, these checks run in order: `message_start` seen but no `m
 - Cancellation: `options.cancel` is checked before each request is built, while waiting for the response and during retry backoff, and when reading each SSE event. The stream ends as aborted with `Request was aborted` and keeps the partial content already received. The stream also stops when the consumer drops it (`builder.is_closed()`).
 - When the `on_payload` / `on_response` / `on_provider_stream_event` callbacks fail, the stream ends with their error message.
 
-## Differences in the Rust implementation
+## Rust-specific differences
 
 - **Event shape**: delta events do not carry a shared `partial`. When `content_block_start` carries non-empty text, an extra `text_delta` is emitted so that the partial message reduced by the consumer contains that text. The initial thinking text and signature are given with `thinking_start`. Upstream only emits `text_start`/`thinking_start`.
 - **Unfinished tool calls**: on a successful end, `spawn_stream` emits a `toolcall_end` for any tool call that has not received `content_block_stop` (shared contract). Upstream does not.
