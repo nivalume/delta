@@ -229,6 +229,8 @@ struct Inner<C: CustomMessage> {
     follow_up: Mutex<PendingQueue<C>>,
     /// Cancellation of the active run; `None` when idle.
     active: Mutex<Option<CancellationToken>>,
+    /// True while idle. Update it with `send_replace`: the agent holds no receiver, so
+    /// `send` would fail and leave the value unchanged.
     idle: watch::Sender<bool>,
 }
 
@@ -307,7 +309,7 @@ impl<C: CustomMessage> Drop for RunGuard<C> {
             state.pending_tool_calls.clear();
         }
         *lock(&self.inner.active) = None;
-        let _ = self.inner.idle.send(true);
+        self.inner.idle.send_replace(true);
     }
 }
 
@@ -619,7 +621,7 @@ impl<C: CustomMessage> Agent<C> {
         }
         *active = Some(CancellationToken::new());
         drop(active);
-        let _ = self.inner.idle.send(false);
+        self.inner.idle.send_replace(false);
         let mut state = lock(&self.inner.state);
         state.is_streaming = true;
         state.streaming_message = None;
