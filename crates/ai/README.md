@@ -2383,8 +2383,6 @@ cleanup_session_resources(Some("session-1")).unwrap();
 # }
 ```
 
-GitHub Copilot is not ported.
-
 ## Migrating from the Old Global API
 
 Not applicable. This crate never had upstream's old global API (`getModel()`, global `stream()`, `registerApiProvider()`, ...) and has no compat entrypoint. Use `Models` and the provider factories. The `delta_ai::compat` module is unrelated: it holds the per-API model compatibility settings.

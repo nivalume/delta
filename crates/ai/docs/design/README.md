@@ -105,6 +105,6 @@ These are language-level rewrites. They do not change observable behavior (excep
 
 ## Pending confirmation
 
-Not ported in the first phase: telemetry (to be wired in once `delta-telemetry` is ported), image generation, classifiers, deferred responses, OAuth login flows (the `Models::login` framework exists; the per-provider flows are not written), OpenAI Codex and WebSocket transport, GitHub Copilot, Cloudflare, Radius (`pi-messages`). The model catalog already contains data for these models.
+Not ported: telemetry (to be wired in once `delta-telemetry` is ported). Everything else in upstream `@earendil-works/pi-ai` is ported; the design notes list the remaining differences per module.
 
 Pending confirmation items for each API are in the matching `api-*.md`.
