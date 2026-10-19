@@ -1154,6 +1154,29 @@ pub fn process_responses_events<'a>(
     state.finish(builder)
 }
 
+/// Incremental form of [`process_responses_events`], for transports that read, map and
+/// observe events themselves (the OpenAI Codex SSE and WebSocket transports, which hand
+/// over each event as upstream's `mapCodexEvents` yields it).
+#[derive(Debug)]
+pub struct ResponsesEventProcessor(ResponsesStreamState);
+
+impl ResponsesEventProcessor {
+    pub fn new(stream_options: ResponsesStreamOptions) -> Self {
+        Self(ResponsesStreamState::new(stream_options))
+    }
+
+    /// Normalize one parsed event into `builder`.
+    pub fn handle_event(&mut self, builder: &mut MessageBuilder, model: &Model, event: &Value) -> Result<()> {
+        self.0.handle_event(builder, model, event)
+    }
+
+    /// The end-of-stream checks: a terminal response event arrived and no `toolUse` response
+    /// has an unfinished tool call.
+    pub fn finish(&self, builder: &MessageBuilder) -> Result<()> {
+        self.0.finish(builder)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,6 +17,7 @@ pub mod google_shared;
 #[cfg(feature = "vertex")]
 pub mod google_vertex;
 pub mod mistral_conversations;
+pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod openai_responses;
 pub mod openai_responses_shared;

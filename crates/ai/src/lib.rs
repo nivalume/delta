@@ -21,6 +21,7 @@ pub mod oauth;
 pub mod options;
 pub mod provider;
 pub mod providers;
+pub mod session_resources;
 pub mod simple_options;
 pub mod transcript;
 pub mod transform;

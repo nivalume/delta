@@ -14,10 +14,12 @@
 //!
 //! Flows: [`anthropic`] (Claude Pro/Max), [`openrouter`] (PKCE that mints an API key),
 //! [`xai`], [`kimi_coding`] and [`meta`] (device code), [`github_copilot`] (GitHub device code
-//! plus the Copilot token exchange) and [`radius`] (browser or device code against a Radius
-//! gateway). Each flow is a struct implementing [`crate::auth::OAuthAuth`]; `Default` (for Radius,
-//! [`create_radius_oauth`]) uses upstream's endpoints, and the endpoint fields are public so
-//! tests (and proxies) can point them elsewhere.
+//! plus the Copilot token exchange), [`radius`] (browser or device code against a Radius
+//! gateway), [`openai_codex`] (ChatGPT Plus/Pro for the Codex backend: browser or device code)
+//! and [`openai_chatgpt`] (Sign in with ChatGPT for the OpenAI API). Each flow is a struct
+//! implementing [`crate::auth::OAuthAuth`]; `Default` (for Radius, [`create_radius_oauth`]) uses
+//! upstream's endpoints, and the endpoint fields are public so tests (and proxies) can point them
+//! elsewhere.
 //!
 //! Flow errors are [`ModelsError`]s: cancellation is `Login cancelled` with code
 //! [`ModelsErrorCode::Aborted`]; everything else has code [`ModelsErrorCode::OAuth`] and
@@ -29,6 +31,8 @@ pub mod device_code;
 pub mod github_copilot;
 pub mod kimi_coding;
 pub mod meta;
+pub mod openai_chatgpt;
+pub mod openai_codex;
 pub mod openrouter;
 pub mod page;
 pub mod pkce;
@@ -47,6 +51,8 @@ pub use device_code::{
 pub use github_copilot::GitHubCopilotOAuth;
 pub use kimi_coding::KimiCodingOAuth;
 pub use meta::MetaOAuth;
+pub use openai_chatgpt::OpenAIChatGPTOAuth;
+pub use openai_codex::OpenAICodexOAuth;
 pub use openrouter::OpenRouterOAuth;
 pub use page::{oauth_error_html, oauth_success_html};
 pub use pkce::{Pkce, generate_pkce};

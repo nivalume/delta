@@ -6,9 +6,9 @@
 //! The Cloudflare providers live in [`crate::providers::cloudflare`], GitHub Copilot in
 //! [`crate::providers::github_copilot`], Radius in [`crate::providers::radius`].
 //!
-//! Not built in yet: providers whose APIs or auth flows are not ported (OpenAI Codex). OAuth login is ported for Anthropic, OpenRouter, xAI, Kimi For Coding, Meta,
-//! GitHub Copilot and Radius ([`crate::oauth`]); the other providers that offer it upstream
-//! authenticate with API keys until their flows are ported.
+//! All upstream built-in providers are built in. OAuth login is ported for every provider that
+//! offers it upstream: Anthropic, OpenRouter, xAI, OpenAI (Sign in with ChatGPT), OpenAI Codex,
+//! Kimi For Coding, Meta, GitHub Copilot and Radius ([`crate::oauth`]).
 
 use futures::future::BoxFuture;
 use std::collections::HashMap;
@@ -18,6 +18,7 @@ use crate::api::anthropic_messages::AnthropicMessagesApi;
 use crate::api::azure_openai_responses::{AzureOpenAIResponsesApi, resolve_azure_base_url, resolve_deployment_name};
 use crate::api::google_generative_ai::GoogleGenerativeAiApi;
 use crate::api::mistral_conversations::MistralConversationsApi;
+use crate::api::openai_codex_responses::OpenAICodexResponsesApi;
 use crate::api::openai_completions::OpenAICompletionsApi;
 use crate::api::openai_decisions::{self, OpenAIDecisionsApi};
 use crate::api::openai_responses::OpenAIResponsesApi;
@@ -28,7 +29,9 @@ use crate::error::{ModelsError, ModelsErrorCode};
 use crate::events::AssistantMessageEventStream;
 use crate::model::{AnyModel, Model, ModelType};
 use crate::models::{CreateModelsOptions, Models};
-use crate::oauth::{AnthropicOAuth, KimiCodingOAuth, MetaOAuth, OpenRouterOAuth, XaiOAuth};
+use crate::oauth::{
+    AnthropicOAuth, KimiCodingOAuth, MetaOAuth, OpenAIChatGPTOAuth, OpenAICodexOAuth, OpenRouterOAuth, XaiOAuth,
+};
 use crate::options::{AzureOpenAIResponsesOptions, OnPayload, SimpleStreamOptions, StreamOptions};
 use crate::provider::{
     BuiltProvider, CreateProviderOptions, Provider, ProviderApi, ProviderStreams, create_provider, lazy_stream,
@@ -161,13 +164,6 @@ const SIMPLE_PROVIDERS: &[(&str, &str, &str, &[&str], Apis)] = &[
         "https://integrate.api.nvidia.com/v1",
         &["NVIDIA_API_KEY"],
         Apis::OpenAICompletions,
-    ),
-    (
-        "openai",
-        "OpenAI",
-        "https://api.openai.com/v1",
-        &["OPENAI_API_KEY"],
-        Apis::OpenAIResponses,
     ),
     (
         "openrouter",
@@ -365,6 +361,8 @@ pub fn builtin_provider(id: &str) -> Option<Arc<dyn Provider>> {
     }
     let provider: Arc<dyn Provider> = match id {
         "anthropic" => Arc::new(anthropic_provider()),
+        "openai" => Arc::new(openai_provider()),
+        "openai-codex" => Arc::new(openai_codex_provider()),
         "azure" => Arc::new(azure_provider()),
         "opencode" => Arc::new(opencode_provider("opencode", "OpenCode Zen")),
         "opencode-go" => Arc::new(opencode_provider("opencode-go", "OpenCode Go")),
@@ -420,6 +418,49 @@ pub fn builtin_models(options: CreateModelsOptions) -> Models {
         models.set_provider_arc(provider);
     }
     models
+}
+
+/// OpenAI: `OPENAI_API_KEY`, or Sign in with ChatGPT (upstream `providers/openai.ts`).
+/// Sign in with ChatGPT tokens only reach the Responses API; with an OAuth credential the
+/// classifier models are not listed.
+pub fn openai_provider() -> BuiltProvider {
+    let auth = ProviderAuth::api_key(env_api_key_auth("OpenAI API key", &["OPENAI_API_KEY"]))
+        .with_oauth(OpenAIChatGPTOAuth::default());
+    let mut options = CreateProviderOptions::new(
+        "openai",
+        auth,
+        all_builtin_models("openai").to_vec(),
+        ProviderApi::single(OpenAIResponsesApi),
+    )
+    .name("OpenAI");
+    options.base_url = Some("https://api.openai.com/v1".into());
+    options.filter_all_models = Some(Arc::new(|models: &[AnyModel], credential: Option<&Credential>| {
+        if matches!(credential, Some(Credential::OAuth(_))) {
+            models
+                .iter()
+                .filter(|model| model.model_type() != ModelType::Classifier)
+                .cloned()
+                .collect()
+        } else {
+            models.to_vec()
+        }
+    }));
+    create_provider(options)
+}
+
+/// OpenAI Codex: the ChatGPT Plus/Pro subscription's Codex backend, OAuth only (upstream
+/// `providers/openai-codex.ts`).
+pub fn openai_codex_provider() -> BuiltProvider {
+    catalog_provider(
+        "openai-codex",
+        "OpenAI Codex (legacy)",
+        Some("https://chatgpt.com/backend-api"),
+        ProviderAuth {
+            api_key: None,
+            oauth: Some(Arc::new(OpenAICodexOAuth::default())),
+        },
+        ProviderApi::single(OpenAICodexResponsesApi),
+    )
 }
 
 /// Anthropic: `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, or `ANTHROPIC_AUTH_TOKEN` sent as a

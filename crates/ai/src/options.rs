@@ -272,6 +272,7 @@ pub enum ApiOptions {
     OpenAICompletions(OpenAICompletionsOptions),
     OpenAIResponses(OpenAIResponsesOptions),
     AzureOpenAIResponses(AzureOpenAIResponsesOptions),
+    OpenAICodexResponses(OpenAICodexResponsesOptions),
     GoogleGenerativeAi(GoogleOptions),
     GoogleVertex(GoogleVertexOptions),
     MistralConversations(MistralOptions),
@@ -410,6 +411,20 @@ pub struct AzureOpenAIResponsesOptions {
     pub azure_base_url: Option<String>,
     /// Deployment name; defaults to the model id or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`.
     pub azure_deployment_name: Option<String>,
+}
+
+/// Options of the `openai-codex-responses` API (upstream `OpenAICodexResponsesOptions`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OpenAICodexResponsesOptions {
+    /// `none` sends the model's `off` level.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// `auto`, `concise`, `detailed`, `off` or `on`. Default: `auto`.
+    pub reasoning_summary: Option<String>,
+    pub service_tier: Option<String>,
+    /// `low`, `medium` or `high`. Default: `low`.
+    pub text_verbosity: Option<String>,
+    /// `auto`, `none` or `required`. Default: `auto`.
+    pub tool_choice: Option<String>,
 }
 
 /// Gemini thinking level.

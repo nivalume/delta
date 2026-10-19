@@ -35,6 +35,8 @@ http.workspace = true
 indexmap.workspace = true
 jsonschema.workspace = true
 reqwest.workspace = true
+# zstd request bodies of the OpenAI Codex SSE transport.
+ruzstd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -42,9 +44,11 @@ thiserror.workspace = true
 # `net` and `io-util` serve the OAuth loopback callback server.
 tokio = { workspace = true, features = ["net", "io-util"] }
 tokio-util.workspace = true
+# WebSocket transport of the OpenAI Codex Responses API.
+tokio-tungstenite.workspace = true
 tracing.workspace = true
 url.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["v7"] }
 
 aws-config = { workspace = true, optional = true }
 aws-sdk-bedrockruntime = { workspace = true, optional = true }

@@ -340,7 +340,7 @@ async fn accept_loop<T: Send + 'static>(listener: TcpListener, shared: Arc<Share
 }
 
 /// The request line's method and target, or `None` for a malformed or oversized head.
-async fn read_request_head(stream: &mut TcpStream) -> Option<(String, String)> {
+pub(crate) async fn read_request_head(stream: &mut TcpStream) -> Option<(String, String)> {
     let mut head = Vec::with_capacity(1024);
     let mut chunk = [0u8; 4096];
     loop {
@@ -363,12 +363,13 @@ async fn read_request_head(stream: &mut TcpStream) -> Option<(String, String)> {
     Some((method, target))
 }
 
-async fn send_page(stream: &mut TcpStream, status: u16, html: &str) {
+pub(crate) async fn send_page(stream: &mut TcpStream, status: u16, html: &str) {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
         409 => "Conflict",
+        500 => "Internal Server Error",
         _ => "Bad Gateway",
     };
     let response = format!(

@@ -3,8 +3,10 @@
 //! Port of upstream `src/api/openai-responses.ts`. Conversion and stream processing live in
 //! [`super::openai_responses_shared`].
 //!
-//! Not ported: Sign in with ChatGPT specifics (request fields it rejects, the usage-limit
-//! hint) and the OpenAI Codex (ChatGPT subscription) API.
+//! Sign in with ChatGPT: an OpenAI access token (a key without the `sk-` prefix sent to
+//! `api.openai.com`) leaves out the request fields token sharing rejects, and usage-limit
+//! errors link to the ChatGPT usage page. The ChatGPT subscription's Codex backend is the
+//! separate [`super::openai_codex_responses`] API.
 
 use serde_json::{Map, Value, json};
 
@@ -34,6 +36,25 @@ const OPENAI_TOOL_CALL_PROVIDERS: [&str; 3] = ["openai", "openai-codex", "openco
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS: u64 = 16;
 /// Fixed `reasoning.effort` while `configuration_update` items carry the thinking level.
 const CONFIGURATION_UPDATE_REQUEST_EFFORT: &str = "medium";
+const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/settings/usage";
+
+/// OpenAI API keys start with `sk-`; a different credential sent directly to OpenAI is a
+/// Sign in with ChatGPT access token.
+fn is_chatgpt_sign_in(model: &Model, api_key: Option<&str>) -> bool {
+    model.provider == "openai"
+        && model.base_url == "https://api.openai.com/v1"
+        && api_key.is_some_and(|key| !key.starts_with("sk-"))
+}
+
+/// Sign in with ChatGPT shares the subscription's usage limit with other apps: point to the
+/// usage page when the limit is hit.
+fn with_chatgpt_usage_hint(message: String) -> String {
+    if message.contains("subscription_sharing_usage_limit_exceeded") {
+        format!("{message}\nCheck your ChatGPT usage: {CHATGPT_USAGE_URL}")
+    } else {
+        message
+    }
+}
 
 /// The `openai-responses` API.
 #[derive(Clone, Copy, Debug, Default)]
@@ -139,11 +160,12 @@ fn resolve_cache_retention(options: &StreamOptions) -> CacheRetention {
 /// Effort to send in `configuration_update` items, or `None` to send it as `reasoning.effort`.
 fn get_configuration_update_effort(
     model: &Model,
+    options: &StreamOptions,
     api_options: &OpenAIResponsesOptions,
     compat: &ResolvedCompat,
 ) -> Option<String> {
-    // Not ported: Sign in with ChatGPT rejects configuration_update items upstream.
-    if !compat.supports_mid_convo_effort {
+    // Sign in with ChatGPT rejects configuration_update items.
+    if !compat.supports_mid_convo_effort || is_chatgpt_sign_in(model, options.api_key.as_deref()) {
         return None;
     }
     let effort = api_options.reasoning_effort.as_ref()?;
@@ -255,9 +277,9 @@ fn build_params(
         },
     )?;
 
-    // Not ported: Sign in with ChatGPT (a non-`sk-` key sent to api.openai.com) omits
-    // prompt_cache_retention, prompt_cache_options, max_output_tokens and temperature upstream.
     let retention = resolve_cache_retention(options);
+    // Sign in with ChatGPT rejects these request fields.
+    let omit_unsupported_fields = is_chatgpt_sign_in(model, options.api_key.as_deref());
     let mut params = Map::new();
     params.insert("model".into(), model.id.clone().into());
     params.insert("input".into(), Value::Array(input));
@@ -267,23 +289,24 @@ fn build_params(
     {
         params.insert("prompt_cache_key".into(), key.into());
     }
-    if let Some(value) = get_prompt_cache_retention(compat, retention) {
+    if let Some(value) = get_prompt_cache_retention(compat, retention).filter(|_| !omit_unsupported_fields) {
         params.insert("prompt_cache_retention".into(), value.into());
     }
-    if let Some(value) = get_prompt_cache_options(compat, retention) {
+    if let Some(value) = get_prompt_cache_options(compat, retention).filter(|_| !omit_unsupported_fields) {
         params.insert("prompt_cache_options".into(), value);
     }
     params.insert("store".into(), Value::Bool(false));
 
     if let Some(max_tokens) = options.max_tokens.filter(|max| *max > 0)
         && compat.supports_max_output_tokens
+        && !omit_unsupported_fields
     {
         params.insert(
             "max_output_tokens".into(),
             max_tokens.max(OPENAI_RESPONSES_MIN_OUTPUT_TOKENS).into(),
         );
     }
-    if let Some(temperature) = options.temperature {
+    if let Some(temperature) = options.temperature.filter(|_| !omit_unsupported_fields) {
         params.insert("temperature".into(), json!(temperature));
     }
     if let Some(tier) = &api_options.service_tier {
@@ -415,7 +438,7 @@ async fn run(
 ) -> Result<()> {
     let compat = get_compat(model);
     let api_options = api_options_of(options);
-    let configuration_update_effort = get_configuration_update_effort(model, &api_options, &compat);
+    let configuration_update_effort = get_configuration_update_effort(model, options, &api_options, &compat);
     if let Some(effort) = &configuration_update_effort {
         builder.output.provider_thinking_level = Some(effort.clone());
     }
@@ -487,8 +510,12 @@ pub fn stream(model: &Model, context: &TranscriptContext, options: StreamOptions
     };
     spawn_stream(model, options.cancel.clone(), move |mut builder| async move {
         let result = run(&mut builder, &target, &context, &options).await;
-        // Not ported: the ChatGPT usage-limit hint appended to Sign in with ChatGPT errors.
-        let result = result.map_err(|error| format_provider_error(error, &format!("{prefix} API error")));
+        let result = result.map_err(
+            |error| match format_provider_error(error, &format!("{prefix} API error")) {
+                Error::Aborted => Error::Aborted,
+                error => Error::msg(with_chatgpt_usage_hint(error.to_string())),
+            },
+        );
         (builder, result)
     })
 }
@@ -544,7 +571,7 @@ mod tests {
         let context = normalize_context(&Context::new(vec![Message::user("hi")]).with_system_prompt("sys"));
         let compat = get_compat(model);
         let api_options = api_options_of(options);
-        let effort = get_configuration_update_effort(model, &api_options, &compat);
+        let effort = get_configuration_update_effort(model, options, &api_options, &compat);
         build_params(
             model,
             &context,

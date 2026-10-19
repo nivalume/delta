@@ -61,14 +61,15 @@ impl Default for AnthropicOAuth {
     }
 }
 
-/// Code and state parsed from pasted input (upstream `parseAuthorizationInput`).
+/// Code and state parsed from pasted input (upstream `parseAuthorizationInput`; the
+/// OpenAI Codex flow has the same parser).
 #[derive(Debug, Default, PartialEq, Eq)]
-struct AuthorizationInput {
-    code: Option<String>,
-    state: Option<String>,
+pub(crate) struct AuthorizationInput {
+    pub(crate) code: Option<String>,
+    pub(crate) state: Option<String>,
 }
 
-fn parse_authorization_input(input: &str) -> AuthorizationInput {
+pub(crate) fn parse_authorization_input(input: &str) -> AuthorizationInput {
     let value = input.trim();
     if value.is_empty() {
         return AuthorizationInput::default();
