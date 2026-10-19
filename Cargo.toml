@@ -39,6 +39,7 @@ uuid = { version = "1.28", features = ["v4"] }
 
 # dev
 aws-smithy-eventstream = "0.61"
+google-cloud-gax = { version = "1.15", default-features = false }
 pretty_assertions = "1"
 tokio-test = "0.4"
 wiremock = "0.6"

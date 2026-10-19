@@ -3188,6 +3188,7 @@ dependencies = [
  "futures",
  "google-cloud-aiplatform-v1",
  "google-cloud-auth",
+ "google-cloud-gax",
  "http",
  "indexmap 2.14.2",
  "jsonschema",
