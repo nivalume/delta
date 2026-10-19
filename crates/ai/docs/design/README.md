@@ -13,6 +13,7 @@
 | [transcript.md](transcript.md) | `transcript`, `transform`, `estimate`, `simple_options` | System message replay, cross-provider switching, token estimation, thinking budgets |
 | [http.md](http.md) | `http`, `json`, `api::common`, `api::constrained_sampling` | SSE decoding, retries, error bodies, streaming JSON parsing, API task framework, shared constrained sampling |
 | [catalog-and-faux.md](catalog-and-faux.md) | `providers::catalog`, `providers::faux` | Built-in model catalog, faux provider for tests |
+| [cloudflare.md](cloudflare.md) | `api::cloudflare`, `providers::cloudflare` | Cloudflare AI Gateway and Workers AI: auth, endpoint placeholders |
 | `api-*.md` | `api::*` | Implementation of each wire protocol, one document per API |
 
 ## Overall structure

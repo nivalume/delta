@@ -79,6 +79,8 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 | Mistral | `mistral` | `mistral-conversations` | |
 | Groq | `groq` | `openai-completions` | |
 | Cerebras | `cerebras` | `openai-completions` | |
+| Cloudflare AI Gateway | `cloudflare-ai-gateway` | `anthropic-messages`, `openai-completions`, `openai-responses` | |
+| Cloudflare Workers AI | `cloudflare-workers-ai` | `openai-completions` | |
 | xAI | `xai` | `openai-responses` | |
 | OpenRouter | `openrouter` | `openai-completions`, `anthropic-messages` | |
 | Vercel AI Gateway | `vercel-ai-gateway` | `anthropic-messages` | |
@@ -99,7 +101,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 
 Any OpenAI-compatible API (Ollama, vLLM, LM Studio, and so on) works through [`create_provider()`](#create_provider).
 
-Not built in yet: OpenAI Codex, Radius, TypeSafe, GitHub Copilot, Cloudflare AI Gateway and Cloudflare Workers AI. Their catalogs ship with the crate, but their APIs or auth flows are not ported.
+Not built in yet: OpenAI Codex, Radius, TypeSafe and GitHub Copilot. Their catalogs ship with the crate, but their APIs or auth flows are not ported.
 
 ## Installation
 
@@ -238,11 +240,11 @@ Snippets in the rest of this README assume a `models` collection set up like thi
 
 A **provider** is the runtime unit: it owns its model catalog, its auth (API key resolution, OAuth refresh) and its request behavior. It implements the `Provider` trait. A `Models` collection holds providers and routes every request to the provider that owns the model. `Models` is cheap to clone; clones share state.
 
-Providers share **API implementations** (the wire protocols, `ProviderStreams`): Anthropic models use `anthropic-messages`, OpenAI uses `openai-responses`, while Groq, Cerebras, OpenRouter and most others share `openai-completions`. Mixed-API providers (OpenRouter, OpenCode Zen, Fireworks, Azure) dispatch per model on `model.api`.
+Providers share **API implementations** (the wire protocols, `ProviderStreams`): Anthropic models use `anthropic-messages`, OpenAI uses `openai-responses`, while Groq, Cerebras, OpenRouter and most others share `openai-completions`. Mixed-API providers (OpenRouter, OpenCode Zen, Fireworks, Azure, Cloudflare AI Gateway) dispatch per model on `model.api`.
 
 ### Provider Factories
 
-Upstream has one module per provider. Most providers only pair an environment variable with an API implementation, so this crate keeps them in one table in `providers::builtin` and builds them by id. Anthropic and Azure also have their own factory functions.
+Upstream has one module per provider. Most providers only pair an environment variable with an API implementation, so this crate keeps them in one table in `providers::builtin` and builds them by id. Anthropic and Azure also have their own factory functions. The Cloudflare providers are in `providers::cloudflare` (`cloudflare_ai_gateway_provider()`, `cloudflare_workers_ai_provider()`).
 
 ```rust
 use delta_ai::Models;
@@ -521,6 +523,8 @@ Built-in providers resolve these environment variables:
 | Mistral | `MISTRAL_API_KEY` |
 | Groq | `GROQ_API_KEY` |
 | Cerebras | `CEREBRAS_API_KEY` |
+| Cloudflare AI Gateway | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
+| Cloudflare Workers AI | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` |
 | xAI | `XAI_API_KEY` |
 | Fireworks | `FIREWORKS_API_KEY` |
 | Together AI | `TOGETHER_API_KEY` |
@@ -546,6 +550,25 @@ Built-in providers resolve these environment variables:
 `qwen-token-plan-individual` and `qwen-token-plan` share the international endpoint and `QWEN_TOKEN_PLAN_API_KEY`. The Individual provider lists only the models documented for Individual subscriptions. Stored credentials are provider-scoped, so save the key under the provider id you register.
 
 Amazon Bedrock (feature `bedrock`) resolves ambient AWS credentials (`AWS_BEARER_TOKEN_BEDROCK`, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, ECS task roles, web identity tokens); its API-key login flow supports bearer tokens, AWS profiles and the existing credential chain. Vertex AI (feature `vertex`) resolves either an API key or Application Default Credentials plus project and location, with an API-key login flow for API keys, ADC and service-account files.
+
+The Cloudflare providers read each value from the stored credential first (the key, and `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_GATEWAY_ID` in its `env`) and fall back to the environment per value, so a stored key can be combined with ids from the environment. Their login flows prompt for the key and the ids. AI Gateway sends the key as `cf-aig-authorization: Bearer <key>` and suppresses `Authorization` and `x-api-key`; an explicit `Authorization` request header passes a provider key through the gateway (BYOK).
+
+```rust
+use delta_ai::Credential;
+use serde_json::json;
+
+// A stored Cloudflare AI Gateway credential, as pi writes it to auth.json
+let credential: Credential = serde_json::from_value(json!({
+    "type": "api_key",
+    "key": "...",
+    "env": {
+        "CLOUDFLARE_ACCOUNT_ID": "account-id",
+        "CLOUDFLARE_GATEWAY_ID": "gateway-id"
+    }
+}))
+.unwrap();
+assert!(matches!(credential, Credential::ApiKey(_)));
+```
 
 The `env` method of `AuthContext` reads these variables. Inject your own `AuthContext` through `CreateModelsOptions::auth_context` for tests or sandboxes.
 
@@ -1252,7 +1275,7 @@ let gateway = create_provider(CreateProviderOptions::new(
 ));
 ```
 
-Provider-wide endpoint or request changes belong in the provider's API implementation: wrap the `ProviderStreams` you pass as `api` so every request goes through the change before dispatch. The built-in Azure and OpenCode providers do this.
+Provider-wide endpoint or request changes belong in the provider's API implementation: wrap the `ProviderStreams` you pass as `api` so every request goes through the change before dispatch. The built-in Azure, OpenCode and Cloudflare providers do this; the Cloudflare providers fill account/gateway placeholders in the base URL from the resolved provider env (`providers::cloudflare::CloudflareStreams`).
 
 ```rust
 use delta_ai::api::openai_completions::OpenAICompletionsApi;
@@ -1442,7 +1465,7 @@ Built-in API implementations:
 
 ### OpenAI Compatibility Settings
 
-The `openai-completions` API is implemented by many providers with small differences. By default the library detects compatibility settings from `baseUrl` for known OpenAI-compatible providers (Cerebras, xAI, DeepSeek, NVIDIA NIM, Together AI, zAI, OpenCode and others). For custom proxies or unknown endpoints, set the model's `compat` field. `Model::compat` is a `ModelCompat` enum, parsed with the schema that matches `model.api`; for `openai-completions` it is `OpenAICompletionsCompat`, for the Responses APIs `OpenAIResponsesCompat`. All fields are optional and unknown fields are kept in `extra`.
+The `openai-completions` API is implemented by many providers with small differences. By default the library detects compatibility settings from `baseUrl` for known OpenAI-compatible providers (Cerebras, xAI, DeepSeek, NVIDIA NIM, Together AI, zAI, OpenCode, Cloudflare Workers AI and others). For custom proxies or unknown endpoints, set the model's `compat` field. `Model::compat` is a `ModelCompat` enum, parsed with the schema that matches `model.api`; for `openai-completions` it is `OpenAICompletionsCompat`, for the Responses APIs `OpenAIResponsesCompat`. All fields are optional and unknown fields are kept in `extra`.
 
 `OpenAICompletionsCompat` (JSON name, then meaning):
 
@@ -1719,7 +1742,7 @@ Rules:
 
 ### Provider-Scoped Environment Overrides
 
-Set `env` in `StreamOptions` to scope provider configuration to a request. Values in `env` are used before process environment variables for provider auth and configuration such as Azure OpenAI settings, Vertex project/location, Bedrock settings and `PI_CACHE_RETENTION`.
+Set `env` in `StreamOptions` to scope provider configuration to a request. Values in `env` are used before process environment variables for provider auth and configuration such as Cloudflare account IDs, Azure OpenAI settings, Vertex project/location, Bedrock settings and `PI_CACHE_RETENTION`.
 
 ```rust,no_run
 # use delta_ai::{Context, Models};

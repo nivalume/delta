@@ -3,9 +3,10 @@
 //! Upstream has one module per provider (`src/providers/<id>.ts`). Most of them only pair
 //! an environment variable with an API implementation, so delta keeps those in one table and
 //! writes out the providers with their own behavior (Azure, OpenCode, Bedrock, Vertex AI).
+//! The Cloudflare providers live in [`crate::providers::cloudflare`].
 //!
-//! Not built in yet: providers whose APIs or auth flows are not ported (Cloudflare AI
-//! Gateway and Workers AI, GitHub Copilot, OpenAI Codex, Radius, TypeSafe). OAuth login of
+//! Not built in yet: providers whose APIs or auth flows are not ported (GitHub Copilot,
+//! OpenAI Codex, Radius, TypeSafe). OAuth login of
 //! the providers that offer it upstream is not ported either; they authenticate with API
 //! keys.
 
@@ -303,6 +304,8 @@ pub fn builtin_provider(id: &str) -> Option<Arc<dyn Provider>> {
         "azure" => Arc::new(azure_provider()),
         "opencode" => Arc::new(opencode_provider("opencode", "OpenCode Zen")),
         "opencode-go" => Arc::new(opencode_provider("opencode-go", "OpenCode Go")),
+        "cloudflare-ai-gateway" => Arc::new(crate::providers::cloudflare::cloudflare_ai_gateway_provider()),
+        "cloudflare-workers-ai" => Arc::new(crate::providers::cloudflare::cloudflare_workers_ai_provider()),
         #[cfg(feature = "bedrock")]
         "amazon-bedrock" => Arc::new(cloud::amazon_bedrock_provider()),
         #[cfg(feature = "vertex")]
