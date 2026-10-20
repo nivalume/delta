@@ -32,39 +32,55 @@ pub trait Checkpoint: Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
 }
 impl Checkpoint for Json { /* reads the `phase` key */ }
 
-pub trait TaskDefinition: Send + Sync + 'static {
+pub trait TaskDefinition: Send + Sync + Sized + 'static {
     type Input: Serialize + DeserializeOwned + Send + Sync + 'static;
     type Checkpoint: Checkpoint;
     type Result: Serialize + DeserializeOwned + Send + Sync + 'static;
 
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     fn version(&self) -> u32;
     fn initial(&self, input: &Self::Input) -> Self::Checkpoint;
 
     /// One phase: perform the effect for `phase` and return the commit that ends it.
-    async fn run(&self, phase: Self::Checkpoint, rt: &TaskRuntime<Self>, ctx: &Context)
-        -> Result<Next<Self>, TaskError>;
+    /// May be written as `async fn`; the future must be `Send`.
+    fn run<'a>(&'a self, phase: Self::Checkpoint, rt: &'a TaskRuntime<Self>, ctx: &'a Context)
+        -> impl Future<Output = Result<Next<Self>, TaskError>> + Send + 'a;
     /// Runs once after an abort mark, when the ordinary owned work drained. Must end terminal.
-    async fn abort(&self, phase: Self::Checkpoint, rt: &TaskRuntime<Self>, ctx: &Context)
-        -> Result<Next<Self>, TaskError>;
+    fn abort<'a>(&'a self, phase: Self::Checkpoint, rt: &'a TaskRuntime<Self>, ctx: &'a Context)
+        -> impl Future<Output = Result<Next<Self>, TaskError>> + Send + 'a;
+    /// Whether `migrate` takes older stored versions (inspection and handover read it
+    /// without running task code); default false.
+    fn can_migrate(&self) -> bool { false }
     /// Older stored versions; default: unsupported, the task stays blocked.
     fn migrate(&self, input: Json, checkpoint: Json, from: u32)
-        -> Result<(Self::Input, Self::Checkpoint), MigrateError> { Err(MigrateError::Unsupported) }
+        -> Result<(Self::Input, Self::Checkpoint), MigrateError> { Err(MigrateError::Unsupported { from }) }
 }
 
+/// What a phase and a commit closure see: the record as committed, input and checkpoint decoded.
+pub struct RunningTask<T: TaskDefinition> { pub record: TaskRecord, pub input: T::Input, pub checkpoint: T::Checkpoint }
+
 /// Type-erased definition (`Arc<dyn AnyTask>`), implemented for every `T: TaskDefinition`
-/// by a blanket impl that serializes at the boundary.
-pub trait AnyTask: Send + Sync { fn name(&self) -> &str; fn version(&self) -> u32; fn can_migrate(&self) -> bool; /* erased run/abort/migrate */ }
+/// by a blanket impl that converts at the boundary. Sealed: its erased calls (run, abort,
+/// migrate over `Json`) live on a private supertrait.
+pub trait AnyTask: sealed::Erased + Send + Sync + 'static { fn name(&self) -> &str; fn version(&self) -> u32; fn can_migrate(&self) -> bool; }
 
 /// Where the scheduler finds definitions. The agent layer's `Registry` implements it
-/// (harness.md); tests use a fixed catalog.
-pub trait TaskCatalog: Send + Sync {
+/// (harness.md); kernels and tests use `MemoryCatalog` (install / remove by name).
+pub trait TaskCatalog: Send + Sync + 'static {
     fn snapshot(&self) -> Arc<dyn CatalogSnapshot>;
     fn subscribe(&self) -> watch::Receiver<u64>;          // bumps on every publication
 }
 pub trait CatalogSnapshot: Any + Send + Sync {
     fn generation(&self) -> u64;
     fn task(&self, name: &str) -> Option<&Arc<dyn AnyTask>>;
+    /// The extension that installed `task`, named in reports; default none (built-ins).
+    fn extension_of(&self, task: &Arc<dyn AnyTask>) -> Option<String> { None }
+}
+
+impl Tx<'_> {
+    /// Typed creation over `create_task_record`: kind, version, encoded input and initial checkpoint.
+    pub async fn create_task<T: TaskDefinition>(&mut self, definition: &T, input: T::Input, options: TaskOptions)
+        -> Result<TaskRef<T::Result>, TxError>;
 }
 ```
 
@@ -85,9 +101,18 @@ pub enum NextState<S, R> {
     Running(S),
     Waiting { checkpoint: S, on: Vec<TaskId>, policy: JoinPolicy },
     Sleeping { checkpoint: S, until: i64 },
-    Terminal(TaskOutcome<R>),
+    Terminal(Outcome<R>),
 }
-pub struct Next<T: TaskDefinition>(/* Box<dyn for<'a> FnOnce(&'a mut Tx<'_>, &'a RunningTask<T>) -> BoxFuture<'a, Result<NextState<..>, TxError>> + Send> */);
+/// How a task ends itself; `orphaned` and `faulted` are written only by the scheduler.
+pub enum Outcome<R> { Completed(R), Failed { error: TaskOutcomeError, result: Option<R> }, Aborted { reason: Option<String>, result: Option<R> } }
+pub type NextOf<T> = NextState<T::Checkpoint, T::Result>;
+
+pub struct Next<T: TaskDefinition>(/* Box<dyn for<'a, 'l> FnOnce(&'a mut Tx<'l>, &'a RunningTask<T>) -> BoxFuture<'a, Result<NextOf<T>, TxError>> + Send> */);
+impl<T: TaskDefinition> Next<T> {
+    pub fn commit(f) -> Self;                       // rt.next(f) is the same
+    pub fn state(NextOf<T>) -> Self;                // no writes
+    pub fn running(cp) / sleep(until, cp) / wait(on, policy, cp) / complete(result) / fail(message) / abort(reason) -> Self;
+}
 ```
 
 The closures are async (they return a `BoxFuture`, like `Session::commit`'s) because document
@@ -104,41 +129,56 @@ occur, because the handler has returned before its closing commit is admitted.
 ## Task runtime
 
 ```rust
-pub struct TaskRuntime<T: TaskDefinition> { /* invocation handle, actor sender, phase snapshot */ }
+pub struct TaskRuntime<T: TaskDefinition> { /* Arc<RuntimeCore { scheduler, invocation, phase snapshot, phase data }>, RunningTask<T> */ }
 
 impl<T: TaskDefinition> TaskRuntime<T> {
     pub fn task_id(&self) -> TaskId;
     pub fn conversation_id(&self) -> ConversationId;
-    pub fn context(&self) -> &Context;                 // cancelled when the invocation ends
+    pub fn task(&self) -> &RunningTask<T>;            // as committed when the phase started
+    pub fn input(&self) -> &T::Input;
+    pub fn context(&self) -> &Context;                 // cancelled by an abort mark (run mode), close and the invocation's end
     pub fn catalog(&self) -> &Arc<dyn CatalogSnapshot>;   // this phase's snapshot
     pub fn services(&self) -> &Services;               // the session's services (session.md)
+    pub fn phase_data(&self) -> &PhaseData;            // a per-phase type map: the agent layer's hook point
+    pub fn is_ended(&self) -> bool;
 
     /// An intermediate commit of this phase (intent, progress). `None` keeps the state.
     pub async fn commit<R>(&self, ctx: &Context,
-        f: impl for<'a> FnOnce(&'a mut Tx<'_>, &'a RunningTask<T>) -> BoxFuture<'a, Result<(R, Option<NextState<..>>), TxError>> + Send)
+        f: impl for<'a, 'l> FnOnce(&'a mut Tx<'l>, &'a RunningTask<T>) -> BoxFuture<'a, Result<(R, Option<NextOf<T>>), TxError>> + Send + 'static)
         -> Result<R, RuntimeError>;
     /// The closing commit of the phase, returned from `run` / `abort`.
-    pub fn next(&self, f: impl for<'a> FnOnce(&'a mut Tx<'_>, &'a RunningTask<T>) -> BoxFuture<'a, Result<NextState<..>, TxError>> + Send + 'static) -> Next<T>;
+    pub fn next(&self, f: impl for<'a, 'l> FnOnce(&'a mut Tx<'l>, &'a RunningTask<T>) -> BoxFuture<'a, Result<NextOf<T>, TxError>> + Send + 'static) -> Next<T>;
 
-    pub async fn memo<V: Serialize + DeserializeOwned>(&self, name: &str, ctx: &Context) -> Result<Option<V>, RuntimeError>;
-    pub async fn memo_or_insert<V>(&self, name: &str, candidate: V, ctx: &Context) -> Result<V, RuntimeError>;
+    pub fn memo<V: DeserializeOwned>(&self, name: &str) -> Result<Option<V>, RuntimeError>;   // from memory
+    pub async fn memo_or_insert<V: Serialize + DeserializeOwned>(&self, name: &str, candidate: V, ctx: &Context) -> Result<V, RuntimeError>;
     pub async fn get_task(&self, id: TaskId, ctx: &Context) -> Result<Option<TaskRecord>, RuntimeError>;
-    pub async fn wait_for_task(&self, id: TaskId, ctx: &Context) -> Result<SettledTask, RuntimeError>;
+    pub async fn wait_for_task(&self, id: impl Into<TaskId>, ctx: &Context) -> Result<SettledTask, RuntimeError>;
     pub async fn abort_owned(&self, id: TaskId, ctx: &Context) -> Result<(), RuntimeError>;
     pub async fn owned_tasks(&self, ctx: &Context) -> Result<Vec<TaskRecord>, RuntimeError>;
-    pub async fn outcomes(&self, ids: &[TaskId], ctx: &Context) -> Result<Vec<TaskOutcome<Json>>, RuntimeError>;
+    pub async fn outcomes(&self, ids: &[TaskId], ctx: &Context) -> Result<Vec<TaskOutcome>, RuntimeError>;
     pub async fn entry(&self, id: EntryId, ctx: &Context) -> Result<Option<EntryRecord>, RuntimeError>;
-    pub async fn snapshot<D: DocDefinition>(&self, at: DocAddress<D>, ctx: &Context) -> ..;   // DocumentReader: snapshot, snapshot_as_of (session.md)
-    pub fn now(&self) -> i64;                           // the session clock, epoch ms (records.md times are i64)
-    pub fn report(&self, error: impl Into<ReportError>, from: Option<ReportFrom>);
-    pub fn timer(&self, delay: Duration) -> Timer;      // paces work inside a phase; dropped with the invocation
+    pub async fn snapshot<D: DocDefinition>(&self, at: DocAddress<D>, ctx: &Context) -> Result<Option<Json>, RuntimeError>;
+    pub async fn snapshot_as_of<D: ConversationDoc<History = Rewindable>>(&self, at: DocAddress<D>, entry: EntryId, ctx: &Context) -> ..;
+    pub fn now(&self) -> i64;                           // Session::now(), epoch ms (records.md times are i64)
+    pub fn report(&self, error: &(dyn Error + Send + Sync), from: Option<ReportFrom>);   // task_error / extension_error / host_error
+    pub fn timer(&self, delay: Duration) -> Timer;      // paces work inside a phase; fails once the invocation's context is cancelled
 }
+
+pub enum RuntimeError { Ended(TaskId), Closing, Terminal(TaskId), NotRunning { task, status }, Aborted(TaskId),
+    NotOwned { task, owner }, NotTerminal(TaskId), UnknownTask(TaskId), State(StateError), Codec(serde_json::Error),
+    Cancelled(Cancelled), Session(SessionError) }
+/// A state a task may not commit: UnknownTask, FailFastNotOwned, Cycle { task, on, path }, InvalidSleep,
+/// AbortWait, AbortSleep, AbortWithoutOutcome.
+pub enum StateError { .. }
+/// What a handler returns: any error (`From<E: Into<Box<dyn Error>>>`), so `?` works; its message is the fault's.
+pub struct TaskError { .. }
 ```
 
 The agent layer adds what its tasks need (`agent()`, `settings()`, `models()`, `hooks()`,
-`env()`, `context_view()`) as an extension trait on `TaskRuntime`, built from `services()`
-and the phase's catalog snapshot ([harness.md](harness.md)); the kernel defines none of
-them.
+`env()`, `context_view()`) as an extension trait on `TaskRuntime`, built from `services()`,
+the phase's catalog snapshot and `phase_data()` (where it keeps the agent resolved once per
+phase, an `Arc<tokio::sync::OnceCell<..>>` inserted at first use) ([harness.md](harness.md));
+the kernel defines none of them.
 
 Rules (§5.1):
 
@@ -167,20 +207,29 @@ document.
 
 ## Actor and invocations
 
-The scheduler lives inside the session actor ([session.md](session.md)): its state (live
-task index, owner edges, invocation table, waiters, wake state) is owned by
-the actor task and touched only on the line. Phase handlers run in tokio tasks:
+The scheduler's memory (live task mirror, ownership tree, candidate sets, invocation table,
+task waits, flags) is an `Arc<Mutex<State>>` that an on-line commit observer
+(`Session::observe_commits`) keeps in step with every adopted commit; the scheduler's own
+commit closures read it on the line, and outside readers (`wake`, `memo`) lock it briefly, so
+it is uncontended. One driver tokio task per scheduler runs the reconcile and reservation
+passes when the observer, a step or a host call asks (a `Notify`), arms the sleep timer and
+follows catalog publications; it holds only a `Weak` of the scheduler between passes. Phase
+handlers run in tokio tasks:
 
 ```rust
 struct Invocation {
-    task: TaskId,
+    id: u64, task: TaskId, kind: String, conversation: ConversationId,
     mode: Mode,                        // Run | Abort
-    ctx: Context, cancel: Canceller,   // signalled by abort marks, close and `end`
-    definition: Arc<dyn AnyTask>,      // what it started with; handover compares identity
-    snapshot: Arc<dyn CatalogSnapshot>,   // refreshed at each phase boundary
-    join: JoinHandle<()>,
+    extension: Option<String>,         // installer of the definition it runs, for reports
+    ctx: Context, canceller: Canceller,   // signalled by abort marks, close and `end`
+    ended: AtomicBool,                 // runtime operations reject once set
+    done: watch::Sender<bool>,         // its code finished (or was dropped): close joins on it
+    join: Mutex<Option<AbortHandle>>,  // close aborts stragglers after the grace
 }
 ```
+
+The definition the invocation started with and the phase's snapshot travel with its run loop
+(`Phase`); the step compares the definition's identity at each boundary.
 
 - Reservation is a commit on the line: `pending`, `waiting` (every `on` terminal) or
   `sleeping` (due) → `running`, with migration in the same commit. It registers the
@@ -194,14 +243,21 @@ struct Invocation {
 | 1 | State is `terminal`, `completing`, `waiting` or `sleeping` | Stop the invocation; nothing written |
 | 2 | Harness closing | Stop; keep checkpoint and abort mark for reopen |
 | 3 | Run mode and `abort_requested`, or a non-background task below a live owner with cancellation intent | Stop the run invocation; schedule a reconcile; an abort invocation starts once its ordinary owned work drained |
-| 4 | The phase returned `Err` or its closing closure failed (not a `TxError::Storage`) | Write terminal `faulted` with the error message; run the cleanup hook |
+| 4 | The phase returned `Err` or panicked, or its closing commit failed: the closure's error or panic, a refused state, or settlement refusing its writes (not a storage error or a failed Session) | Roll the closing commit back; a second step writes terminal `faulted` with the message and runs the cleanup hook |
 | 5 | Checkpoint changed, including a new checkpoint within the same phase | Refresh the catalog snapshot; hand over (below) or invoke the next phase in the same invocation |
-| 6 | Checkpoint unchanged | Write terminal `faulted` ("returned without durable progress") |
+| 6 | Checkpoint unchanged | Write terminal `faulted` ("returned without durable progress") in the closing commit, with its other writes |
 
 Before the first phase only rules 1–3 apply. An abort invocation runs `abort` once; then
 rules 1, 2 and 4 apply, and a handler that ends without a terminal outcome faults. A storage
 error in a step fails the session (invariant 7); the invocation ends, the task stays
 `running`, and the next open reserves it again.
+
+Every step ends its invocation on the line, so a runtime commit queued behind it is refused.
+A step without user writes (rules 1–3, the fault step) ends it inside its closure. A closing
+commit cannot: settlement may still refuse its writes, and the task must then stay with this
+invocation for the fault step instead of being reserved again. Its closure registers the stop,
+and the commit observer ends the invocation when the commit publishes the task's record, on
+the line after adoption; a refused commit publishes nothing and the registration is dropped.
 
 **Progress detection.** Rule 6 and the restart count need "the same state committed again".
 delta compares the record's state as stored: `Json` of the previous state against `Json` of
@@ -318,14 +374,28 @@ invocation, no live ordinary owned work and the current snapshot cannot take it;
 when the scheduler would reserve the abort invocation. Only an abort orphans; a missing
 definition alone never does. The orphaning commit runs the cleanup hook.
 
-**Cleanup hook.** `SchedulerHooks::settle_scheduler_outcome(tx, record)`, installed by the
-layer above, is called in the commit that makes a scheduler-written outcome (`faulted`,
-`orphaned`) terminal, which is the final commit after a hold. The scheduler passes every
-such record and does nothing kind-specific; the hook cleans up what the task's own handlers
-would have (no `by_task_id` there: the commit has no task scope). The agent layer's hook
-handles its three kinds and ignores the rest: a run generation's partial, inputs and run
-marker ([generation.md](generation.md)), a tool task's slot ([tool.md](tool.md)), a
-compaction's status ([compaction.md](compaction.md)).
+**Cleanup hooks.** The layer above installs `SchedulerHooks`; the scheduler passes every
+task alike and does nothing kind-specific.
+
+```rust
+pub trait SchedulerHooks: Send + Sync + 'static {
+    /// In the commit that makes a scheduler-written outcome (`faulted`, `orphaned`) terminal,
+    /// the final commit after a hold; `record` is the terminal record. Default: nothing.
+    fn settle_scheduler_outcome<'a>(&'a self, tx: &'a mut Tx<'_>, record: &'a TaskRecord) -> BoxFuture<'a, Result<(), TxError>>;
+    /// For every conversation a cascade or a conversation abort reached that has queued inputs.
+    /// Default: each settles `unanswered` with reason `aborted`.
+    fn withdraw_inputs<'a>(&'a self, tx: &'a mut Tx<'_>, conversation: ConversationId, queued: &'a [SubmissionRecord]) -> BoxFuture<'a, Result<(), TxError>>;
+}
+```
+
+The settle hook cleans up what the task's own handlers would have (no `by_task_id` there:
+the commit has no task scope). The agent layer's hook handles its three kinds and ignores
+the rest: a run generation's partial, inputs and run marker ([generation.md](generation.md)),
+a tool task's slot ([tool.md](tool.md)), a compaction's status
+([compaction.md](compaction.md)). Its `withdraw_inputs` also removes the inputs from
+`delta.inbox` ([inbox.md](inbox.md)). The scheduler finds the queued inputs by a storage scan
+inside its commit (the kernel's own records), so the hook never scans. A hook error in a
+scheduler commit fails the Session.
 
 ## Structured concurrency (§5.5)
 
@@ -373,8 +443,9 @@ which holds its invocation.
   `resume`, say) sleeps again with the same checkpoint, which is progress (the state is a sleep, the
   invocation ends by rule 1 at the next step).
 - The scheduler arms one tokio timer for the earliest sleep while scheduling is enabled and
-  none when `on_wake` is given; every expiry rechecks the clock. `rt.timer(delay)` paces
-  work inside a phase (progress commits) and is dropped with the invocation.
+  none when `on_wake` is given; every expiry rechecks the clock (`Session::now()`, the
+  Session's `Clock`). `rt.timer(delay)` paces work inside a phase (progress commits) and
+  fails once the invocation's context is cancelled.
 - There is no wake primitive: a sleeping task resumes only when due or when an abort mark
   ends its sleep. Work that waits for an outside answer awaits it inside a running
   invocation, as above (the tool task's approval phase, [approval.md](approval.md)).
@@ -402,10 +473,16 @@ and `sleeping` kept; `completing` and `waiting` re-evaluated (finalization, `Fai
 cascades re-derived. No handler runs during open. The layer above checks that the catalog
 holds the definitions it requires (the agent layer's built-in tasks, harness.md).
 
-**Close.** `close()` seals admission and reservation on the line, cancels every invocation's
-`Context` and ends states, watches and waiters with the close reason. Off the line it lets
-admitted commits settle, joins the invocations (a `JoinSet`), writes the tasks it stopped
-back as `pending` straight to storage (nothing published), then closes storage. Joining in
+**Close.** `Scheduler::close()` is `Session::close()`: the Session seals admission, then runs
+the scheduler's close barrier (installed at open with the crate-internal
+`Session::set_close_barrier`) before its line closes storage. The barrier seals reservation,
+ends task and idle waits with `Closed`, cancels every invocation's `Context`, joins the
+invocations' code (each signals `done` when it returns or is dropped), writes the tasks it
+stopped back as `pending` straight to storage on the line after the admitted commits settled
+(`Session::write_at_close`, nothing published), and returns. A Session that fails seals the
+scheduler from its close subscription instead (no join, no write-back). Dropping the last
+`Scheduler` handle without a close stops the driver and aborts the invocations' code: a crash,
+counted as restarts at the next open. Joining in
 delta is stronger than in JS: handler code awaits through `ctx.run`, which drops the awaited
 future on cancellation, so a cooperative handler ends at its next await. A handler that
 ignores its context (a blocking section, a future awaited without the context) is given
@@ -414,15 +491,55 @@ future at its next yield; `spawn_blocking` work cannot be dropped and is awaited
 `close()` returns no invocation code of this Harness runs, so the storage can be reopened.
 Close writes no outcome and sets no mark.
 
+## Module layout
+
+`scheduler/{mod (Scheduler, options, settings, hooks), definition (TaskDefinition, Checkpoint,
+RunningTask, Tx::create_task), next (Next, NextState, Outcome), erased (AnyTask), catalog
+(TaskCatalog, CatalogSnapshot, MemoryCatalog), runtime (TaskRuntime, Timer, PhaseData),
+state (State, the observer), ownership (the tree and its walks), scopes (chain loading on the
+line), transition (record helpers, commit_state, terminate, wait validation and the cycle
+check), reserve (reservation, fit, migration, blocked reasons), invocation (Invocation, run
+loops), step (the step rules), abort (abort_task, conversation abort, reconcile, finalize,
+retry), waits (wait_for_task, wait_for_idle, SettledTask), timers (driver, Wake), recovery
+(open, close barrier), inspect, error}.rs`.
+
+```rust
+impl Scheduler {
+    pub async fn open(session: Session, options: SchedulerOptions, ctx: &Context) -> Result<Scheduler, SchedulerError>;
+    pub fn resume(&self) -> Result<(), SchedulerError>;
+    pub fn wake(&self) -> Wake;
+    pub async fn abort_task(&self, id: TaskId, ctx: &Context) -> Result<TaskAbort, SchedulerError>;   // Marked | Terminal
+    pub async fn abort_conversation(&self, id: ConversationId, background: bool, ctx: &Context) -> Result<(), SchedulerError>;
+    pub async fn retry_task(&self, id: TaskId, ctx: &Context) -> Result<(), SchedulerError>;
+    pub async fn wait_for_task(&self, id: impl Into<TaskId>, ctx: &Context) -> Result<SettledTask, SchedulerError>;
+    pub async fn wait_for_idle(&self, conversation: Option<ConversationId>, ctx: &Context) -> Result<(), SchedulerError>;
+    pub async fn inspect(&self, ctx: &Context) -> Result<Inspection, SchedulerError>;
+    pub fn blocked_reason(&self, record: &TaskRecord) -> Option<BlockedReason>;   // the task graph
+    pub fn subscribe_blocked(&self) -> watch::Receiver<u64>;    // blocked reasons changed without a commit
+    pub async fn close(&self, ctx: &Context) -> Result<(), SchedulerError>;
+}
+pub struct SchedulerOptions { pub catalog: Arc<dyn TaskCatalog>, pub hooks: Arc<dyn SchedulerHooks>,
+    pub settings: Arc<dyn Fn() -> SchedulerSettings + Send + Sync>, pub on_wake: Option<Arc<dyn Fn(Wake) + Send + Sync>> }
+pub struct SchedulerSettings { pub restart_limit: Option<u32> /* Some(5) */, pub close_grace: Duration /* 30 s */ }
+```
+
+The scheduler starts paused; the Harness enables it for progress-asking calls. Conversation
+abort lives here because it is ownership traversal; the Harness's `Conversation::abort`
+calls it.
+
 ## Testing
 
 Ports of `harness-tasks`, `harness-tasks-recovery`, `harness-ownership`,
 `harness-structured`, `harness-cancellation-barrier`, `harness-sleep`, `harness-blocked`,
 `harness-lifecycle`, `harness-inspect`, `harness-reports`, `harness-scheduler-indexes`,
-`harness-scheduler-retention` and `harness-storage-failure`. A fake clock (`Arc<dyn Clock>`)
-and `tokio::time::pause` drive sleeps; a test task definition with scripted phases
-(`task-support.ts`) exercises the step rules, handover (install a second definition object
-under the same name) and the restart limit (reopen a storage with `running` records).
+`harness-scheduler-retention` and `harness-storage-failure`, in `tests/scheduler/` (one file
+per topic) on memory and SQLite in a temp file, on a multi-threaded runtime. The Session
+clock reads tokio's clock, and `tokio::time::pause` drives sleeps (memory only: SQLite runs
+on its own thread, and a paused clock auto-advances while the runtime waits for it). A
+scripted `Json` task (`Probe`, after `task-support.ts`) exercises the step rules, handover
+(install a second definition object under the same name) and the restart limit (write
+`running` records with a count); a crash is dropping the Session and scheduler without close
+over a storage whose `close` does nothing, then reopening it.
 
 ## Differences from upstream
 
@@ -434,6 +551,11 @@ under the same name) and the restart limit (reopen a storage with `running` reco
   after a generation counter check instead of object identity alone.
 - Cancellation is `delta_chord::Context`; dropping an awaited future cancels it, so close can
   rely on cooperative handlers ending at their next await and aborts the rest after a grace.
+- A task ends itself with a typed `Outcome<R>` (completed, failed, aborted); `orphaned` and
+  `faulted` are not representable in a task's next state.
+- A closing commit that settlement refuses (a child created under an owner that finishes in
+  the same commit, say) faults the task; upstream's handler would see the commit reject and
+  fault by throwing.
 - No `setTimer` host option and no background/foreground timer distinction; tokio timers.
 - `TaskRuntime::sleep_until` is `Next::sleep`; `setTimer` is `rt.timer`.
 
@@ -448,3 +570,17 @@ under the same name) and the restart limit (reopen a storage with `running` reco
 - A repeated checkpoint is detected by `delta_chord::json::Json` `PartialEq` on the stored
   state (deep, key order ignored), not typed `PartialEq`; it covers `Json` user tasks.
 - No wake primitive; a sleeping task is woken only by its deadline or an abort mark.
+- Phase 3 (implementation):
+  - The scheduler is its own handle, `Scheduler::open(session, options, ctx)`; its memory is
+    an observer-owned `Arc<Mutex<State>>`, its passes run on one driver task.
+  - `TaskDefinition::name(&self) -> &str` (not `&'static str`) and `can_migrate()`; typed
+    task outcomes are `Outcome<R>`; `RunningTask<T>` carries record, input and checkpoint.
+  - `SchedulerHooks` has `settle_scheduler_outcome` (given the terminal record) and
+    `withdraw_inputs` (default: settle `unanswered`/`aborted`).
+  - `rt.memo` is synchronous (memory); `rt.phase_data()` is the per-phase hook point of the
+    agent layer; `CatalogSnapshot::extension_of` names extensions in reports.
+  - Rule 4 covers settlement refusing a closing commit; rule 6 keeps the closing commit's
+    writes with its fault; a closing commit's stop takes effect in the observer, when the
+    commit publishes.
+  - Close joins through a Session close barrier; dropping the last `Scheduler` without close
+    aborts the invocations' code, as a crash.

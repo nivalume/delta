@@ -100,8 +100,12 @@ impl Session {
 pub enum SessionEnd { Closed, Failed(SessionFailed) }
 ```
 
-`pub(crate)` for the scheduler: `commit_scoped(ctx, TransactionScope, f)` and
-`fail(cause)` (a component whose memory fell behind storage).
+`pub(crate)` for the scheduler: `commit_scoped(ctx, TransactionScope, f)`, `fail(cause)` (a
+component whose memory fell behind storage), `report(error, info)` (the reporter),
+`set_close_barrier(barrier)` (work `close` runs after the seal and before storage closes:
+the scheduler's join) and `write_at_close(writes)` (a line job admitted while closing that
+writes straight to storage, publishing nothing). `Session::now()` is public: the Session's
+clock, which task times and sleeps read.
 
 Services let an upper layer keep process-local state per session without a kernel type
 for it: the approval waiters of [approval.md](approval.md), for instance, are a service the
@@ -471,6 +475,11 @@ storage failed to close.
   `for<'a> FnOnce(&'a mut Tx<'_>, &'a RunningTask<T>) -> BoxFuture<'a, Result<NextState, TxError>>`.
 - `Session::fail(cause)` for a bookkeeping commit that failed; `Services` for the per-session
   state of the layers above (approval waiters).
+- Committed reads that are not caller reads, allowed after table writes, for the scheduler's
+  bookkeeping inside its own commits: `Tx::stored_task`, `Tx::stored_conversation` and
+  `Tx::queued_inputs` (phase 3).
+- The close barrier and `write_at_close` (above) for joining invocations and writing the
+  tasks close stopped back as `pending` (phase 3).
 
 ## Open (minor)
 

@@ -12,11 +12,14 @@
 //! - [`storage`]: the [`Storage`](storage::Storage) contract with memory and SQLite backends.
 //! - [`session`]: the commit line ([`Session`](session::Session), [`Tx`](session::Tx)),
 //!   document drafts, caching, observation and forks.
+//! - [`scheduler`]: durable tasks ([`TaskDefinition`](scheduler::TaskDefinition)), their
+//!   reservation, invocations, ownership and abort cascades, waits, sleeps and recovery.
 //! - [`env`](mod@env): the execution environment (file system and shell) and its local
 //!   implementation.
 
 pub mod documents;
 pub mod env;
 pub mod records;
+pub mod scheduler;
 pub mod session;
 pub mod storage;

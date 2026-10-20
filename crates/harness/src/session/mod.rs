@@ -74,7 +74,6 @@ pub use report::{FaultReason, HostCallback, OutdatedReason, ReportInfo, ReportTa
 pub use services::Services;
 pub use tx::{TaskCreate, TaskOptions, Tx};
 
-#[allow(unused_imports, reason = "the scheduler binds its commits to a scope (next phase)")]
 pub(crate) use tx::TransactionScope;
 
 use cache::Cache;
@@ -83,11 +82,15 @@ use lifecycle::Shared;
 use line::{Job, Line};
 use publish::Observers;
 
-use crate::records::ConversationRecord;
+use crate::records::{ConversationRecord, StorageWrite};
 use crate::storage::Storage;
 
 /// Milliseconds since the Unix epoch, for task lifecycle times.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+/// Work a Session component runs when [`Session::close`] has sealed admission and before the
+/// line closes storage (the scheduler joins its invocations there).
+pub(crate) type CloseBarrier = Box<dyn FnOnce() -> BoxFuture<'static, ()> + Send>;
 
 /// Runs inside every transaction that creates or forks a conversation, after the
 /// conversation record is staged: the layer above stages the documents every conversation
@@ -157,6 +160,9 @@ pub struct Session {
 struct Handle {
     jobs: mpsc::UnboundedSender<Job>,
     shared: Arc<Shared>,
+    now: Clock,
+    /// Run by `close` after the seal, before storage closes; taken once.
+    barrier: std::sync::Mutex<Option<CloseBarrier>>,
 }
 
 impl fmt::Debug for Session {
@@ -185,11 +191,16 @@ impl Session {
         let shared = Arc::new(Shared::new(reporter, services));
         let guard = Guard::new(storage, shared.clone());
         let cache = Cache::new(document_retention, shared.clone());
-        let line = Line::new(guard, cache, shared.clone(), now, conversation_hook);
+        let line = Line::new(guard, cache, shared.clone(), now.clone(), conversation_hook);
         let (jobs, receiver) = mpsc::unbounded_channel();
         tokio::spawn(line.run(receiver));
         Session {
-            inner: Arc::new(Handle { jobs, shared }),
+            inner: Arc::new(Handle {
+                jobs,
+                shared,
+                now,
+                barrier: std::sync::Mutex::new(None),
+            }),
         }
     }
 
@@ -290,12 +301,30 @@ impl Session {
     /// cache and services, then closes storage. Closing twice waits for the same close.
     /// Fails only when storage failed to close; cancelling `ctx` stops the wait, not the
     /// close.
+    ///
+    /// A component's close barrier (the scheduler's join) runs after the seal and before
+    /// storage closes.
     pub async fn close(&self, ctx: &Context) -> Result<(), SessionError> {
         if self.shared().seal(SessionEnd::Closed) {
-            let job: Job = Box::new(|line| line.finish_close().boxed());
-            if self.inner.jobs.send(job).is_err() {
-                self.shared().request_close();
-            }
+            let barrier = self
+                .inner
+                .barrier
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let jobs = self.inner.jobs.clone();
+            let shared = self.shared().clone();
+            let finish = async move {
+                if let Some(barrier) = barrier {
+                    barrier().await;
+                }
+                let job: Job = Box::new(|line| line.finish_close().boxed());
+                if jobs.send(job).is_err() {
+                    shared.request_close();
+                }
+            };
+            // Detached: a caller that stops waiting does not stop the close.
+            tokio::spawn(finish);
         }
         ctx.run(self.shared().ended()).await.map_err(SessionError::Cancelled)?;
         match self.shared().close_error() {
@@ -322,12 +351,48 @@ impl Session {
 
     /// Fails the Session from a component whose memory fell behind storage (a scheduler
     /// bookkeeping commit that failed).
-    #[allow(
-        dead_code,
-        reason = "the scheduler fails the Session on a bookkeeping error (next phase)"
-    )]
     pub(crate) fn fail(&self, cause: Arc<dyn std::error::Error + Send + Sync>) -> SessionFailed {
         self.shared().fail(cause)
+    }
+
+    /// The Session's clock: Unix epoch milliseconds, as stamped on task records.
+    pub fn now(&self) -> i64 {
+        (self.inner.now)()
+    }
+
+    /// Gives `error` to the reporter with what it came from.
+    pub(crate) fn report(&self, error: &(dyn std::error::Error + Send + Sync), info: &ReportInfo) {
+        self.shared().report_info(error, info);
+    }
+
+    /// Installs the work [`close`](Self::close) runs after the seal and before storage
+    /// closes. One component (the scheduler) installs it, once.
+    pub(crate) fn set_close_barrier(&self, barrier: CloseBarrier) {
+        *self
+            .inner
+            .barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(barrier);
+    }
+
+    /// On the line, after every commit admitted before the seal settled: writes what
+    /// `writes` returns straight to storage, publishing nothing (close writes back the tasks
+    /// it stopped). Admitted while closing; a failed Session writes nothing.
+    pub(crate) async fn write_at_close(
+        &self,
+        writes: impl FnOnce() -> Vec<StorageWrite> + Send + 'static,
+    ) -> Result<(), SessionError> {
+        let (reply, result) = oneshot::channel();
+        let job: Job = Box::new(move |line| {
+            async move {
+                let _ = reply.send(line.write_unpublished(writes()).await);
+            }
+            .boxed()
+        });
+        if self.inner.jobs.send(job).is_err() {
+            return Err(self.shared().terminal_error());
+        }
+        result.await.unwrap_or_else(|_| Err(self.shared().terminal_error()))
     }
 
     /// How many documents the cache holds, for tests of retention.

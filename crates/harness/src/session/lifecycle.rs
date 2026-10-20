@@ -153,8 +153,13 @@ impl Shared {
     }
 
     fn report(&self, failed: &SessionFailed) {
+        self.report_info(&*failed.cause, &ReportInfo::SessionFailed);
+    }
+
+    /// Gives `error` to the reporter, if any.
+    pub(super) fn report_info(&self, error: &(dyn StdError + Send + Sync), info: &ReportInfo) {
         if let Some(reporter) = &self.reporter {
-            reporter(&*failed.cause, &ReportInfo::SessionFailed);
+            reporter(error, info);
         }
     }
 

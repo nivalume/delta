@@ -247,6 +247,16 @@ impl Line {
         Ok(changes)
     }
 
+    /// Writes `writes` straight to storage without adoption or publication (close's
+    /// write-back). Nothing is written once the Session failed or when there is nothing.
+    pub(super) async fn write_unpublished(&mut self, writes: Vec<StorageWrite>) -> Result<(), SessionError> {
+        if self.finished || self.shared.failure().is_some() || writes.is_empty() {
+            return Ok(());
+        }
+        self.guard.commit(writes, &Context::background()).await?;
+        Ok(())
+    }
+
     /// On-line observers first (an error fails the Session), then the subscribers.
     fn publish(&mut self, seq: Seq, changes: Vec<CommitChange>, context: Context) {
         let publication = Arc::new(CommitPublication { seq, changes, context });

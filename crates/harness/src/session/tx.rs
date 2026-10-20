@@ -17,8 +17,9 @@ use super::line::Line;
 use crate::records::{
     ConversationId, ConversationOwner, ConversationOwnership, ConversationParent, ConversationQuery,
     ConversationRecord, Cursor, DocumentAddress, DocumentId, EntryDraft, EntryId, EntryKind, EntryQuery, EntryRecord,
-    Head, Page, ROOT_CONVERSATION_ID, RecordError, StorageWrite, SubmissionCreate, SubmissionId, SubmissionRecord,
-    SubmissionSettlement, TaskId, TaskQuery, TaskRecord, TaskState, TaskStatus, TypedEntry, TypedEntryDraft,
+    Head, Page, ROOT_CONVERSATION_ID, RecordError, StorageWrite, SubmissionCreate, SubmissionId, SubmissionQuery,
+    SubmissionRecord, SubmissionSettlement, SubmissionStatus, SubmissionType, TaskId, TaskQuery, TaskRecord, TaskState,
+    TaskStatus, TypedEntry, TypedEntryDraft,
 };
 
 /// The defaults one commit binds to: the conversation `create_task_record` uses when its
@@ -496,7 +497,6 @@ impl Tx<'_> {
     /// Replaces a task record whole (the scheduler's transitions). Stamps `started_at` on the
     /// first `running` and `ended_at` on `terminal`; refuses a conversation change and a
     /// second terminal candidate. Validated against the committed record at settlement.
-    #[allow(dead_code, reason = "the scheduler's transitions (next phase)")]
     pub(crate) fn set_task(&mut self, value: TaskRecord) -> Result<(), TxError> {
         self.has_table_write = true;
         let now = (self.line.now)();
@@ -519,7 +519,6 @@ impl Tx<'_> {
     }
 
     /// The candidate records of the tasks this transaction created or replaced so far.
-    #[allow(dead_code, reason = "the scheduler's bookkeeping (next phase)")]
     pub(crate) fn staged_tasks(&self) -> impl Iterator<Item = &TaskRecord> {
         self.tasks
             .values()
@@ -527,12 +526,60 @@ impl Tx<'_> {
     }
 
     /// The conversations this transaction created or forked so far.
-    #[allow(dead_code, reason = "the scheduler's bookkeeping (next phase)")]
     pub(crate) fn staged_conversations(&self) -> impl Iterator<Item = &ConversationRecord> {
         self.writes.iter().filter_map(|write| match write {
             StorageWrite::Conversation(record) => Some(record),
             _ => None,
         })
+    }
+
+    // ─── Committed reads for the scheduler ─────────────────────────────────
+    //
+    // Not caller reads: allowed after table writes, as the scheduler's bookkeeping reads
+    // what is committed while it assembles its own writes.
+
+    /// The committed task record, read once per transaction.
+    pub(crate) async fn stored_task(&mut self, id: TaskId) -> Result<Option<TaskRecord>, TxError> {
+        self.committed_task(id).await
+    }
+
+    /// The committed conversation record.
+    pub(crate) async fn stored_conversation(
+        &mut self,
+        id: ConversationId,
+    ) -> Result<Option<ConversationRecord>, TxError> {
+        let ctx = &self.ctx;
+        self.line.guard.read(ctx, |storage| storage.conversation(id, ctx)).await
+    }
+
+    /// Every committed queued input submission, in id order.
+    pub(crate) async fn queued_inputs(&mut self) -> Result<Vec<SubmissionRecord>, TxError> {
+        const PAGE: usize = 256;
+        let query = SubmissionQuery {
+            status: Some(SubmissionStatus::Queued),
+            ..SubmissionQuery::default()
+        };
+        let mut inputs = Vec::new();
+        let mut cursor = None;
+        loop {
+            let ctx = &self.ctx;
+            let page = self
+                .line
+                .guard
+                .read(ctx, |storage| {
+                    storage.scan_submissions(query.clone(), PAGE, cursor, ctx)
+                })
+                .await?;
+            inputs.extend(
+                page.items
+                    .into_iter()
+                    .filter(|record| record.kind == SubmissionType::Input),
+            );
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => return Ok(inputs),
+            }
+        }
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────
