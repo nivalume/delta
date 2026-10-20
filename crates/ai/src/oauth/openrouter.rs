@@ -22,7 +22,7 @@ use crate::types::JsonObject;
 
 pub const AUTHORIZE_URL: &str = "https://openrouter.ai/auth";
 pub const TOKEN_URL: &str = "https://openrouter.ai/api/v1/auth/keys";
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const LOGIN_TIMEOUT: Duration = Duration::from_mins(5);
 const TOKEN_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 /// `Number.MAX_SAFE_INTEGER`: the minted key does not expire.
 pub const PERMANENT_EXPIRY: i64 = 9_007_199_254_740_991;

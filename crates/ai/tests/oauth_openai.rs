@@ -244,6 +244,7 @@ fn codex(server: &MockServer) -> OpenAICodexOAuth {
         device_token_url: format!("{}/api/accounts/deviceauth/token", server.uri()),
         callback_host: Some("127.0.0.1".into()),
         callback_port: 0,
+        ..OpenAICodexOAuth::default()
     }
 }
 
@@ -470,23 +471,31 @@ async fn codex_cancels_the_device_code_flow_while_waiting() {
     assert_eq!(device.poll_times.lock().unwrap().len(), 1);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn codex_times_out_the_device_code_flow_after_15_minutes() {
-    let device = codex_device_server(json!("60"), (0..16).map(|_| device_auth_pending()).collect(), "unused").await;
-    let interaction = select_device_code();
-    let started = tokio::time::Instant::now();
+    // Upstream's deadline is 15 minutes; the test shortens it so it runs in real time (a
+    // paused clock would also fire the HTTP client's connect timeout while wiremock answers).
+    assert_eq!(OpenAICodexOAuth::default().device_code_timeout_seconds, 15 * 60);
+    let device = codex_device_server(json!("1"), (0..5).map(|_| device_auth_pending()).collect(), "unused").await;
+    let oauth = OpenAICodexOAuth {
+        device_code_timeout_seconds: 2,
+        ..codex(&device.server)
+    };
+    let started = std::time::Instant::now();
 
-    let error = codex(&device.server)
-        .login(&interaction, &LoginOptions::default())
+    let error = oauth
+        .login(&select_device_code(), &LoginOptions::default())
         .await
         .unwrap_err();
     assert_eq!(error.message(), "Device flow timed out");
-    assert_eq!(started.elapsed(), Duration::from_secs(15 * 60));
-    // At most one poll at once and one per minute until the deadline. The paused clock may
-    // also move on while a request waits for wiremock (which runs on its own clock), so
-    // fewer polls can happen.
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(2) && elapsed < Duration::from_secs(5),
+        "{elapsed:?}"
+    );
+    // One poll at once and one per second until the deadline.
     let polls = device.poll_times.lock().unwrap().len();
-    assert!((1..=15).contains(&polls), "{polls} polls");
+    assert!((2..=3).contains(&polls), "{polls} polls");
 }
 
 #[tokio::test]

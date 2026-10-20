@@ -36,7 +36,8 @@ pub const DEVICE_USER_CODE_URL: &str = "https://auth.openai.com/api/accounts/dev
 pub const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
 pub const DEVICE_VERIFICATION_URI: &str = "https://auth.openai.com/codex/device";
 pub const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
-const DEVICE_CODE_TIMEOUT_SECONDS: u64 = 15 * 60;
+/// How long device-code login polls before it gives up.
+pub const DEVICE_CODE_TIMEOUT_SECONDS: u64 = 15 * 60;
 const BROWSER_LOGIN_METHOD: &str = "browser";
 const DEVICE_CODE_LOGIN_METHOD: &str = "device_code";
 const SCOPE: &str = "openid profile email offline_access";
@@ -55,6 +56,8 @@ pub struct OpenAICodexOAuth {
     /// Callback port; the redirect URI is `http://localhost:<port>/auth/callback`. There is
     /// no fallback port: when it is taken, login continues with the pasted redirect URL.
     pub callback_port: u16,
+    /// How long device-code login polls; default [`DEVICE_CODE_TIMEOUT_SECONDS`].
+    pub device_code_timeout_seconds: u64,
 }
 
 impl Default for OpenAICodexOAuth {
@@ -66,6 +69,7 @@ impl Default for OpenAICodexOAuth {
             device_token_url: DEVICE_TOKEN_URL.to_owned(),
             callback_host: None,
             callback_port: CALLBACK_PORT,
+            device_code_timeout_seconds: DEVICE_CODE_TIMEOUT_SECONDS,
         }
     }
 }
@@ -356,7 +360,7 @@ impl OpenAICodexOAuth {
     ) -> Result<(String, String), ModelsError> {
         let options = OAuthDeviceCodePollOptions {
             interval_seconds: Some(device.interval_seconds),
-            expires_in_seconds: Some(DEVICE_CODE_TIMEOUT_SECONDS as f64),
+            expires_in_seconds: Some(self.device_code_timeout_seconds as f64),
             wait_before_first_poll: false,
             cancel: cancel.clone(),
         };
@@ -413,7 +417,7 @@ impl OpenAICodexOAuth {
             user_code: device.user_code.clone(),
             verification_uri: DEVICE_VERIFICATION_URI.into(),
             interval_seconds: Some(device.interval_seconds as u64),
-            expires_in_seconds: Some(DEVICE_CODE_TIMEOUT_SECONDS),
+            expires_in_seconds: Some(self.device_code_timeout_seconds),
         });
         let (code, verifier) = self.poll_device_auth(&device, &cancel).await?;
         self.exchange_authorization_code(&code, &verifier, DEVICE_REDIRECT_URI, &cancel)

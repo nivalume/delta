@@ -92,11 +92,11 @@ fn response_stream(
 }
 
 impl google_cloud_aiplatform_v1::stub::PredictionService for Stub {
-    async fn stream_generate_content(
+    fn stream_generate_content(
         &self,
         request: GenerateContentRequest,
         _options: RequestOptions,
-    ) -> SdkResult<ResponseStream<GenerateContentResponse>> {
+    ) -> impl Future<Output = SdkResult<ResponseStream<GenerateContentResponse>>> + Send {
         self.requests.lock().unwrap().push(request);
         let reply = self
             .replies
@@ -104,7 +104,7 @@ impl google_cloud_aiplatform_v1::stub::PredictionService for Stub {
             .unwrap()
             .pop_front()
             .unwrap_or(Reply::Fail(Code::NotFound, "no stub reply"));
-        match reply {
+        let result = match reply {
             Reply::Fail(code, message) => Err(sdk_error(code, message)),
             Reply::Stream(items) => Ok(response_stream(items).1),
             Reply::Hang(items) => {
@@ -112,7 +112,8 @@ impl google_cloud_aiplatform_v1::stub::PredictionService for Stub {
                 self.open.lock().unwrap().push(sender);
                 Ok(stream)
             }
-        }
+        };
+        std::future::ready(result)
     }
 }
 

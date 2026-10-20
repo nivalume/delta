@@ -77,9 +77,9 @@ const CODEX_RESPONSE_STATUSES: [&str; 6] = [
 ];
 const OPENAI_BETA_RESPONSES_WEBSOCKETS: &str = "responses_websockets=2026-02-06";
 /// A cached connection closes after this long without a request.
-const SESSION_WEBSOCKET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const SESSION_WEBSOCKET_CACHE_TTL: Duration = Duration::from_mins(5);
 /// A cached connection is replaced at this age, before the backend's one-hour limit.
-const SESSION_WEBSOCKET_MAX_AGE: Duration = Duration::from_secs(55 * 60);
+const SESSION_WEBSOCKET_MAX_AGE: Duration = Duration::from_mins(55);
 /// How long a background close waits for the server's close frame.
 const CLOSE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -2138,7 +2138,7 @@ mod tests {
         {
             let mut cache = lock(&SESSION_CACHE);
             let entry = cache.get_mut(session).unwrap().get_mut("acc_age").unwrap();
-            entry.created_at = Instant::now().checked_sub(Duration::from_secs(56 * 60)).unwrap();
+            entry.created_at = Instant::now().checked_sub(Duration::from_mins(56)).unwrap();
         }
         let mut messages = context.messages().to_vec();
         messages.push(Message::Assistant(first));
