@@ -1,0 +1,383 @@
+# Records (`records`)
+
+Follows spec §1 (terms and invariants), §2 (core records), §2.1 (the record side of entries;
+context derivation is [context.md](context.md)'s), the task records of §5.1, the document
+records of §3.2 and the storage types of §10. Corresponds to upstream `src/types.ts`,
+`src/ids.ts` and `src/errors.ts`.
+
+## Problem
+
+Five record kinds make up everything the harness persists: conversations, entries, tasks,
+submissions and document incarnations. Upstream brands their numeric ids at compile time
+only (`Id<"task">` is a `number` at run time), writes the records as TypeScript unions whose
+`never`-typed fields say which fields a status may carry, and stores them as JSON. delta
+keeps the JSON shapes so a storage written by pi opens in delta, and represents them as Rust
+types that carry the same invariants: newtype ids, tagged enums for the status unions,
+`Option` where upstream has `undefined`.
+
+## Ids and sequences
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConversationId(pub u64);
+pub struct EntryId(pub u64);        // same derives
+pub struct TaskId(pub u64);
+pub struct SubmissionId(pub u64);
+pub struct DocumentId(pub u64);
+/// Commit sequence: strictly increases between commits; gaps are permitted.
+pub struct Seq(pub u64);
+
+pub const ROOT_CONVERSATION_ID: ConversationId = ConversationId(1);
+/// JavaScript's largest safe integer. No id or sequence above it is minted, so pi reads it back.
+pub const MAX_ID: u64 = (1 << 53) - 1;
+
+/// A freshly minted id before it has a kind. `Storage::mint_id` returns one; the Session types it.
+pub struct RawId(pub u64);
+/// The five id newtypes. Sealed.
+pub trait RecordId:
+    Copy + Ord + Hash + Serialize + DeserializeOwned + From<RawId> + Into<u64> + sealed::Sealed {}
+```
+
+- Ids and sequences serialize as JSON numbers. `Seq` is a separate type, so an entity id cannot
+  be passed as a document point.
+- One global numeric namespace for all five kinds. Ids never repeat, also across reopen, and
+  scans order by id, which is creation order ([storage.md](storage.md)).
+- Upstream's `TaskId<R>` carries an erased result type. delta's `TaskId` is untyped; a
+  result-typed `TaskRef<R>` (`TaskId` plus `PhantomData<R>`) belongs to
+  [scheduler.md](scheduler.md).
+
+## Conversations
+
+```rust
+pub struct ConversationRecord {
+    pub id: ConversationId,
+    pub parent: Option<ConversationParent>,   // history: inherited entries and historical documents
+    pub owner: Option<ConversationOwner>,     // task attribution, abort and idle traversal; not access control
+}
+pub struct ConversationParent { pub conversation_id: ConversationId, pub at: EntryId }
+pub struct ConversationOwner { pub conversation_id: ConversationId, pub task_id: TaskId }
+/// Creation input. The Session derives the persisted owner pair from the task; callers never build it.
+pub enum ConversationOwnership { Ownerless, Task(TaskId) }
+```
+
+JSON: `{"id":1}`; `{"id":7,"parent":{"conversationId":1,"at":42},"owner":{"conversationId":1,"taskId":40}}`.
+
+- The root conversation is id 1, ownerless, without parent; storage reserves the id.
+- `parent.at` is an entry visible in the parent; the child sees parent entries through it.
+- `owner` stays recorded after the owning task is terminal.
+
+## Entries
+
+```rust
+pub struct EntryRecord {
+    pub id: EntryId,
+    pub conversation_id: ConversationId,
+    pub kind: String,                           // `pi.*` kinds belong to built-ins by convention
+    pub model: Option<Vec<delta_ai::Message>>,  // absent: contributes no model messages
+    pub data: Option<Json>,
+    pub head: Option<EntryId>,                  // head marker: context starts at `head`
+    pub edits: Option<Vec<ContextEdit>>,
+    pub by_task_id: Option<TaskId>,             // stamped by a task runtime commit
+}
+pub struct ContextEdit { pub target: EntryId, pub action: EditAction }
+pub enum EditAction { Omit, Replace(Vec<delta_ai::Message>) }
+// {"target":5,"action":"omit"} | {"target":5,"action":"replace","messages":[...]}
+
+pub struct EntryDraft {
+    pub kind: String,
+    pub model: Option<Vec<delta_ai::Message>>,
+    pub data: Option<Json>,
+    pub head: Option<Head>,
+    pub edits: Option<Vec<ContextEdit>>,
+}
+pub enum Head { At(EntryId), SelfRef }        // upstream `head: EntryId | "self"`: the entry's own id
+
+/// A typed entry kind: `kind` plus the type of `data` (upstream `Entry<D>`).
+pub struct EntryKind<D> { pub kind: &'static str, _data: PhantomData<D> }
+pub struct TypedEntry<D> { pub record: EntryRecord, pub data: D }
+pub struct TypedEntryDraft<D> { /* EntryDraft without `kind`, `data: D` */ }
+```
+
+- Entries are immutable; ids are Session-global and ordered.
+- `model` holds `delta_ai::Message`, whose JSON is pi-ai's, including the
+  `SystemMessage { content: "", sections, toolsAdded, toolsRemoved }` that durable writes
+  for `pi.system` entries.
+- `head` and `edits` change later context, never storage; the derivation rules (§2.1, steps
+  1–10) are context.md's.
+- `EditAction` serializes flat beside `target` (`action` tag and `messages` payload in one
+  object): a hand-written `Serialize`/`Deserialize`, since serde's adjacent tagging would nest
+  them.
+
+## Submissions
+
+```rust
+pub struct SubmissionRecord {
+    pub id: SubmissionId,
+    pub conversation_id: ConversationId,
+    pub request_id: Option<String>,             // host deduplication key, unique per conversation
+    #[serde(rename = "type")]
+    pub kind: SubmissionType,
+    #[serde(flatten)]
+    pub state: SubmissionState,
+}
+pub enum SubmissionType { Input, Write }
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum SubmissionState {
+    Queued,
+    Placed { entry: EntryId },                                                   // input only
+    Done { entry: EntryId, answer: Option<EntryId> },                            // `answer`: input only
+    Unanswered { entry: Option<EntryId>, reason: String, detail: Option<Json> }, // `entry`: input only
+}
+pub enum SubmissionStatus { Queued, Placed, Done, Unanswered }                   // queries, SQLite column
+pub enum SubmissionSettlement { Done { answer: EntryId }, Unanswered { reason: String, detail: Option<Json> } }
+pub struct SubmissionCreate { /* SubmissionRecord without `id` */ }
+```
+
+| type | legal states |
+| --- | --- |
+| `input` | `queued` → `placed{entry}` → `done{entry, answer}` or `unanswered{entry?, reason, detail?}` |
+| `write` | `queued` → `done{entry}` or `unanswered{reason, detail?}` |
+
+`SubmissionRecord::check()` refuses the other combinations (a `placed` write, a write with
+`answer`, an unanswered write with `entry`); `Tx::create_submission` and settlement call it,
+so storage never sees them. Settlement rules (only a placed input becomes `done`; a settled
+record stays) are [session.md](session.md)'s.
+
+## Tasks
+
+```rust
+pub struct TaskRecord {
+    pub id: TaskId,
+    pub conversation_id: ConversationId,        // immutable
+    pub kind: String,                           // task definition name
+    pub version: u32,
+    pub input: Json,
+    pub owner: Option<TaskId>,                  // owning task; absent for a conversation-owned task
+    pub background: bool,
+    pub abort_requested: bool,
+    pub abort_reason: Option<AbortReason>,      // `Restart`: the mark comes from abandonment after a restart
+    #[serde(skip_serializing_if = "is_false")]
+    pub abandon_on_restart: bool,               // JSON: present only as `true`
+    pub started_at: Option<i64>,                // ms wall clock; first change to `running`
+    pub ended_at: Option<i64>,                  // change to `terminal`
+    pub restarts: Option<u32>,
+    pub state: TaskState,
+    pub memos: Option<IndexMap<String, Json>>,  // live states only
+    pub trace: Option<Json>,                    // telemetry carriers, carried unread (telemetry is later)
+    pub links: Option<Vec<Json>>,
+}
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum TaskState {
+    Pending { checkpoint: Json },
+    Running { checkpoint: Json },
+    Waiting { checkpoint: Json, on: Vec<TaskId>, policy: JoinPolicy },
+    Sleeping { checkpoint: Json, until: i64 },
+    Completing { outcome: TaskOutcome },
+    Terminal { outcome: TaskOutcome },
+}
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum TaskOutcome {
+    Completed { result: Json },
+    Failed { error: TaskOutcomeError, result: Option<Json> },
+    Aborted { reason: Option<String>, result: Option<Json> },
+    Orphaned { reason: String },
+    Faulted { error: TaskOutcomeError },
+}
+pub struct TaskOutcomeError { pub message: String, pub detail: Option<Json> }
+pub enum JoinPolicy { FailFast, AllSettled }          // "failFast" | "allSettled"
+pub enum AbortReason { Restart }
+pub enum TaskStatus { Pending, Running, Waiting, Sleeping, Completing, Terminal }
+
+impl TaskState {
+    pub fn status(&self) -> TaskStatus;
+    pub fn checkpoint(&self) -> Option<&Json>;    // live states
+    pub fn outcome(&self) -> Option<&TaskOutcome>; // completing, terminal
+}
+```
+
+- A task record is replaced whole on every transition; terminal records stay as small rows.
+- `memos` with a `completing` or `terminal` state is invalid; `TaskRecord::check()` refuses
+  it, as it refuses a `Completed` outcome without `result` (the enum already does).
+- `input`, `checkpoint` and `result` are `Json` here; built-in tasks convert them to their
+  serde-tagged enums at the definition boundary (scheduler.md), user tasks work on `Json`.
+- Times are `i64` milliseconds as JS `Date.now()`; the Session stamps them.
+
+## Documents
+
+```rust
+pub struct DocumentRecord {
+    pub id: DocumentId,                         // one incarnation; never reused
+    pub kind: String,
+    pub key: Option<String>,                    // family member; absent for a singleton
+    pub scope: DocumentScope,
+    #[serde(flatten)]
+    pub policy: Option<ConversationPolicy>,     // present iff `scope` is a conversation
+    pub created_at: Seq,                        // stamped by storage
+    pub retired_at: Option<Seq>,
+}
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum DocumentScope { Session, Conversation { conversation_id: ConversationId }, Task { task_id: TaskId } }
+pub struct ConversationPolicy { pub history: History, pub fork: Fork }
+pub enum History { Latest, Rewindable }
+pub enum Fork { AsOf, Current, Initial }       // "asOf" | "current" | "initial"
+pub struct DocumentCreate { pub id, pub kind, pub key, pub scope, pub policy }   // no lifetime fields
+pub struct DocumentAddress { pub kind: String, pub scope: DocumentScope, pub key: Option<String> }
+pub enum DocumentPoint { Current, At(Seq) }
+pub enum DocumentContent { Base { version: u32, value: Json }, Delta { version: u32, ops: Vec<Op> } }
+pub struct BaseContent { pub version: u32, pub value: Json }
+pub struct StoredDocument { pub record: DocumentRecord, pub version: u32, pub value: Json, pub deltas_since_base: u64 }
+pub struct DocumentCopySource { pub id: DocumentId, pub at: DocumentPoint }
+```
+
+JSON: `{"id":12,"kind":"pi.live","scope":{"kind":"conversation","conversationId":1},"history":"latest","fork":"initial","createdAt":3}`;
+a family member adds `"key":"call-7"`; retirement adds `"retiredAt":9`.
+
+- A singleton is identified by kind and scope, a family member by kind, scope and key: the
+  address is the logical identity, the id one incarnation of it.
+- Lifetime is the half-open interval `created_at <= at < retired_at`, unbounded while current;
+  create and retire in one commit gives an empty lifetime.
+- `policy` is present iff `scope` is `Conversation`; `Fork::AsOf` requires
+  `History::Rewindable`. `DocumentRecord::check()` enforces both.
+- Definition versions live on bases and deltas, not on the record: one incarnation may hold
+  records written by several definition versions.
+
+## Storage writes, queries and pages
+
+```rust
+pub enum StorageWrite {
+    Conversation(ConversationRecord),
+    Entry(EntryRecord),
+    Task(TaskRecord),
+    Submission(SubmissionRecord),
+    DocumentCreate { record: DocumentCreate, content: BaseContent },
+    DocumentCopy { record: DocumentCreate, source: DocumentCopySource },
+    DocumentChange { id: DocumentId, content: DocumentContent },
+    DocumentRetire { id: DocumentId },
+}
+pub enum ScanOrder { Ascending, Descending }
+pub struct Page<T> { pub items: Vec<T>, pub next: Option<Cursor> }
+/// Backend-owned continuation, round-tripped unread. Built-in backends use `{"after": <id>, "order": "ascending"}`.
+pub struct Cursor(pub Json);
+
+pub struct ConversationQuery { pub owner_conversation_id: Option<ConversationId>, pub owner_task_id: Option<TaskId>, pub order: Option<ScanOrder> }        // default ascending
+pub struct EntryQuery { pub conversation_id: ConversationId, pub min_entry_id: Option<EntryId>, pub max_entry_id: Option<EntryId>, pub order: Option<ScanOrder> } // inclusive; default descending
+pub struct TaskQuery { pub conversation_id: Option<ConversationId>, pub kind: Option<String>, pub status: Option<TaskStatus>, pub abort_requested: Option<bool>, pub background: Option<bool>, pub order: Option<ScanOrder> }
+pub struct SubmissionQuery { pub conversation_id: Option<ConversationId>, pub status: Option<SubmissionStatus>, pub order: Option<ScanOrder> }
+pub struct DocumentQuery { pub scope: DocumentScope, pub at: DocumentPoint, pub kind: Option<String> }  // ascending incarnation id only
+pub struct StoredEntry { pub entry: EntryRecord, pub commit_seq: Seq }
+```
+
+Memory and SQLite do not persist `StorageWrite` itself; its serde tags
+(`"type":"document.create"`, …) stay upstream's so a JSONL backend can later write
+`main.jsonl` lines unchanged.
+
+## Errors and reports
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    /// Upstream `StorageRequestError`: an invalid read with no durable effect (unknown conversation,
+    /// bad cursor, history the document does not keep). Fails only that read.
+    #[error("{0}")] Request(String),
+    #[error("storage is closed")] Closed,
+    #[error("ID space is exhausted")] IdSpaceExhausted,
+    #[error("{0}")] Rejected(String),           // a batch the backend refuses: id ownership, document consistency, copy source
+    #[error("{0}")] Corrupt(String),            // missing base, version change inside a delta tail, unreadable row
+    #[error(transparent)] Sqlite(#[from] delta_chord::sqlite::SqliteError),
+    #[error(transparent)] Json(#[from] serde_json::Error),
+    #[error(transparent)] Io(#[from] std::io::Error),
+}
+impl StorageError { pub fn is_request(&self) -> bool; }
+
+/// The Session failed; `cause` is the first error. Reopen it.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("Session failed after a storage error; close and reopen it")]
+pub struct SessionFailed { pub cause: Arc<dyn Error + Send + Sync> }
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error(transparent)] Failed(SessionFailed),
+    #[error("Session is closed")] Closed,
+    #[error(transparent)] Cancelled(delta_chord::context::Cancelled),
+    #[error(transparent)] Storage(StorageError),   // only `Request` reaches a caller; everything else becomes `Failed`
+    #[error(transparent)] Tx(TxError),             // a rejected commit; rolled back
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TxError {
+    #[error("Tx::{method}() cannot read tables after the first table write")] ReadAfterWrite { method: &'static str },
+    #[error("Conversation {0} does not exist")] UnknownConversation(ConversationId),
+    #[error("Task {0} does not exist")] UnknownTask(TaskId),
+    #[error("Submission {0} does not exist")] UnknownSubmission(SubmissionId),
+    #[error("{what} {task} is {status}")] OwnerUnavailable { what: &'static str, task: TaskId, status: &'static str },
+    #[error("Task {0} is terminal")] TerminalTask(TaskId),
+    #[error("Task {0} cannot change conversations")] TaskConversationChange(TaskId),
+    #[error("Document {id} ({kind}) does not match the supplied definition semantics")] DefinitionMismatch { id: DocumentId, kind: String },
+    #[error("Document {id} ({kind}) has newer version {stored} than {definition}")] VersionTooNew { .. },
+    #[error("Document {id} ({kind}) requires migration from version {stored}")] MigrationRequired { .. },
+    #[error("Document {kind} migration from version {from} failed")] Migrate { kind: String, from: u32, #[source] source: MigrateError },
+    #[error("Document {kind} initial value is not an object")] NotAnObject { kind: String },
+    #[error("{0}")] Submission(String),            // illegal settlement or placement
+    #[error("{0}")] Fork(String),                  // invisible fork entry, duplicate copies, writes to fork sources
+    #[error(transparent)] Storage(StorageError),   // a `Request` error seen by the closure; anything else failed the Session
+    #[error(transparent)] Callback(Box<dyn Error + Send + Sync>),   // the commit closure's own error
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Conversation {0} is busy")]
+pub struct ConversationBusy(pub ConversationId);
+
+/// `onReport`'s `info`. Every task variant carries the task's id, kind and conversation.
+pub enum ReportInfo {
+    SessionFailed,
+    TaskFaulted { task: ReportTask, reason: FaultReason },         // Threw | RestartLimit
+    TaskParked { task: ReportTask },
+    MigrationFailed { task: ReportTask },
+    TaskOutdated { task: ReportTask, reason: OutdatedReason },     // MissingTask | IncompatibleTask
+    TaskError { task: ReportTask },
+    ExtensionError { task: Option<ReportTask>, conversation: Option<ConversationId>, extension: Option<String> },
+    HostError { callback: HostCallback, task: Option<ReportTask> },  // Now | Settings | Registry | Env | Models | SetTimer | OnWake
+    ListenerError,
+}
+pub struct ReportTask { pub id: TaskId, pub kind: String, pub conversation_id: ConversationId, pub extension: Option<String> }
+pub type Reporter = Arc<dyn Fn(&(dyn Error + Send + Sync), &ReportInfo) + Send + Sync>;
+```
+
+Messages keep upstream's wording where its tests match on them (`cannot read tables after
+the first table write`, `does not retain historical content`, `has newer version`,
+`requires migration`, `already belongs to`).
+
+## Wire compatibility
+
+| Rule | Detail |
+| --- | --- |
+| Field names | `#[serde(rename_all = "camelCase")]` on every record |
+| Absent fields | Every `Option` is `default` and `skip_serializing_if = "Option::is_none"`; an absent key and `undefined` are the same thing. `null` is a value only inside `data`, `detail`, `input`, `checkpoint`, `result` and document values |
+| Booleans | `background` and `abortRequested` always written; `abandonOnRestart` only when `true` |
+| Numbers | Ids, sequences and timestamps are integers ≤ `MAX_ID`; floats never appear in records |
+| Unknown fields | Accepted on read; `trace` and `links` are kept explicitly, other unknown fields are dropped |
+| Key order | Not significant for readers; delta writes records in field order |
+| Messages | `delta_ai::Message` JSON (pi-ai's) |
+| Ops | `delta_chord::delta::Op` tuples |
+
+## Differences from upstream
+
+- Newtype ids and `Seq` instead of branded numbers; `RawId` marks the one untyped point.
+- Status unions are tagged enums: a `placed` write or a terminal task with memos is either
+  unrepresentable or refused by `check()`, where upstream relies on `never`-typed fields.
+- `Option` instead of `undefined`; `Head::SelfRef` instead of a string sharing a field with ids.
+- `TaskId` carries no result type; `TaskRef<R>` is added where typed waits need it.
+- `trace` and `links` are opaque `Json` until delta has a telemetry crate.
+- One `StorageError` enum with `is_request()` instead of an error subclass; the Session's
+  exemption rule reads the variant.
+- Errors are `thiserror` enums with `source()` chains instead of `Error` subclasses.
+
+## Pending confirmation
+
+- `MAX_ID = 2^53 − 1` as a hard minting cap, for wire compatibility, rather than `u64::MAX`.
+- `RawId` plus a sealed `RecordId` for typed minting, versus a generic `mint_id::<I>()` that
+  would make `Storage` non-object-safe.
+- `TaskRecord` keeps `trace`/`links` as `Json` rather than dropping them on read.
+- `TxError::Callback(Box<dyn Error>)` as the carrier of a commit closure's own error, versus
+  an error type parameter on `commit`.
