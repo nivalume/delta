@@ -17,10 +17,17 @@ delta has one driver, so it uses it directly and keeps transactions synchronous.
 ## `Database`
 
 ```rust
+#[derive(Clone)]
 pub struct Database;
+
+pub struct OpenOptions {
+    pub wal_autocheckpoint_pages: u32, // default 1000; 0 disables automatic checkpoints
+    pub busy_timeout: Duration,        // default 5 s
+}
 
 impl Database {
     pub async fn open(path: impl AsRef<Path>, options: OpenOptions) -> Result<Database, SqliteError>;
+    pub async fn open_in_memory(options: OpenOptions) -> Result<Database, SqliteError>;
     pub async fn call<T, F>(&self, f: F) -> Result<T, SqliteError>
     where F: FnOnce(&mut rusqlite::Connection) -> Result<T, SqliteError> + Send + 'static, T: Send + 'static;
     pub async fn transaction<T, F>(&self, f: F) -> Result<T, SqliteError>
@@ -41,26 +48,62 @@ impl Database {
   nothing is lost. Calling `Database` from inside a closure is impossible without blocking,
   which is the same restriction upstream documents ("never settles"), now visible in the
   types.
-- `open` applies the pragmas of upstream's Node driver: WAL, `synchronous = NORMAL`,
-  `wal_autocheckpoint = 1000`, a 5 s busy timeout. `close` runs
-  `wal_checkpoint(TRUNCATE)` and closes the connection.
+- `open` creates the parent directory, opens the file and applies the pragmas of
+  upstream's Node driver: WAL, `synchronous = NORMAL`, `wal_autocheckpoint` (1000 pages by
+  default) and the busy timeout (5 s by default); `OpenOptions` carries upstream's
+  `walAutoCheckpointPages` and `busyTimeoutMs`. The path `:memory:` opens an in-memory
+  database, as upstream; `open_in_memory` says so explicitly (tests). In-memory databases
+  stay in `journal_mode = memory`.
+- `close` runs `wal_checkpoint(TRUNCATE)` and closes the connection (even when the
+  checkpoint fails), after every closure sent before it.
+- `Database` is a cheap handle (a channel sender) that can be cloned and shared. `close` on
+  any handle closes the connection for all of them: later calls fail with
+  `SqliteError::Closed`, and closing again succeeds (upstream's `close` is idempotent).
+  When the last handle is dropped, the thread exits and drops the connection.
+- Closures run in the order their futures are first polled. Dropping a future does not
+  cancel a closure already sent; it runs and its result is discarded. A closure that panics
+  resumes the panic in the awaiting task; an open transaction rolls back and the database
+  stays usable.
 - Values are `rusqlite`'s types (`rusqlite::types::Value`, `ToSql`, `FromSql`). Integers stay
   exact `i64` (upstream returns JS numbers unless a column is read as `bigint`).
+
+## Errors
+
+```rust
+pub enum SqliteError {
+    Sqlite(rusqlite::Error),                    // From<rusqlite::Error>, so `?` works in closures
+    Io(std::io::Error),                         // creating the directory or the thread
+    Closed,
+    NonContiguousMigrations,
+    NewerSchema { version: i64, supported: u32 },
+    InvalidSchemaPrefix(String),
+    ReservedSchemaPrefix(String),
+    Rollback { cause: Box<SqliteError>, rollback: rusqlite::Error },
+    Other(Box<dyn Error + Send + Sync>),        // SqliteError::other(e), for closure errors
+}
+```
+
+Messages match upstream's (`SQLite schema version 2 is newer than supported version 1`, ...).
 
 ## Migrations
 
 ```rust
+#[derive(Clone, Copy)]
 pub struct Migration { pub version: u32, pub statements: &'static [&'static str] }
 
-pub async fn apply_migrations(db: &Database, migrations: &'static [Migration], table: &str)
+pub async fn apply_migrations(db: &Database, migrations: &[Migration], table: &str)
     -> Result<(), SqliteError>;
-pub fn validate_schema_prefix(name: &str) -> Result<(), SqliteError>;
+pub fn validate_schema_prefix(prefix: &str) -> Result<(), SqliteError>;
 ```
+
+`apply_migrations` copies the (`Copy`) migrations into the closure, so the slice need not
+be `'static`. Each entry of `statements` runs with `execute_batch`.
 
 Same behavior and same metadata table as upstream, so a database file created by pi
 opens in delta and the other way round:
 
-- Versions must be contiguous from 1.
+- `table` must pass `validate_schema_prefix`, and versions must be contiguous from 1; both
+  are checked before any SQL runs.
 - One transaction: create the metadata table if needed, insert version 0 if empty, read
   the version, refuse a database newer than the code, run the missing migrations and store
   each version.
