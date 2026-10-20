@@ -1,0 +1,39 @@
+[package]
+name = "delta-harness"
+description = "Durable agent harness: storage-first conversations, resumable turns and tool calls, documents, approvals (counterpart of pi-durable)"
+readme = "README.md"
+keywords = ["llm", "agent", "harness", "durable"]
+categories = ["asynchronous"]
+include = ["src/**", "docs/**", "README.md", "LICENSE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+name = "delta_harness"
+
+[dependencies]
+delta-ai.workspace = true
+delta-chord = { workspace = true, features = ["sqlite"] }
+futures.workspace = true
+indexmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true

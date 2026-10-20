@@ -959,6 +959,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "delta-harness"
+version = "1.0.0"
+dependencies = [
+ "delta-ai",
+ "delta-chord",
+ "futures",
+ "indexmap 2.14.2",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
