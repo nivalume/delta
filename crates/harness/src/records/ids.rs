@@ -1,7 +1,8 @@
 //! Record ids and commit sequences: `u64` newtypes in one global numeric namespace.
 
 use std::fmt;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -104,5 +105,59 @@ pub struct Seq(pub u64);
 impl fmt::Display for Seq {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// A [`TaskId`] that names the type of the task's result, for typed waits. Carries no data
+/// besides the id.
+pub struct TaskRef<R> {
+    id: TaskId,
+    _result: PhantomData<fn() -> R>,
+}
+
+impl<R> TaskRef<R> {
+    pub const fn new(id: TaskId) -> Self {
+        Self {
+            id,
+            _result: PhantomData,
+        }
+    }
+
+    pub const fn id(self) -> TaskId {
+        self.id
+    }
+}
+
+impl<R> Clone for TaskRef<R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R> Copy for TaskRef<R> {}
+
+impl<R> PartialEq for TaskRef<R> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl<R> Eq for TaskRef<R> {}
+
+impl<R> Hash for TaskRef<R> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl<R> fmt::Debug for TaskRef<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TaskRef").field(&self.id).finish()
+    }
+}
+
+impl<R> From<TaskRef<R>> for TaskId {
+    fn from(task: TaskRef<R>) -> TaskId {
+        task.id
     }
 }

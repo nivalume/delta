@@ -22,7 +22,8 @@ impl Session {   // session.md
     pub async fn document_state<D: DocDefinition>(&self, at: DocAddress<D>, ctx: &Context) -> Result<Option<DocumentState>, SessionError>;
 }
 // DocumentState: a read-only wrapper over the incarnation's `delta_chord::State`.
-// value() -> Json; subscribe() -> Subscription (`Hydrate`, then `Update { value, ops, context }`).
+// value() -> Json; subscribe() -> DocumentSubscription: chord `Delivery`s (`Hydrate`, then
+// `Update { value, ops, context }`), pinning the incarnation in the cache while it lives.
 ```
 
 Rules kept from §9.2: acquisition on the session line captures the current revision in

@@ -87,8 +87,12 @@ pub enum NextState<S, R> {
     Sleeping { checkpoint: S, until: i64 },
     Terminal(TaskOutcome<R>),
 }
-pub struct Next<T: TaskDefinition>(/* Box<dyn FnOnce(&mut Tx, &RunningTask<T>) -> Result<NextState<..>, TxError> + Send> */);
+pub struct Next<T: TaskDefinition>(/* Box<dyn for<'a> FnOnce(&'a mut Tx<'_>, &'a RunningTask<T>) -> BoxFuture<'a, Result<NextState<..>, TxError>> + Send> */);
 ```
+
+The closures are async (they return a `BoxFuture`, like `Session::commit`'s) because document
+access in a `Tx` may load from storage ([session.md](session.md), "What the scheduler builds
+on").
 
 Upstream's handler returns nothing and commits its state through `runtime.commit()`; the
 scheduler then runs a separate step commit on the line that reads the record back and
@@ -111,10 +115,10 @@ impl<T: TaskDefinition> TaskRuntime<T> {
 
     /// An intermediate commit of this phase (intent, progress). `None` keeps the state.
     pub async fn commit<R>(&self, ctx: &Context,
-        f: impl FnOnce(&mut Tx, &RunningTask<T>) -> Result<(R, Option<NextState<..>>), TxError> + Send)
+        f: impl for<'a> FnOnce(&'a mut Tx<'_>, &'a RunningTask<T>) -> BoxFuture<'a, Result<(R, Option<NextState<..>>), TxError>> + Send)
         -> Result<R, RuntimeError>;
     /// The closing commit of the phase, returned from `run` / `abort`.
-    pub fn next(&self, f: impl FnOnce(&mut Tx, &RunningTask<T>) -> Result<NextState<..>, TxError> + Send + 'static) -> Next<T>;
+    pub fn next(&self, f: impl for<'a> FnOnce(&'a mut Tx<'_>, &'a RunningTask<T>) -> BoxFuture<'a, Result<NextState<..>, TxError>> + Send + 'static) -> Next<T>;
 
     pub async fn memo<V: Serialize + DeserializeOwned>(&self, name: &str, ctx: &Context) -> Result<Option<V>, RuntimeError>;
     pub async fn memo_or_insert<V>(&self, name: &str, candidate: V, ctx: &Context) -> Result<V, RuntimeError>;

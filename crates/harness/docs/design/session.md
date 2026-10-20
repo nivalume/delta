@@ -22,7 +22,7 @@ completion before settlement starts.
 ## Architecture
 
 ```text
- Session (Clone handle) ──mpsc──► line task: Line { storage: Arc<dyn Storage>, cache, observers, failure, clock }
+ Session (Clone handle) ──mpsc──► line task: Line { guard (storage + failure latch), cache, clock, conversation hook }
       │                                 │
       │ commit(ctx, |tx| ..)            ├── one Job at a time: commit | read_on_line | sweep | close
       │ snapshot / document_state       │
@@ -38,6 +38,14 @@ completion before settlement starts.
   caller cancellation), so the line is never left mid-transaction.
 - A `snapshot` cache hit is answered without a job from a shared read of the cache; anything
   that loads or registers is a job, as upstream.
+- Admission (healthy, not closing) is checked when the call is made, so a commit admitted
+  before close settles. A job that reaches the line after close finished is dropped unrun and
+  its caller gets the Session's end (`Closed` or `Failed`).
+- The line also runs the eviction timer and, once the last handle is dropped, the close.
+- Files: `session/{mod (Session, options), line (actor, commit, adoption), tx (table reads and
+  writes), drafts (documents in a Tx, Doc), plan (settlement), cache, observation, forks,
+  snapshot, publish, lifecycle (phase, failure latch), guard (storage guard), services, report,
+  error}.rs`.
 
 ## API
 
@@ -46,10 +54,18 @@ completion before settlement starts.
 pub struct Session;
 
 pub struct SessionOptions {
-    pub document_retention: Option<Duration>,     // Some(0): drop after use; None: keep; default 10 min
-    pub now: Arc<dyn Fn() -> i64 + Send + Sync>,  // ms wall clock for task times; default system time
+    pub document_retention: Option<Duration>,     // Some(ZERO): drop after use; None: keep; default 10 min
+    pub now: Clock,                               // Arc<dyn Fn() -> i64>: ms wall clock for task times
     pub reporter: Option<Reporter>,
     pub services: Services,                       // in-memory services of the layers above
+    pub conversation_hook: Option<Arc<dyn ConversationHook>>,
+}
+
+/// Runs inside every transaction that creates or forks a conversation, after the record is
+/// staged; the agent layer stages its documents there. Its error rolls the commit back.
+pub trait ConversationHook: Send + Sync + 'static {
+    fn conversation_created<'a>(&'a self, tx: &'a mut Tx<'_>, record: &'a ConversationRecord)
+        -> BoxFuture<'a, Result<(), TxError>>;
 }
 
 /// A type map of per-session, in-memory services (`http::Extensions`-like). Never persisted,
@@ -58,6 +74,7 @@ pub struct Services { /* RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>> */ 
 impl Services {
     pub fn insert<T: Send + Sync + 'static>(&self, service: Arc<T>) -> Option<Arc<T>>;
     pub fn get<T: Send + Sync + 'static>(&self) -> Option<Arc<T>>;
+    pub fn remove<T: Send + Sync + 'static>(&self) -> Option<Arc<T>>;
 }
 
 impl Session {
@@ -74,7 +91,7 @@ impl Session {
 
     pub fn subscribe_commits(&self) -> CommitSubscription;                           // off the line
     pub fn observe_commits(&self, observer: Box<dyn CommitObserver>) -> ObserverGuard; // on the line; Session components only
-    pub fn subscribe_close(&self) -> CloseSubscription;
+    pub fn subscribe_close(&self) -> CloseSubscription;                              // wait() -> SessionEnd
     pub async fn close(&self, ctx: &Context) -> Result<(), SessionError>;
     pub fn closed(&self) -> impl Future<Output = SessionEnd> + Send;
     pub fn failure(&self) -> Option<SessionFailed>;
@@ -82,6 +99,9 @@ impl Session {
 }
 pub enum SessionEnd { Closed, Failed(SessionFailed) }
 ```
+
+`pub(crate)` for the scheduler: `commit_scoped(ctx, TransactionScope, f)` and
+`fail(cause)` (a component whose memory fell behind storage).
 
 Services let an upper layer keep process-local state per session without a kernel type
 for it: the approval waiters of [approval.md](approval.md), for instance, are a service the
@@ -96,7 +116,7 @@ let entry_id = session.commit(&ctx, |tx| Box::pin(async move {
     live.draft().into_object().unwrap().remove("generation");
     drop(live);                                                     // the borrow ends; the Change stays open
     let entry = tx.append_entry(id, draft).await?;                  // first table write
-    tx.create_task(&Follow, input, TaskOptions::conversation(id)).await?;
+    tx.create_task_record(create, TaskOptions::conversation(id)).await?;  // the scheduler adds a typed create_task
     Ok(entry.id)
 })).await?;
 ```
@@ -113,6 +133,7 @@ impl Tx<'_> {
     /// `None` when absent or of another kind.
     pub async fn typed_entry<D: DeserializeOwned>(&mut self, kind: &EntryKind<D>, id: EntryId) -> Result<Option<TypedEntry<D>>, TxError>;
     pub async fn task(&mut self, id: TaskId) -> Result<Option<TaskRecord>, TxError>;
+    pub async fn submission(&mut self, id: SubmissionId) -> Result<Option<SubmissionRecord>, TxError>;
     pub async fn scan_conversations(&mut self, q: ConversationQuery, limit: usize, cursor: Option<Cursor>) -> Result<Page<ConversationRecord>, TxError>;
     pub async fn scan_entries(&mut self, q: EntryQuery, limit: usize, cursor: Option<Cursor>) -> Result<Page<EntryRecord>, TxError>;
     pub async fn scan_tasks(&mut self, q: TaskQuery, limit: usize, cursor: Option<Cursor>) -> Result<Page<TaskRecord>, TxError>;
@@ -124,7 +145,9 @@ impl Tx<'_> {
     pub async fn fork_conversation(&mut self, parent: ConversationId, at: EntryId, ownership: ConversationOwnership) -> Result<ConversationRecord, TxError>;
     pub async fn append_entry(&mut self, conversation: ConversationId, draft: EntryDraft) -> Result<EntryRecord, TxError>;
     pub async fn append_typed_entry<D: Serialize>(&mut self, kind: &EntryKind<D>, conversation: ConversationId, draft: TypedEntryDraft<D>) -> Result<TypedEntry<D>, TxError>;
-    pub async fn create_task<T: TaskDefinition>(&mut self, task: &T, input: T::Input, options: TaskOptions) -> Result<TaskId, TxError>;
+    /// Untyped: kind, version, input, first checkpoint. The scheduler phase adds the typed
+    /// `create_task<T: TaskDefinition>(&T, T::Input, TaskOptions)` on top (an `impl Tx` there).
+    pub async fn create_task_record(&mut self, task: TaskCreate, options: TaskOptions) -> Result<TaskId, TxError>;
     /// Raw record, no admission rules; hosts use `Conversation::submit`.
     pub async fn create_submission(&mut self, create: SubmissionCreate) -> Result<SubmissionRecord, TxError>;
     pub fn settle_submission(&mut self, id: SubmissionId, settlement: SubmissionSettlement);
@@ -138,10 +161,15 @@ impl Tx<'_> {
     pub fn context(&self) -> &Context;
 }
 
+pub struct TaskCreate { pub kind: String, pub version: u32, pub input: Json, pub checkpoint: Json }
+pub struct TaskOptions { pub conversation_id: Option<ConversationId>, pub owner: Option<TaskId>, pub background: bool, pub abandon_on_restart: bool }
+impl TaskOptions { pub fn conversation(id) -> Self; pub fn owned_by(task) -> Self; }
+
 /// A borrowed handle on the transaction's `Change` of one incarnation.
 pub struct Doc<'tx, D> { /* &'tx mut Change, PhantomData<D> */ }
 impl<D> Doc<'_, D> {
     pub fn value(&self) -> &Json;                                   // the working value so far
+    pub fn base(&self) -> &Json;                                    // the revision the change began from
     pub fn draft(&mut self) -> delta_chord::delta::Draft<'_>;
     pub fn set(&mut self, value: Json);                             // whole-value replacement, diffed
     pub fn update_as<T: Serialize + DeserializeOwned, R>(&mut self, f: impl FnOnce(&mut T) -> R) -> Result<R, serde_json::Error>;
@@ -149,7 +177,8 @@ impl<D> Doc<'_, D> {
 ```
 
 - `Doc` borrows the `Tx` mutably: while held, no other `Tx` method can run, and it cannot
-  escape the closure. Reacquiring an address returns a handle on the same open `Change`, so
+  escape the closure. Reacquiring an address with a definition of other semantics (another
+  version included) in the same transaction is `DocumentError::DefinitionMismatch`. Reacquiring an address returns a handle on the same open `Change`, so
   "edit, table write, edit again" is `doc`, `drop`, `append_entry`, `doc`.
 - `settle_submission` and `place_submission` resolve at assembly against the transaction's
   latest candidate record, falling back to committed state; they count as table writes and
@@ -160,13 +189,16 @@ impl<D> Doc<'_, D> {
 - `pub(crate)` for the scheduler and the layers above: `set_task` (whole-record replacement, stamps `started_at` on
   the first `running` and `ended_at` on `terminal`, refuses a conversation change or a second
   terminal candidate), `create_root_conversation`, `staged_tasks`, `staged_conversations`,
-  and a `TransactionScope` binding the default conversation of `create_task` and the task
-  stamped as `by_task_id` on appended entries.
+  and a `TransactionScope { conversation_id, task_id }` binding the default conversation of
+  `create_task_record` and the task stamped as `by_task_id` on appended entries.
+- Child task options: an owner puts the task in the owner's conversation; `background` or
+  another conversation with an owner, and no conversation at all, are
+  `TxError::InvalidTask`.
 
 ## Commit lifecycle
 
 ```text
-admission      on the line, before the closure: healthy, not closing, ctx not cancelled
+admission      at the call: healthy, not closing; on the line: healthy, ctx not cancelled
 closure        runs to completion with &mut Tx; reads and writes stage; documents load and open chord Changes
 health check   a closure that caught a failed read must not commit: SessionFailed
 seal           every Doc is gone (borrow); prepare() each open Change -> Prepared (value + ops)
@@ -182,7 +214,10 @@ publish        on-line observers synchronously; the CommitPublication to subscri
 evict          sweep expired idle documents; release the line
 ```
 
-A closure error, or a `TxError` from assembly, rolls back: every `Change` is dropped and
+A panic in the closure, the conversation hook or a definition function (`initial`,
+`migrate`, `checkpoint_when`) is caught and rolls the commit back (`TxError::Panic`); a panic
+anywhere else on the line fails the Session. A closure error, or a `TxError` from assembly,
+rolls back: every `Change` is dropped and
 nothing is written. Table rules: reads before the first table write only; document access and
 read-your-writes stay available after it; creation methods return their record, so nothing is
 read back. Owner validation judges the owner's final candidate in the transaction: a missing,
@@ -195,13 +230,13 @@ task with `background` or with another conversation than its owner rejects. The 
 | Acquired as | Content write | Publication |
 | --- | --- | --- |
 | created (absent address; `initial`) | `DocumentCreate` with base `{VERSION, prepared.value}`, also when the batch is empty | value, empty ops |
-| loaded, stored version < `VERSION` | `DocumentChange` base (required migration base) | value, ops; observers of the old version get `["r", value]` |
+| loaded, stored version < `VERSION` | `DocumentChange` base (required migration base) | value, ops; states of the older shape get the batch from their value to the new one (chord's diff) |
 | loaded, non-empty batch, `checkpoint_when` true | `DocumentChange` base | value, ops |
 | loaded, non-empty batch, false | `DocumentChange` delta `{VERSION, ops}` | value, ops |
 | loaded, empty batch | nothing | nothing |
 | fork copy, not accessed | `DocumentCopy` | `document.copy` descriptor, no value |
 | fork copy, accessed through a definition | `DocumentCreate` with the migrated, edited value | value, empty ops |
-| retire (`retire_doc`, or its task turned terminal) | `DocumentRetire`; an acquired draft's final content is written first | `Null`, `["r", null]` |
+| retire (`retire_doc`, or its task turned terminal) | `DocumentRetire`; an acquired draft's final content is written first | `Null`, `["r", null]` (the final content is stored, not delivered) |
 
 `checkpoint_when` runs once per change with `deltas_since_base` from the cache; at adoption a
 base resets the count and a delta increments it. An incarnation created and retired in one
@@ -210,41 +245,64 @@ commit is written (base, then retire) but never enters the cache.
 ## Document cache
 
 ```rust
-struct LoadedDocument {
-    address: AddressId,
+/// One cached incarnation's observable value, shared by the cache, the transactions that
+/// edit it and the DocumentStates attached to it.
+struct DocHandle {
     record: DocumentRecord,
-    stored_version: u32,     // persisted; older while the value is migrated only in memory
-    value_version: u32,      // the definition version the value is shaped for
+    value_version: u32,          // the definition version the value is shaped for
+    slot: Mutex<Live(State) | Ended(Json)>,   // dropping the State ends its subscriptions
+    end: watch::Sender<Option<WatchEnd>>,
+    pins: AtomicUsize,           // DocumentStates and their subscriptions
+    last_use: AtomicU64,         // ms since the cache's epoch
+}
+struct CachedDocument {
+    handle: Arc<DocHandle>,
+    stored_version: u32,         // persisted; older while the value is migrated only in memory
     deltas_since_base: u64,
-    state: delta_chord::state::State,   // the tracker and its subscribers
-    pinned: usize,           // attached DocumentStates
-    last_use: Instant,
+    stale: Vec<Arc<DocHandle>>,  // attached states of this incarnation hydrated under another version
+    idle_key: Option<(u64, u64)>,
 }
 ```
 
 - Load: `find_document(address, Current)`, `document(id, Current)`, check scope, history, fork
   and version, migrate in memory, `State::new(value)`. A cached document serves only
-  definitions of its `value_version`; another version drops it and reloads from storage, so a
-  reloaded extension migrates from the stored bytes.
+  definitions of its `value_version`; another version reloads from storage, so a reloaded
+  extension migrates from the stored bytes. A pinned handle of the other version stays as a
+  `stale` observer of the same incarnation: every later change reaches it as the batch from
+  its value to the new one.
 - Change: `state.begin()` is the `Change` behind `Doc`; `state.commit(ctx, prepared)` adopts
   after storage success and publishes to every subscription (chord `state.md`). The Session
   holds the only writable `State` handle; observers get a read-only wrapper.
-- Retention: a document with no attached state leaves the cache once unused for
-  `document_retention` (default 10 min; `Some(0)`: right after use; `None`: never). Eviction
-  runs on the line after each commit and from a tokio timer armed for the oldest idle
-  document's expiry; a hot document moves to the back of the idle order at most once per
-  granule (a tenth of the retention, at most 1 s). An attached document never leaves;
-  retirement evicts it and unpins its observers.
+- Retention: a document with no attached state or subscription leaves the cache once unused
+  for `document_retention` (default 10 min; `Some(ZERO)`: right after use; `None`: never).
+  Every cached address sits once in an idle index keyed by the use the line last recorded. A
+  use only stamps the handle (an atomic, also from a snapshot cache hit), so a hot document
+  costs no reordering. The sweep, after every job and on a tokio timer armed for the oldest
+  key's expiry, pops expired keys: an entry used since is re-keyed at that use, a pinned one
+  at now (re-checked once per retention period), and the rest leave. A zero retention arms no
+  timer; dropping the last pin wakes the line, which sweeps. Retirement evicts and ends the
+  incarnation's handles.
+- Snapshot cache hits read a shared index of the cached handles (`RwLock<HashMap>`), which only
+  the line writes.
 
 ## Observation (§9.1, §9.2)
 
 ```rust
-pub struct DocumentState { /* read-only view of the State, pin guard, end */ }
+pub struct DocumentState { /* the incarnation's DocHandle and a pin */ }   // Clone pins again
 impl DocumentState {
+    pub fn record(&self) -> &DocumentRecord;
+    pub fn id(&self) -> DocumentId;
     pub fn value(&self) -> Json;                   // last published revision; `Json::Null` after retirement
-    pub fn subscribe(&self) -> Subscription;       // chord: `Hydrate`, then `Update { value, ops, context }`
+    pub fn subscribe(&self) -> DocumentSubscription;   // chord `Delivery`s: `Hydrate`, then `Update { value, ops, context }`
     pub fn end(&self) -> Option<WatchEnd>;
     pub async fn closed(&self) -> WatchEnd;
+}
+/// A chord `Subscription` plus a pin: a subscription keeps the incarnation cached like its state.
+pub struct DocumentSubscription;
+impl DocumentSubscription {
+    pub async fn next(&mut self) -> Option<Delivery>;
+    pub fn try_next(&mut self) -> Option<Delivery>;
+    pub fn into_stream(self) -> impl Stream<Item = Delivery>;
 }
 pub enum WatchEnd { Retired, SessionClosed, SessionFailed(SessionFailed) }
 ```
@@ -258,7 +316,9 @@ pub enum WatchEnd { Retired, SessionClosed, SessionFailed(SessionFailed) }
   rule) rather than upstream's `["r", newest]` past 100 frames. Retirement delivers
   `["r", null]` with value `Null` and ends the stream (`Retired`). A migration-only base
   delivers nothing to observers of the new version.
-- Dropping the `DocumentState` unpins the document; dropping a `Subscription` unsubscribes.
+- Dropping the `DocumentState` and its subscriptions unpins the document; dropping a
+  subscription unsubscribes. A subscription taken after the end hydrates with the final value
+  and ends.
   Session close ends every state at its seal (`SessionClosed`), a failure with
   `SessionFailed`; a commit settling during close delivers nothing. Delivered values are
   `Json`: a holder may mutate its copy freely.
@@ -305,6 +365,11 @@ pub enum CommitChange {
 }
 pub trait CommitObserver: Send {
     fn committed(&mut self, publication: &CommitPublication) -> Result<(), Box<dyn Error + Send + Sync>>;
+}   // also implemented for `FnMut(&CommitPublication) -> Result<..> + Send`
+pub struct CommitSubscription;
+impl CommitSubscription {
+    /// `Err(CommitGap { missed })` after an overflow; `None` once the Session closed.
+    pub async fn next(&mut self) -> Option<Result<Arc<CommitPublication>, CommitGap>>;
 }
 ```
 
@@ -312,9 +377,12 @@ pub trait CommitObserver: Send {
   and the indexes of the layers above: submission waiters, view mounts, the task graph):
   they run synchronously after adoption to keep memory in
   step with storage, before subscribers are fed, and one that fails fails the Session.
-- `subscribe_commits` returns a bounded channel of `Arc<CommitPublication>`; a slow subscriber
-  delays only itself, and on overflow the subscription records a gap so the subscriber can
-  resynchronize from storage. Host listeners never run on the line and may call Session APIs.
+- `subscribe_commits` returns a bounded channel of `Arc<CommitPublication>` (a tokio
+  `broadcast` of `COMMIT_BACKLOG` = 1024); a slow subscriber delays only itself, and on
+  overflow it receives a `CommitGap` so it can resynchronize from storage. Table records are
+  copied into a publication only while someone listens.
+- On-line observers run outside the registry's lock, so one may register or drop observers;
+  they must not block or call Session operations. Host listeners never run on the line and may call Session APIs.
 - `subscribe_close` fires when close begins, failure included, after admission is sealed; the
   Harness ends waits and streams there and signals invocations after every close listener ran.
 
@@ -329,15 +397,19 @@ Every storage call goes through one guard on the line:
 | `StorageError::Request`; a read whose `ctx` was cancelled | fails that call only |
 | `AdoptError` after a successful commit | fails the Session (memory would be behind storage) |
 | an on-line observer error; an error in a scheduler bookkeeping commit | fails the Session |
-| the closure's own error, `initial`, `migrate`, `checkpoint_when`, owner validation | rolls that commit back only |
+| the closure's own error, `initial`, `migrate`, `checkpoint_when` (a panic included), owner validation | rolls that commit back only |
+| a current incarnation `find_document` returned that `document` cannot read | `StorageError::Corrupt`: fails the Session |
 
-On the first failure the failing call returns its error; every later call, and every call
-underway, returns `SessionFailed { cause }`; states and subscriptions end with
+On the first failure the failing call returns `SessionError::Failed` whose `cause` is the
+storage error; every later call, and every call underway, returns the same
+`SessionFailed { cause }` (inside a closure a failed read is `TxError::Failed`, and a closure
+that swallows it still cannot commit); a cancelled read is `TxError::Cancelled`; states and subscriptions end with
 `SessionFailed`; the reporter gets `ReportInfo::SessionFailed` once; the Session closes
 itself, storage included, and `closed()` resolves `Failed`. `close()` seals admission, runs
 close listeners, lets admitted commits settle, drops the cache, then closes storage after
 calls underway; a failing storage close fails the Session unless it already failed. Retrying a
-failed call cannot succeed; the host reopens.
+failed call cannot succeed; the host reopens. `close()` after a failure returns `Ok` unless
+storage failed to close.
 
 ## Differences from upstream
 
@@ -362,6 +434,22 @@ failed call cannot succeed; the host reopens.
 
 ## Decisions
 
+- Phase 2 (implementation):
+  - `DocumentState::subscribe()` returns a `DocumentSubscription`, a chord `Subscription` with
+    a pin, so an evicted document can never end a subscriber's stream while its incarnation
+    lives.
+  - A state hydrated under an older definition version follows the incarnation with chord's
+    diff from its value to the newer one, not a literal `["r", value]`.
+  - A retired incarnation's states receive only `["r", null]`; a final edit made in the
+    retiring commit is stored, not delivered (as upstream's single retirement publication).
+  - `Tx::create_task_record(TaskCreate, TaskOptions)` is the kernel's untyped creation; the
+    typed `create_task<T: TaskDefinition>` belongs to the scheduler phase, which adds it as an
+    `impl Tx` in its own module.
+  - The conversation-creation hook is a `ConversationHook` in `SessionOptions`.
+  - `TxError` adds `InvalidTask`, `Cancelled`, `Failed` and `Panic` to records.md's list.
+  - The idle index is re-keyed lazily by the sweep instead of reordered on use (no granule).
+  - Admission is checked at the call; a job that reaches the line after close finished is
+    dropped and its caller gets `Closed` or `Failed`.
 - No-op batches: chord's rule. A change that ends equal to its base, structural edits
   included, writes and publishes nothing.
 - Overflow: chord's merge. A `DocumentState` subscriber that falls behind gets merged
@@ -371,12 +459,23 @@ failed call cannot succeed; the host reopens.
 - One document is edited at a time: `Doc<'tx, D>` borrows the `Tx`; "edit, table write,
   edit again" re-acquires.
 
+## What the scheduler builds on
+
+- Its state lives in on-line observers (`observe_commits`) and in the jobs it runs on the line;
+  an observer sees every adopted commit, in order, before the commit returns.
+- A phase's closing `Next` is run as one `commit_scoped(ctx, TransactionScope { conversation_id,
+  task_id }, |tx| ..)`: the step reads the task record first (a table read), then calls the
+  phase's closure with `&mut Tx`, then `set_task` with the next state, so the closure's
+  writes, the next state and the step decision are one commit. Because document access in a
+  `Tx` is async (a cold load), the `Next` closure is an async closure:
+  `for<'a> FnOnce(&'a mut Tx<'_>, &'a RunningTask<T>) -> BoxFuture<'a, Result<NextState, TxError>>`.
+- `Session::fail(cause)` for a bookkeeping commit that failed; `Services` for the per-session
+  state of the layers above (approval waiters).
+
 ## Open (minor)
 
 - The `commit` signature (`FnOnce(&mut Tx) -> BoxFuture<Result<T, TxError>>`) versus a
   generic error type; boxing costs one allocation per commit.
-- A gap marker rather than merged publications when a `subscribe_commits` channel
-  overflows.
 - `document_retention: Option<Duration>` with `None` meaning forever, versus an enum.
 - `Session::open(Arc<dyn Storage>)` rather than a generic `S: Storage`, so the Harness stays
   non-generic.

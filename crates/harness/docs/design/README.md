@@ -70,7 +70,7 @@ crates/harness/
     records/         # ids, one file per record kind, writes, queries, errors
     documents/       # definitions, addresses, validation
     storage/         # trait, shared commit/scan/ancestry/replay rules, memory, sqlite
-    session/         # actor, tx, forks, observation
+    session/         # line (actor), tx, drafts, plan, cache, observation, forks, snapshot
     scheduler/       # reservation, invocations, ownership
     harness.rs       # public surface, settings
     registry.rs      # extensions

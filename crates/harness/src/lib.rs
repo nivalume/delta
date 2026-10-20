@@ -10,10 +10,13 @@
 //!   writes and scan queries.
 //! - [`documents`]: document definitions, typed addresses and their validation.
 //! - [`storage`]: the [`Storage`](storage::Storage) contract with memory and SQLite backends.
+//! - [`session`]: the commit line ([`Session`](session::Session), [`Tx`](session::Tx)),
+//!   document drafts, caching, observation and forks.
 //! - [`env`](mod@env): the execution environment (file system and shell) and its local
 //!   implementation.
 
 pub mod documents;
 pub mod env;
 pub mod records;
+pub mod session;
 pub mod storage;

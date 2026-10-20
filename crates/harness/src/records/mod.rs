@@ -24,7 +24,9 @@ pub use entry::{
     ContextEdit, EditAction, EntryDraft, EntryKind, EntryRecord, Head, StoredEntry, TypedEntry, TypedEntryDraft,
 };
 pub use error::RecordError;
-pub use ids::{ConversationId, DocumentId, EntryId, ROOT_CONVERSATION_ID, RawId, RecordId, Seq, SubmissionId, TaskId};
+pub use ids::{
+    ConversationId, DocumentId, EntryId, ROOT_CONVERSATION_ID, RawId, RecordId, Seq, SubmissionId, TaskId, TaskRef,
+};
 pub use query::{ConversationQuery, Cursor, DocumentQuery, EntryQuery, Page, ScanOrder, SubmissionQuery, TaskQuery};
 pub use submission::{
     SubmissionCreate, SubmissionRecord, SubmissionSettlement, SubmissionState, SubmissionStatus, SubmissionType,

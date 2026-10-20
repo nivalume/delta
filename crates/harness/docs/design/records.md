@@ -48,8 +48,8 @@ pub trait RecordId:
 - One global numeric namespace for all five kinds. Ids never repeat, also across reopen, and
   scans order by id, which is creation order ([storage.md](storage.md)).
 - Upstream's `TaskId<R>` carries an erased result type. delta's `TaskId` is untyped; a
-  result-typed `TaskRef<R>` (`TaskId` plus `PhantomData<R>`) belongs to
-  [scheduler.md](scheduler.md).
+  result-typed `TaskRef<R>` (`TaskId` plus `PhantomData<R>`, in `records::ids`) is what
+  [scheduler.md](scheduler.md)'s typed waits take.
 
 ## Conversations
 
@@ -310,7 +310,8 @@ pub enum RecordError {
 
 `StorageError` is the `storage` module's ([storage.md](storage.md)); `DocumentError` the
 `documents` module's ([documents.md](documents.md)). The Session's errors and the report
-types below belong to the session phase and are listed here for the record model they name:
+types below belong to the session module (`session::{error, report}`) and are listed here for
+the record model they name (`ConversationBusy` arrives with the inbox):
 
 ```rust
 /// The Session failed; `cause` is the first error. Reopen it.
@@ -341,7 +342,11 @@ pub enum TxError {
     #[error(transparent)] Record(RecordError),     // a `check()` refusal
     #[error("{0}")] Submission(String),            // illegal settlement or placement
     #[error("{0}")] Fork(String),                  // invisible fork entry, duplicate copies, writes to fork sources
+    #[error("{0}")] InvalidTask(String),           // a background child, a child elsewhere, no conversation, a second terminal candidate
     #[error(transparent)] Storage(StorageError),   // a `Request` error seen by the closure; anything else failed the Session
+    #[error(transparent)] Cancelled(Cancelled),    // the transaction's context was cancelled during a read
+    #[error(transparent)] Failed(SessionFailed),   // the Session failed while the transaction ran
+    #[error("panicked: {0}")] Panic(String),       // the closure or a definition function panicked; rolled back
     #[error(transparent)] Callback(Box<dyn Error + Send + Sync>),   // the commit closure's own error
 }
 
@@ -358,7 +363,7 @@ pub enum ReportInfo {
     TaskOutdated { task: ReportTask, reason: OutdatedReason },     // MissingTask | IncompatibleTask
     TaskError { task: ReportTask },
     ExtensionError { task: Option<ReportTask>, conversation: Option<ConversationId>, extension: Option<String> },
-    HostError { callback: HostCallback, task: Option<ReportTask> },  // Now | Settings | Registry | Env | Models | SetTimer | OnWake
+    HostError { callback: HostCallback, task: Option<ReportTask> },  // Now | Settings | Registry | Env | Models | OnWake
     ListenerError,
 }
 pub struct ReportTask { pub id: TaskId, pub kind: String, pub conversation_id: ConversationId, pub extension: Option<String> }
