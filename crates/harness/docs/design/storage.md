@@ -21,7 +21,7 @@ in phase 1.
 
 ```rust
 use futures::future::BoxFuture;
-type Fut<'a, T> = BoxFuture<'a, Result<T, StorageError>>;
+pub type StorageFuture<'a, T> = BoxFuture<'a, Result<T, StorageError>>;   // `Fut` below
 
 pub trait Storage: Send + Sync + 'static {
     /// Persist one batch atomically and return its sequence; once it returns, later reads observe it.
@@ -62,7 +62,35 @@ pub trait Storage: Send + Sync + 'static {
 - Every value crossing the boundary is owned (`Json` is copy-on-write, records are values),
   so upstream's detach rules (clone on retain and on read) hold by construction.
 - `ctx` carries cancellation for reads and feeds the Session's exemption rule (below); the
-  built-in backends do not cancel a query already sent to SQLite.
+  built-in backends finish a call once it started and do not read `ctx`.
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("{0}")] Request(String),          // invalid read, no durable effect (upstream `StorageRequestError`)
+    #[error("storage is closed")] Closed,
+    #[error("ID space is exhausted")] IdSpaceExhausted,
+    #[error("{0}")] Rejected(String),         // a refused batch, no effect
+    #[error("{0}")] Corrupt(String),          // missing base, version change in a tail, op that does not apply, unreadable row
+    #[error(transparent)] Sqlite(#[from] delta_chord::sqlite::SqliteError),
+    #[error(transparent)] Json(#[from] serde_json::Error),   // a record that does not encode
+}
+impl StorageError { pub fn is_request(&self) -> bool; }
+```
+
+No `Io` variant: nothing in phase 1 raises one (SQLite reports file errors through
+`SqliteError::Io`); JSONL will add what it needs.
+
+### Shared algorithms
+
+The rules below are written once and the backends only map them onto their tables:
+
+| Module | Contents |
+| --- | --- |
+| `storage/batch.rs` | `plan(writes, view) -> Batch`: id claims, request-id uniqueness, document command normalization, copy resolution, incarnation checks. A backend implements the read-only `CommitView` of its committed state, plans, and applies the `Batch` only on success, so a refused batch has no effect |
+| `storage/ancestry.rs` | Visibility chains, `visible_entry`, `latest_head`, entry scans over an `EntryReader` (lineage, entry, per-conversation range read, latest head) |
+| `storage/replay.rs` | Materialization of a base and its delta tail |
+| `storage/scan.rs` | `ScanStart` (order, cursor, `limit + 1`) and pages |
 
 ## Commit rules
 
@@ -70,12 +98,17 @@ pub trait Storage: Send + Sync + 'static {
    transaction. Sequences strictly increase; gaps are allowed.
 2. Id ownership: every create (`Conversation`, `Entry`, `DocumentCreate`, `DocumentCopy`)
    claims its id in the global namespace; an id already owned, or claimed twice in one batch,
-   rejects (`Rejected("ID {id} already belongs to {table}")`). `Task` and `Submission` writes
-   replace: the id must be free or already of that kind. `next_id` becomes
-   `max(next_id, highest written id + 1)`.
+   rejects (`"ID {id} already belongs to {table}"`, `"ID {id} is written more than once"`).
+   `Task` and `Submission` writes replace: the id must be free or already of that kind
+   (`"ID {id} is written as two record types"` within a batch). `next_id` becomes
+   `max(next_id, highest written id + 1)`, saturating at the backend's maximum. A request id
+   belongs to one submission per conversation, also within the batch
+   (`"Request ID {r:?} already belongs to submission {id} in conversation {c}"`); SQLite's
+   unique index is the backstop.
 3. Document writes are normalized per incarnation id: at most one content command (`create`,
    `copy` or `change`) and at most one `retire`; content applies before retirement whatever
-   the array order. Rejections: unknown id without a create; create of an existing id; any
+   the array order. A create or copy record must pass `DocumentCreate::check()`; a content
+   version must be positive. Rejections: unknown id without a create; create of an existing id; any
    command on a retired incarnation; a delta on an incarnation with no revision, or whose
    newest revision has another version (`"Document {id} version transition requires a base"`);
    more than one current incarnation at an address after the batch
@@ -109,7 +142,9 @@ a cursor from a scan in the other order, a historical read of a current-only doc
   order.
 - A page holds at most `limit` items; `next` is present only when more remain (the backend
   reads `limit + 1`).
-- Built-in cursors are `{"after": <last id>, "order": "ascending" | "descending"}`. A scan
+- `limit` must be positive; `0` is a `Request` error.
+- Built-in cursors are `{"after": <last id>, "order": "ascending" | "descending"}`, document
+  scans included. A scan
   given a cursor continues in the cursor's order whether the query repeats or omits `order`,
   and rejects the other one (`"The cursor continues a {order} scan; the query asks for
   {requested}"`). A cursor without `order` continues in the scan's default order.
@@ -148,15 +183,18 @@ along the chain: `upper = min(upper, parent.at)`.
   delta of another version in the tail, or an op that fails to apply is `Corrupt`, not
   absence. The record and revision reads observe one committed state.
 - `scan_documents({scope, at, kind?})`: incarnations alive in one exact scope at the point,
-  ascending by id; the cursor is `{"after": id}`.
+  ascending by id; its cursor is the same `{"after", "order": "ascending"}` shape, and a
+  descending cursor is refused like any cursor from another scan.
 
 ### Id minting
 
 `mint_id` returns `next_id` and increments it in memory; `commit` persists
 `max(stored next_id, highest id in the batch + 1)`. Minted but uncommitted ids are lost on
-reopen; nothing stored references them. `next_id` never wraps: minting past the backend's
-integer range (`u64::MAX` in memory, `i64::MAX` in SQLite) fails with `IdSpaceExhausted`,
-which no real workload reaches.
+reopen; nothing stored references them. `next_id` never wraps: the backend's maximum
+(`u64::MAX` in memory, `i64::MAX` in SQLite) is never minted and serves as the exhausted
+mark, so writing that id (or minting up to it) makes every later `mint_id` fail with
+`IdSpaceExhausted`, which no real workload reaches. A written id past SQLite's range is a
+`Rejected` batch (checked conversion).
 
 ## Failures (§10.1, storage side)
 
@@ -171,8 +209,8 @@ which no real workload reaches.
 
 ## Memory backend
 
-`MemoryStorage::new()`. Reference semantics: tables are `BTreeMap`s by id (ordered scans fall
-out), with the secondary indexes upstream keeps (conversations by owner, entry ids and head
+`MemoryStorage::new()`. Reference semantics, in `storage/memory/{mod,tables}.rs`: tables are
+`BTreeMap`s by id (ordered scans fall out), with the secondary indexes upstream keeps (conversations by owner, entry ids and head
 markers per conversation, tasks and submissions by status, submissions by
 `(conversation, request_id)`, documents by address and by scope). Revisions are
 `Vec<(Seq, DocumentContent)>` per incarnation; a base on a current-only incarnation replaces
@@ -186,6 +224,7 @@ copying.
 ## SQLite backend
 
 ```rust
+#[derive(Default)]
 pub struct SqliteOptions { pub prefix: Option<String>, pub open: delta_chord::sqlite::OpenOptions }
 
 impl SqliteStorage {
@@ -193,12 +232,20 @@ impl SqliteStorage {
     pub async fn open_database(db: Database, prefix: Option<String>) -> Result<SqliteStorage, StorageError>;
 }
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Prefixed table names; `Schema::new(prefix)` validates the prefix.
+pub struct Schema { .. }
 pub fn migrations(schema: &Schema) -> Vec<Migration>;        // the DDL below, rendered for one prefix
 ```
 
+`delta_chord::sqlite::Migration` owns its statements (`Vec<String>`), so the DDL is rendered
+per prefix at open. Files: `storage/sqlite/{mod,schema,codec,read,write}.rs`; `read.rs`'s
+`Reader` serves the reads and is the `CommitView` inside the commit transaction.
+
 - Opens through `delta_chord::sqlite::Database` (WAL, `synchronous = NORMAL`, busy timeout),
   runs `apply_migrations(db, &migrations, "{prefix}schema")`, reads `next_id` from the
-  metadata row. A failed open closes the database and returns the first error.
+  metadata row (missing: `Corrupt("SQLite storage metadata is missing")`). A failed open
+  closes the database and returns the first error. An invalid prefix fails before the file
+  or its directory is created.
 - `delta_chord::sqlite` re-exports `rusqlite`, so closures name `ToSql`, `FromSql` and
   `params!` through it; the harness has no direct `rusqlite` dependency.
 - `prefix` passes `validate_schema_prefix`; every table and index name is `{prefix}{name}`.
@@ -206,9 +253,12 @@ pub fn migrations(schema: &Schema) -> Vec<Migration>;        // the DDL below, r
 - One Session commit is one `BEGIN IMMEDIATE` transaction: read metadata, check ids, check
   document actions, table writes in batch order, document actions, update metadata. The
   closure is synchronous on the database thread (chord's design); the Session line awaits it.
-- `document(id, at)` runs its two queries in one transaction so a concurrent commit cannot
-  replace the base between them.
-- `close` waits for multi-query reads underway, then `Database::close` (checkpoint and close).
+- Every read runs in one deferred transaction, so `document(id, at)`'s two queries and an
+  ancestry walk observe one committed state.
+- The `Database` sits behind a `tokio::sync::RwLock<Option<Database>>`: calls hold the read
+  guard while they run; `close` takes the write guard (waiting for calls underway), takes the
+  database and runs `Database::close` (checkpoint and close); later calls see `None` and fail
+  with `Closed`.
 
 ### Schema (version 1; `{t.x}` and `{i.x}` are the prefixed names)
 
@@ -314,7 +364,9 @@ CREATE INDEX {i.document_bases} ON {t.document_revisions} (document_id, seq) WHE
   separate `family` column. At most one current incarnation per address is enforced by
   commit rule 3, not by an index (`UNIQUE` treats `NULL`s as distinct).
 - `document_bases` serves "newest base at or before `at`"; the delta tail is the primary
-  key range after it.
+  key range after it. On an unanalyzed database SQLite may instead walk the primary key back
+  from `at`, which reads the same tail; either way it is a search, never a scan
+  (`tests/sqlite_storage.rs` checks the plans).
 - The schema version lives in chord's `{prefix}schema` table (`singleton`, `version`); a
   database at a later version is refused with `NewerSchema`. Later versions append
   migrations to `migrations()`; version 1 is the first and has no predecessor.
@@ -338,37 +390,55 @@ protocol and recovery are spec §11.3.
 
 ## Conformance suite
 
-`tests/storage_conformance.rs` runs every case against memory and against SQLite in a temp
-directory, as upstream's `createStorageConformance`:
+`tests/storage_conformance/` writes every case once as an `async fn(Fixture)` over
+`Arc<dyn Storage>` (in `tables.rs`, `documents.rs` and `general.rs`; `main.rs` holds the
+helpers) and runs it against memory, SQLite in memory, SQLite in a file under a unique temp
+directory (removed afterwards) and SQLite in a file under a table prefix, as upstream's
+`createStorageConformance`:
 
 | # | Upstream case | Rust test | Notes |
 | --- | --- | --- | --- |
 | 1 | reserves ID 1 for the immutable root conversation | `reserves_root_id` | first minted id is 2; id 1 twice rejects |
-| 2 | detaches retained writes and every returned record | `returned_records_are_owned` | mutating a result or a committed write changes nothing stored |
-| 3 | detaches prototype-like JSON keys without changing object prototypes | `prototype_like_keys_round_trip` | `__proto__`, `constructor` as data keys round-trip; nothing else applies in Rust |
-| 4 | indexes entries committed out of ID order | `entries_out_of_id_order` | |
-| 5 | continues an entry cursor below its last item after a newer commit | `entry_cursor_after_newer_commit` | |
-| 6 | paginates conversations by opaque cursor in ascending ID order | `conversation_pages` | |
-| 7 | filters and pages conversations by durable owner edges | `conversation_owner_filters` | |
-| 8 | scans deep fork history newest-first through every ancestor cap | `deep_fork_history` | |
-| 9 | scans tables in either ID order and continues a cursor in its order | `scan_orders_and_cursors` | the other order with a cursor is `Request` |
-| 10 | replaces complete task records and pages filtered task scans | `task_replacement_and_filters` | |
-| 11 | stores owners and scans waiting and completing tasks by status | `task_owner_and_status_scans` | |
-| 12 | stores and scans sleeping tasks by status | `sleeping_tasks` | `sleeping` is in the v1 status CHECK |
-| 13 | stores passive write submissions without input-only lifecycle states | `write_submissions` | |
-| 14 | reconstructs rewindable documents and preserves half-open incarnations | `rewindable_documents` | historical points; create+retire; retire+create |
-| 15 | streams long document tails across root replacement deltas | `long_delta_tails` | `["r", v]` deltas stay deltas |
-| 16 | indexes logical addresses and exact-scope scans independently | `addresses_and_scope_scans` | |
-| 17 | keeps indexed string identities lossless | `indexed_strings_lossless` | kinds, keys and request ids with quotes, non-ASCII and `""` round-trip through plain text; Rust has no lone surrogates |
-| 18 | keeps one global record ID namespace and rejects exhausted ID minting | `global_id_namespace` | exhaustion with `next_id` set to the backend's maximum (`i64::MAX` in SQLite) |
-| 19 | rejects every operation after close | `rejects_after_close` | `Closed` |
+| 2 | commits mixed table writes atomically and rolls all of them back on failure | `mixed_writes_are_atomic` | |
+| 3 | detaches retained writes and every returned record | `returned_records_are_owned` | mutating a result or a committed write changes nothing stored |
+| 4 | detaches prototype-like JSON keys without changing object prototypes | `prototype_like_keys_round_trip` | `__proto__`, `constructor` as data keys round-trip; nothing else applies in Rust |
+| 5 | indexes entries committed out of ID order | `entries_out_of_id_order` | |
+| 6 | continues an entry cursor below its last item after a newer commit | `entry_cursor_after_newer_commit` | |
+| 7 | paginates conversations by opaque cursor in ascending ID order | `conversation_pages` | |
+| 8 | filters and pages conversations by durable owner edges | `conversation_owner_filters` | |
+| 9 | scans deep fork history newest-first through every ancestor cap | `deep_fork_history` | |
+| 10 | scans tables in either ID order and continues a cursor in its order | `scan_orders_and_cursors` | the other order with a cursor is `Request` |
+| 11 | replaces complete task records and pages filtered task scans | `task_replacement_and_filters` | |
+| 12 | stores owners and scans waiting and completing tasks by status | `task_owner_and_status_scans` | |
+| 13 | stores and scans sleeping tasks by status | `sleeping_tasks` | `sleeping` is in the v1 status CHECK |
+| 14 | indexes request IDs per conversation and replaces complete submission records | `request_ids_and_submission_replacement` | |
+| 15 | stores passive write submissions without input-only lifecycle states | `write_submissions` | |
+| 16 | reconstructs rewindable documents and preserves half-open incarnations | `rewindable_documents` | historical points; create+retire; retire+create |
+| 17 | streams long document tails across root replacement deltas | `long_delta_tails` | `["r", v]` deltas stay deltas |
+| 18 | copies stored document bases independently and rejects ambiguous sources | `copies_and_ambiguous_sources` | |
+| 19 | uses bases for version transitions and rejects historical reads of current-only documents | `version_transitions_and_current_only_history` | |
+| 20 | indexes logical addresses and exact-scope scans independently | `addresses_and_scope_scans` | |
+| 21 | keeps document lifecycle failures atomic and gives create-plus-retire an empty lifetime | `document_lifecycle_and_empty_lifetimes` | |
+| 22 | rolls back record tables and secondary indexes when a document command fails | `document_failures_roll_back_tables` | |
+| 23 | keeps indexed string identities lossless | `indexed_strings_lossless` | kinds, keys and request ids with quotes, escapes, non-ASCII, LIKE metacharacters and `""` round-trip through plain text; Rust has no lone surrogates |
+| 24 | keeps one global record ID namespace and rejects exhausted ID minting | `global_id_namespace` | exhaustion by writing the backend's maximum id (`i64::MAX` in SQLite) |
+| 25 | rejects every operation after close | `rejects_after_close` | `Closed`; closing twice succeeds |
 
-Added for delta: `reopen_continues_ids_and_seqs` (SQLite file closed and reopened),
-`copy_source_rules` (the `DocumentCopy` rejections of commit rule 4),
+Added for delta: `copy_source_rules` (the `DocumentCopy` rejections of commit rule 4),
 `singleton_and_empty_key` (a singleton and a member keyed `""` are separate addresses),
-`duplicate_request_id_rejected` (the unique request index; the Session never writes one,
-so this checks the backend alone) and `prefixed_schemas` (two prefixes in one database
-file stay independent; SQLite only).
+`duplicate_request_id_rejected` (request-id uniqueness, in a batch and across commits) and
+`invalid_reads_are_requests` (zero limits, malformed and foreign cursors, unknown
+conversations).
+
+`tests/sqlite_storage.rs` covers what only SQLite has, after upstream's
+`test/sqlite-storage.test.ts`: `reopen_continues_ids_and_seqs`,
+`prefixed_schemas_are_independent` (two prefixes and a foreign table in one file),
+`invalid_prefix_fails_before_creating_the_database`, `open_database_uses_an_open_connection`,
+`missing_metadata_and_newer_schemas_are_refused`, `a_missing_base_is_corruption`,
+`replays_root_replacements_and_refuses_corrupt_ops`,
+`refused_commits_leave_rows_and_sequences_untouched`, `rewindable_points_survive_reopen`,
+`current_only_revisions_are_reclaimed_by_bases_and_retirement`, `queries_use_their_indexes`,
+`close_waits_and_refuses_later_calls`.
 
 ## Differences from upstream
 
@@ -395,9 +465,10 @@ file stay independent; SQLite only).
 - `delta_chord::sqlite` re-exports `rusqlite`.
 - The optional table prefix stays.
 
+- `scan_documents` cursors carry `"order": "ascending"` like every other scan; a descending
+  cursor is refused rather than ignored (upstream ignores it).
+
 ## Open (minor)
 
 - Async `mint_id` (kept for a later remote or JSONL backend) versus a synchronous method,
   which both phase-1 backends could offer.
-- Whether `scan_documents` ignores an `order` field in its cursor, as upstream does, or
-  rejects it.

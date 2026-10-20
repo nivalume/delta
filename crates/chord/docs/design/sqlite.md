@@ -88,16 +88,18 @@ Messages match upstream's (`SQLite schema version 2 is newer than supported vers
 ## Migrations
 
 ```rust
-#[derive(Clone, Copy)]
-pub struct Migration { pub version: u32, pub statements: &'static [&'static str] }
+#[derive(Clone)]
+pub struct Migration { pub version: u32, pub statements: Vec<String> }
+impl Migration { pub fn new(version: u32, statements: impl IntoIterator<Item = impl Into<String>>) -> Self; }
 
 pub async fn apply_migrations(db: &Database, migrations: &[Migration], table: &str)
     -> Result<(), SqliteError>;
 pub fn validate_schema_prefix(prefix: &str) -> Result<(), SqliteError>;
 ```
 
-`apply_migrations` copies the (`Copy`) migrations into the closure, so the slice need not
-be `'static`. Each entry of `statements` runs with `execute_batch`.
+Statements are owned so a caller can render them for a table prefix at run time
+(delta-harness renders its schema per prefix). `apply_migrations` clones the migrations
+into the closure, so the slice need not be `'static`. Each entry of `statements` runs with `execute_batch`.
 
 Same behavior and same metadata table as upstream, so a database file created by pi
 opens in delta and the other way round:

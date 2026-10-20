@@ -67,9 +67,9 @@ crates/harness/
   docs/design/
   src/
     lib.rs
-    records.rs       # ids, records, states, outcomes, writes, errors
-    documents.rs     # definitions, built-in documents
-    storage/         # trait, memory, sqlite
+    records/         # ids, one file per record kind, writes, queries, errors
+    documents/       # definitions, addresses, validation
+    storage/         # trait, shared commit/scan/ancestry/replay rules, memory, sqlite
     session/         # actor, tx, forks, observation
     scheduler/       # reservation, invocations, ownership
     harness.rs       # public surface, settings

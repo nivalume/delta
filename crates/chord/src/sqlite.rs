@@ -278,12 +278,24 @@ fn run_transaction<T>(
 }
 
 /// One schema migration: its statements run in order, inside the migration transaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Statements are owned, so a caller can render them for a table prefix at run time.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Migration {
     /// The schema version this migration produces; versions start at 1 and are contiguous.
     pub version: u32,
     /// SQL run with `execute_batch`; one entry may hold several statements.
-    pub statements: &'static [&'static str],
+    pub statements: Vec<String>,
+}
+
+impl Migration {
+    /// A migration to `version` running `statements` in order.
+    pub fn new(version: u32, statements: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            version,
+            statements: statements.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 /// Applies every pending migration in one transaction, tracking the schema version in the
@@ -329,7 +341,7 @@ pub async fn apply_migrations(db: &Database, migrations: &[Migration], table: &s
             .iter()
             .filter(|migration| i64::from(migration.version) > version)
         {
-            for statement in migration.statements {
+            for statement in &migration.statements {
                 transaction.execute_batch(statement)?;
             }
             transaction.execute(&update, [migration.version])?;

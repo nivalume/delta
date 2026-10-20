@@ -35,7 +35,11 @@ pub const ROOT_CONVERSATION_ID: ConversationId = ConversationId(1);
 pub struct RawId(pub u64);
 /// The five id newtypes. Sealed.
 pub trait RecordId:
-    Copy + Ord + Hash + Serialize + DeserializeOwned + From<RawId> + Into<u64> + sealed::Sealed {}
+    Copy + Ord + Hash + Debug + Display + Serialize + DeserializeOwned + From<RawId> + Into<u64> + Send + Sync + sealed::Sealed
+{
+    fn from_raw(raw: u64) -> Self;   // provided
+    fn get(self) -> u64;             // provided
+}
 ```
 
 - Ids and sequences are `u64` and serialize as JSON numbers; there is no cap below the
@@ -80,6 +84,7 @@ pub struct EntryRecord {
     pub edits: Option<Vec<ContextEdit>>,
     pub by_task_id: Option<TaskId>,             // stamped by a task runtime commit
 }
+pub struct StoredEntry { pub entry: EntryRecord, pub commit_seq: Seq }
 pub struct ContextEdit { pub target: EntryId, pub action: EditAction }
 pub enum EditAction { Omit, Replace(Vec<delta_ai::Message>) }
 // {"target":5,"action":"omit"} | {"target":5,"action":"replace","messages":[...]}
@@ -94,10 +99,19 @@ pub struct EntryDraft {
 pub enum Head { At(EntryId), SelfRef }        // upstream `head: EntryId | "self"`: the entry's own id
 
 /// A typed entry kind: `kind` plus the type of `data` (upstream `Entry<D>`).
-pub struct EntryKind<D> { pub kind: &'static str, _data: PhantomData<D> }
+pub struct EntryKind<D> { pub kind: &'static str, _data: PhantomData<fn() -> D> }
+impl<D> EntryKind<D> { pub const fn new(kind: &'static str) -> Self; }
+impl<D: DeserializeOwned> EntryKind<D> {
+    /// `None` when the record is of another kind; missing `data` decodes from `null`.
+    pub fn decode(&self, record: EntryRecord) -> Result<Option<TypedEntry<D>>, RecordError>;
+}
+impl<D: Serialize> EntryKind<D> { pub fn encode(&self, draft: TypedEntryDraft<D>) -> Result<EntryDraft, RecordError>; }
 pub struct TypedEntry<D> { pub record: EntryRecord, pub data: D }
-pub struct TypedEntryDraft<D> { /* EntryDraft without `kind`, `data: D` */ }
+pub struct TypedEntryDraft<D> { pub data: D, pub model, pub head, pub edits }   // EntryDraft without `kind`
 ```
+
+The Session's `typed_entry` and `append_typed_entry` are `decode` and `encode` around the
+untyped calls, so the conversion lives with the records.
 
 - Entries are immutable; ids are Session-global and ordered.
 - `model` holds `delta_ai::Message`, whose JSON keeps upstream's (pi-ai's) shape as every
@@ -107,8 +121,8 @@ pub struct TypedEntryDraft<D> { /* EntryDraft without `kind`, `data: D` */ }
 - `head` and `edits` change later context, never storage; the derivation rules (§2.1, steps
   1–10) are context.md's.
 - `EditAction` serializes flat beside `target` (`action` tag and `messages` payload in one
-  object): a hand-written `Serialize`/`Deserialize`, since serde's adjacent tagging would nest
-  them.
+  object): `ContextEdit` converts through a private flat wire struct
+  (`#[serde(try_from, into)]`), which refuses `omit` with messages and `replace` without.
 
 ## Submissions
 
@@ -141,8 +155,9 @@ pub struct SubmissionCreate { /* SubmissionRecord without `id` */ }
 | `write` | `queued` → `done{entry}` or `unanswered{reason, detail?}` |
 
 `SubmissionRecord::check()` refuses the other combinations (a `placed` write, a write with
-`answer`, an unanswered write with `entry`); `Tx::create_submission` and settlement call it,
-so storage never sees them. Settlement rules (only a placed input becomes `done`; a settled
+`answer`, an unanswered write with `entry`, a `done` input without `answer`);
+`Tx::create_submission` and settlement call it, so storage never sees them.
+`SubmissionCreate::into_record(id)` adds the id. Settlement rules (only a placed input becomes `done`; a settled
 record stays) are [session.md](session.md)'s.
 
 ## Tasks
@@ -217,8 +232,9 @@ pub struct DocumentRecord {
     pub created_at: Seq,                        // stamped by storage
     pub retired_at: Option<Seq>,
 }
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DocumentScope { Session, Conversation { conversation_id: ConversationId }, Task { task_id: TaskId } }
+pub enum DocumentScopeKind { Session, Conversation, Task }   // DocumentScope::kind(); owner_id() is 0 for session
 pub struct ConversationPolicy { pub history: History, pub fork: Fork }
 pub enum History { Latest, Rewindable }
 pub enum Fork { AsOf, Current, Initial }       // "as_of" | "current" | "initial"
@@ -239,7 +255,10 @@ a family member adds `"key":"call-7"`; retirement adds `"retired_at":9`.
 - Lifetime is the half-open interval `created_at <= at < retired_at`, unbounded while current;
   create and retire in one commit gives an empty lifetime.
 - `policy` is present iff `scope` is `Conversation`; `Fork::AsOf` requires
-  `History::Rewindable`. `DocumentRecord::check()` enforces both.
+  `History::Rewindable`. `DocumentRecord::check()` and `DocumentCreate::check()` enforce
+  both; storage runs the latter on every create and copy.
+- `DocumentRecord::is_alive_at(point)`, `keeps_history()` (rewindable conversation documents
+  only) and `address()` are the record-level predicates both backends share.
 - Definition versions live on bases and deltas, not on the record: one incarnation may hold
   records written by several definition versions.
 
@@ -269,27 +288,31 @@ pub struct DocumentQuery { pub scope: DocumentScope, pub at: DocumentPoint, pub 
 pub struct StoredEntry { pub entry: EntryRecord, pub commit_seq: Seq }
 ```
 
-Memory and SQLite do not persist `StorageWrite` itself; its serde form (`"type":
-"document_create"`, …) is what a later JSONL backend writes as its log lines.
+Memory and SQLite do not persist `StorageWrite` itself; its serde form is what a later JSONL
+backend writes as its log lines. It is adjacently tagged, `{"type":"document_create","value":
+{...}}`, because an internally tagged `submission` would collide with the record's own
+`type` field. `limit` must be positive (`0` is a `Request` error).
 
 ## Errors and reports
 
-```rust
-#[derive(Debug, thiserror::Error)]
-pub enum StorageError {
-    /// Upstream `StorageRequestError`: an invalid read with no durable effect (unknown conversation,
-    /// bad cursor, history the document does not keep). Fails only that read.
-    #[error("{0}")] Request(String),
-    #[error("storage is closed")] Closed,
-    #[error("ID space is exhausted")] IdSpaceExhausted,   // past the backend's integer range; unreachable in practice
-    #[error("{0}")] Rejected(String),           // a batch the backend refuses: id ownership, document consistency, copy source
-    #[error("{0}")] Corrupt(String),            // missing base, version change inside a delta tail, unreadable row
-    #[error(transparent)] Sqlite(#[from] delta_chord::sqlite::SqliteError),
-    #[error(transparent)] Json(#[from] serde_json::Error),
-    #[error(transparent)] Io(#[from] std::io::Error),
-}
-impl StorageError { pub fn is_request(&self) -> bool; }
+Each module owns its error enum; errors convert only at layer boundaries.
 
+```rust
+/// A record that breaks a rule its type cannot express, or typed entry data that does not convert.
+#[derive(Debug, thiserror::Error)]
+pub enum RecordError {
+    #[error("Submission {id}: {problem}")] Submission { id: SubmissionId, problem: String },
+    #[error("Task {id}: {problem}")] Task { id: TaskId, problem: String },
+    #[error("Document {id}: {problem}")] Document { id: DocumentId, problem: String },
+    #[error("Entry data of kind {kind} does not convert")] EntryData { kind: String, #[source] source: serde_json::Error },
+}
+```
+
+`StorageError` is the `storage` module's ([storage.md](storage.md)); `DocumentError` the
+`documents` module's ([documents.md](documents.md)). The Session's errors and the report
+types below belong to the session phase and are listed here for the record model they name:
+
+```rust
 /// The Session failed; `cause` is the first error. Reopen it.
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("Session failed after a storage error; close and reopen it")]
@@ -313,11 +336,9 @@ pub enum TxError {
     #[error("{what} {task} is {status}")] OwnerUnavailable { what: &'static str, task: TaskId, status: &'static str },
     #[error("Task {0} is terminal")] TerminalTask(TaskId),
     #[error("Task {0} cannot change conversations")] TaskConversationChange(TaskId),
-    #[error("Document {id} ({kind}) does not match the supplied definition semantics")] DefinitionMismatch { id: DocumentId, kind: String },
-    #[error("Document {id} ({kind}) has newer version {stored} than {definition}")] VersionTooNew { .. },
-    #[error("Document {id} ({kind}) requires migration from version {stored}")] MigrationRequired { .. },
-    #[error("Document {kind} migration from version {from} failed")] Migrate { kind: String, from: u32, #[source] source: MigrateError },
-    #[error("Document {kind} initial value is not an object")] NotAnObject { kind: String },
+    /// Definition mismatch, version too new, migration required or failed, non-object value.
+    #[error(transparent)] Document(DocumentError),
+    #[error(transparent)] Record(RecordError),     // a `check()` refusal
     #[error("{0}")] Submission(String),            // illegal settlement or placement
     #[error("{0}")] Fork(String),                  // invisible fork entry, duplicate copies, writes to fork sources
     #[error(transparent)] Storage(StorageError),   // a `Request` error seen by the closure; anything else failed the Session
@@ -356,7 +377,7 @@ Records are serde-native; nothing is shaped for another implementation.
 | --- | --- |
 | Field names | Rust field names, snake_case; no `rename_all` on structs |
 | Tags | Enum tags and unit variants `#[serde(rename_all = "snake_case")]` (`"status":"completing"`, `"fail_fast"`, `"as_of"`) |
-| Absent fields | Every `Option` is `default` and `skip_serializing_if = "Option::is_none"`. `null` is a value only inside `data`, `detail`, `input`, `checkpoint`, `result` and document values |
+| Absent fields | Every `Option` is `default` and `skip_serializing_if = "Option::is_none"`. `null` is a value only inside `data`, `detail`, `input`, `checkpoint`, `result`, `trace` and document values; the `Option<Json>` fields among them read a present `null` as `Some(Null)` (a `deserialize_with` helper), so it round-trips |
 | Booleans | `background` and `abort_requested` always written; `abandon_on_restart` only when `true` |
 | Numbers | Ids and sequences are `u64`, timestamps `i64`; floats never appear in records |
 | Unknown fields | Accepted on read; `trace` and `links` are kept explicitly, other unknown fields are dropped |
@@ -385,10 +406,12 @@ Records are serde-native; nothing is shaped for another implementation.
 - Record JSON is serde-native snake_case; built-in kinds are `delta.*` (README); no
   compatibility with pi's records.
 
+- `RawId` plus a sealed `RecordId` for typed minting (phase 1): `Storage` stays object-safe.
+- `TaskRecord` keeps `trace`/`links` as `Json` (phase 1).
+- Module layout: `records/` with one file per record kind (`ids`, `conversation`, `entry`,
+  `submission`, `task`, `document`, `write`, `query`, `error`).
+
 ## Open (minor)
 
-- `RawId` plus a sealed `RecordId` for typed minting, versus a generic `mint_id::<I>()` that
-  would make `Storage` non-object-safe.
-- `TaskRecord` keeps `trace`/`links` as `Json` rather than dropping them on read.
 - `TxError::Callback(Box<dyn Error>)` as the carrier of a commit closure's own error, versus
   an error type parameter on `commit`.

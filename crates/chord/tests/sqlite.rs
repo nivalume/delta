@@ -77,22 +77,24 @@ async fn pragma_int(db: &Database, pragma: &'static str) -> i64 {
         .unwrap()
 }
 
-const NOTES_V1: Migration = Migration {
-    version: 1,
-    statements: &["CREATE TABLE notes (body TEXT)", "INSERT INTO notes VALUES ('kept')"],
-};
-const NOTES_V2: Migration = Migration {
-    version: 2,
-    statements: &["ALTER TABLE notes ADD COLUMN title TEXT"],
-};
+fn notes_v1() -> Migration {
+    Migration::new(
+        1,
+        ["CREATE TABLE notes (body TEXT)", "INSERT INTO notes VALUES ('kept')"],
+    )
+}
+
+fn notes_v2() -> Migration {
+    Migration::new(2, ["ALTER TABLE notes ADD COLUMN title TEXT"])
+}
 
 #[tokio::test]
 async fn migrations_track_independent_histories_and_skip_applied_ones() {
     let db = memory().await;
-    apply_migrations(&db, &[NOTES_V1], "notes_schema").await.unwrap();
-    apply_migrations(&db, &[NOTES_V1], "notes_schema").await.unwrap();
+    apply_migrations(&db, &[notes_v1()], "notes_schema").await.unwrap();
+    apply_migrations(&db, &[notes_v1()], "notes_schema").await.unwrap();
     apply_migrations(&db, &[], "other_schema").await.unwrap();
-    apply_migrations(&db, &[NOTES_V1, NOTES_V2], "notes_schema")
+    apply_migrations(&db, &[notes_v1(), notes_v2()], "notes_schema")
         .await
         .unwrap();
 
@@ -108,7 +110,7 @@ async fn migrations_track_independent_histories_and_skip_applied_ones() {
     assert_eq!(ints(&db, "SELECT version FROM notes_schema").await, vec![2]);
     assert_eq!(ints(&db, "SELECT version FROM other_schema").await, vec![0]);
 
-    let error = apply_migrations(&db, &[NOTES_V1], "notes_schema").await.unwrap_err();
+    let error = apply_migrations(&db, &[notes_v1()], "notes_schema").await.unwrap_err();
     assert!(
         matches!(
             error,
@@ -132,10 +134,7 @@ async fn migrations_reject_invalid_versions_before_touching_the_database() {
     for versions in [&[0][..], &[2], &[1, 3], &[1, 1]] {
         let migrations: Vec<Migration> = versions
             .iter()
-            .map(|&version| Migration {
-                version,
-                statements: &[],
-            })
+            .map(|&version| Migration::new(version, Vec::<String>::new()))
             .collect();
         let error = apply_migrations(&db, &migrations, "app_schema").await.unwrap_err();
         assert!(
@@ -178,31 +177,30 @@ async fn schema_prefixes_are_validated_before_any_sql_runs() {
 
 #[tokio::test]
 async fn a_failing_migration_rolls_back_the_bootstrap_and_every_pending_migration() {
-    const FIRST: Migration = Migration {
-        version: 1,
-        statements: &[
-            "CREATE TABLE migration_first (value TEXT) STRICT",
-            "INSERT INTO migration_first (value) VALUES ('retained')",
-        ],
+    let first = || {
+        Migration::new(
+            1,
+            [
+                "CREATE TABLE migration_first (value TEXT) STRICT",
+                "INSERT INTO migration_first (value) VALUES ('retained')",
+            ],
+        )
     };
     let db = memory().await;
     let failed = [
-        FIRST,
-        Migration {
-            version: 2,
-            statements: &["CREATE TABLE migration_second (value TEXT) STRICT", "THIS IS NOT SQL"],
-        },
+        first(),
+        Migration::new(
+            2,
+            ["CREATE TABLE migration_second (value TEXT) STRICT", "THIS IS NOT SQL"],
+        ),
     ];
     let error = apply_migrations(&db, &failed, "app_schema").await.unwrap_err();
     assert!(matches!(error, SqliteError::Sqlite(_)), "{error:?}");
     assert_eq!(schema_names(&db).await, Vec::<String>::new());
 
     let fixed = [
-        FIRST,
-        Migration {
-            version: 2,
-            statements: &["CREATE TABLE migration_second (value TEXT) STRICT"],
-        },
+        first(),
+        Migration::new(2, ["CREATE TABLE migration_second (value TEXT) STRICT"]),
     ];
     apply_migrations(&db, &fixed, "app_schema").await.unwrap();
     assert_eq!(
@@ -262,7 +260,7 @@ async fn a_file_database_uses_wal_and_close_truncates_the_log() {
         .await
         .unwrap();
     assert_eq!(mode, "wal");
-    apply_migrations(&db, &[NOTES_V1], "app_schema").await.unwrap();
+    apply_migrations(&db, &[notes_v1()], "app_schema").await.unwrap();
     let wal = dir.path().join("nested").join("store.db-wal");
     assert!(std::fs::metadata(&wal).unwrap().len() > 0);
 
@@ -276,7 +274,7 @@ async fn a_file_database_uses_wal_and_close_truncates_the_log() {
 
     let db = Database::open(&path, OpenOptions::default()).await.unwrap();
     assert_eq!(ints(&db, "SELECT version FROM app_schema").await, vec![1]);
-    apply_migrations(&db, &[NOTES_V1], "app_schema").await.unwrap();
+    apply_migrations(&db, &[notes_v1()], "app_schema").await.unwrap();
     db.close().await.unwrap();
 }
 

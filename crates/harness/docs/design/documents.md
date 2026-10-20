@@ -26,7 +26,8 @@ pub trait DocDefinition: Send + Sync + 'static {
     const KIND: &'static str;
     /// Positive. Versions belong to stored bases and deltas.
     const VERSION: u32;
-    /// Owner and lifetime: `SessionScope`, `ConversationScope` or `TaskScope`.
+    /// Owner, lifetime and (for conversations) history and fork:
+    /// `SessionScope`, `TaskScope` or `ConversationScope<H, F>`.
     type Scope: DocScope;
     /// `()` for a singleton. A family's seed, given to `initial` on the first acquisition of a member.
     type Seed: Serialize + Send + 'static;
@@ -40,12 +41,6 @@ pub trait DocDefinition: Send + Sync + 'static {
     fn checkpoint_when(value: &Json, ops: &[Op], info: CheckpointInfo) -> bool;
 }
 
-/// Only conversation documents declare history and fork behaviour.
-pub trait ConversationDoc: DocDefinition<Scope = ConversationScope> {
-    type History: HistoryKind;          // `Latest` or `Rewindable`
-    const FORK: Fork;                   // `AsOf` only with `Rewindable`
-}
-
 pub struct CheckpointInfo {
     /// Deltas already stored after the newest base, excluding this change.
     pub deltas_since_base: u64,
@@ -53,35 +48,59 @@ pub struct CheckpointInfo {
 #[derive(Debug, thiserror::Error)]
 pub enum MigrateError {
     #[error("no migration from version {from}")] Unsupported { from: u32 },
-    #[error(transparent)] Failed(Box<dyn Error + Send + Sync>),
+    #[error(transparent)] Failed(Box<dyn Error + Send + Sync>),   // MigrateError::failed(e)
 }
 
+/// Sealed. The scope types are uninhabited markers.
 pub trait DocScope: sealed::Sealed {
-    type Owner: Copy + Send + 'static;                 // (), ConversationId, TaskId
+    type Owner: Copy + Debug + Eq + Hash + Send + Sync + 'static;   // (), ConversationId, TaskId
+    const KIND: DocumentScopeKind;
+    const POLICY: Option<ConversationPolicy>;                         // Some exactly for conversations
     fn scope(owner: Self::Owner) -> DocumentScope;
 }
-pub struct SessionScope;
-pub struct ConversationScope;
-pub struct TaskScope;
+pub enum SessionScope {}
+pub enum TaskScope {}
+pub struct ConversationScope<H: HistoryKind, F: ForkKind<H>>(/* uninhabited */);
+
 pub trait HistoryKind: sealed::Sealed { const HISTORY: History; }
-pub struct Latest;
-pub struct Rewindable;
+pub enum Latest {}
+pub enum Rewindable {}
+/// A fork policy allowed with history `H`: `ForkAsOf` implements it only for `Rewindable`.
+pub trait ForkKind<H>: sealed::Sealed { const FORK: Fork; }
+pub enum ForkAsOf {}
+pub enum ForkCurrent {}
+pub enum ForkInitial {}
+
+/// Implemented for every definition whose scope is a `ConversationScope`; bounds such as
+/// `D: ConversationDoc<History = Rewindable>` select rewindable documents (`snapshot_as_of`).
+pub trait ConversationDoc: DocDefinition { type History: HistoryKind; type Fork: ForkKind<Self::History>; }
+impl<D, H, F> ConversationDoc for D where D: DocDefinition<Scope = ConversationScope<H, F>>, H: HistoryKind, F: ForkKind<H> { .. }
 
 /// What a definition claims about every incarnation it touches; compared with the persisted record.
-pub struct Semantics { pub scope: DocumentScopeKind, pub policy: Option<ConversationPolicy>, pub family: bool }
-pub fn semantics<D: DocDefinition>() -> Semantics;     // via a helper trait implemented per scope
+pub struct Semantics { pub kind: &'static str, pub version: u32, pub scope: DocumentScopeKind, pub policy: Option<ConversationPolicy>, pub family: bool }
+impl Semantics { pub fn matches(&self, record: &DocumentRecord) -> bool; }
+pub fn semantics<D: DocDefinition>() -> Semantics;
 ```
 
 A definition is a unit struct; `KIND`, `VERSION` and the scope are read without an instance.
+History and fork are parameters of the conversation scope, so the scope type alone carries
+the persisted semantics: `semantics::<D>()` reads them from `D::Scope` without a second trait
+or specialization, and a conversation document declares them in one place
+(`type Scope = ConversationScope<Latest, ForkInitial>`).
+
 A logical address is `(kind, scope owner, key?)`:
 
 ```rust
-pub struct DocAddress<D: DocDefinition> { owner: <D::Scope as DocScope>::Owner, key: Option<String>, _d: PhantomData<D> }
-impl<D: DocDefinition<Seed = ()>> DocAddress<D> { pub fn new(owner: <D::Scope as DocScope>::Owner) -> Self }   // singleton
-impl<D: DocDefinition> DocAddress<D> { pub fn member(owner: <D::Scope as DocScope>::Owner, key: impl Into<String>) -> Self } // family
+pub type OwnerOf<D> = <<D as DocDefinition>::Scope as DocScope>::Owner;
+pub struct DocAddress<D: DocDefinition> { owner: OwnerOf<D>, key: Option<String>, _d: PhantomData<fn() -> D> }
+impl<D: DocDefinition<Seed = ()>> DocAddress<D> { pub fn new(owner: OwnerOf<D>) -> Self }   // singleton
 impl<D: DocDefinition> DocAddress<D> {
+    pub fn member(owner: OwnerOf<D>, key: impl Into<String>) -> Self;   // family
+    pub fn owner(&self) -> OwnerOf<D>;
+    pub fn key(&self) -> Option<&str>;
+    pub fn scope(&self) -> DocumentScope;
+    /// The untyped address storage looks up; also the Session's cache key.
     pub fn to_address(&self) -> DocumentAddress;
-    pub fn id(&self) -> AddressId;                     // the Session's map key: kind, scope kind, owner, key
 }
 ```
 
@@ -90,16 +109,37 @@ impl<D: DocDefinition> DocAddress<D> {
 constructor exists only when `Seed = ()`; a family acquisition takes its seed as a separate
 argument (session.md), and the seed is ignored whenever the member exists.
 
-Validation, checked once per definition at first use (`semantics::<D>()` panics on a
-definition bug, as upstream's `defineDoc` throws), or at compile time by `define_doc!`:
+Validation. Everything about the definition itself is checked at compile time; what depends
+on stored data is checked on access by functions the Session calls:
 
 | Rule | Check |
 | --- | --- |
-| `VERSION >= 1` | `const _: () = assert!(...)` in `define_doc!`, else first use |
-| `FORK == AsOf` requires `History = Rewindable` | same |
-| `initial()` and `migrate()` return objects | at acquisition; a non-object rejects the commit (`TxError::NotAnObject`) |
-| typed access against the persisted record | `scope.kind`, `history`, `fork` of the incarnation equal the definition's, else `TxError::DefinitionMismatch`; a migration cannot reinterpret them |
-| `FAMILY` against the record's `key` | a family definition addresses members only, a singleton definition has no key |
+| `VERSION >= 1` | an inline `const` assertion in `semantics::<D>()`: a compile error where the definition is used |
+| `FORK == AsOf` requires `History = Rewindable` | the types: `ForkAsOf` implements `ForkKind<Rewindable>` only |
+| `FAMILY` against addressing | inline `const` assertions: `DocAddress::new` refuses a family, `member` a singleton |
+| `initial()` returns an object | `initial_value::<D>(seed)`, else `DocumentError::NotAnObject` |
+| typed access against the persisted record | `check_record::<D>(record)`: kind, scope kind, history, fork, and a key exactly for a family; else `DocumentError::DefinitionMismatch`. A migration cannot reinterpret them |
+| stored version against `VERSION` | `upgrade::<D>(id, stored_version, value)` (below) |
+
+```rust
+pub fn check_record<D: DocDefinition>(record: &DocumentRecord) -> Result<(), DocumentError>;
+pub fn initial_value<D: DocDefinition>(seed: &D::Seed) -> Result<Json, DocumentError>;
+/// Equal: unchanged; older: `migrate` (result must be an object); newer: refused.
+pub fn upgrade<D: DocDefinition>(id: DocumentId, stored_version: u32, value: Json) -> Result<Upgraded, DocumentError>;
+pub struct Upgraded { pub value: Json, pub migrated: bool }   // `migrated`: the first `tx.doc` stores a base
+
+#[derive(Debug, thiserror::Error)]
+pub enum DocumentError {
+    #[error("Document {id} ({kind}) does not match the supplied definition semantics")] DefinitionMismatch { id: DocumentId, kind: String },
+    #[error("Document {id} ({kind}) has newer version {stored} than {definition}")] VersionTooNew { id: DocumentId, kind: String, stored: u32, definition: u32 },
+    #[error("Document {id} ({kind}) requires migration from version {stored}")] MigrationRequired { id: DocumentId, kind: String, stored: u32 },
+    #[error("Document {kind} migration from version {from} failed")] Migrate { kind: String, from: u32, #[source] source: MigrateError },
+    #[error("Document {kind} {origin} value is not an object")] NotAnObject { kind: String, origin: ValueSource },   // Initial | Migrated
+}
+```
+
+The Session wraps `DocumentError` in `TxError::Document` (a rejected commit) or returns it
+from a read; nothing is written.
 
 Scope decides lifetime:
 
@@ -155,12 +195,12 @@ Idioms: `|_, _, info| info.deltas_since_base >= 31`;
 
 ## Versions and migrations (§3.6)
 
-| stored vs. `VERSION` | typed access |
+| stored vs. `VERSION` | typed access (`upgrade::<D>`) |
 | --- | --- |
 | equal | use the value |
 | older, `migrate` succeeds | migrated value; `tx.doc` stages a required base, read-only access migrates in memory only |
-| older, `migrate` unsupported or failed | `TxError::MigrationRequired` / `TxError::Migrate` |
-| newer | `TxError::VersionTooNew` |
+| older, `migrate` unsupported or failed | `DocumentError::MigrationRequired` / `DocumentError::Migrate` |
+| newer | `DocumentError::VersionTooNew` |
 
 - Migration is access-driven, through the definition supplied to that call: `tx.doc`,
   `snapshot`, `snapshot_as_of`, `document_state`. Open sweeps nothing; unaccessed documents
@@ -226,14 +266,13 @@ pub struct Inbox;
 impl DocDefinition for Inbox {
     const KIND: &'static str = "delta.inbox";
     const VERSION: u32 = 1;
-    type Scope = ConversationScope;
+    type Scope = ConversationScope<Latest, ForkInitial>;
     type Seed = ();
     fn initial(_: &()) -> Json { json!({ "items": [] }) }
     fn checkpoint_when(value: &Json, _: &[Op], _: CheckpointInfo) -> bool {
         value.get("items").and_then(Json::as_array).is_some_and(|items| items.is_empty())
     }
 }
-impl ConversationDoc for Inbox { type History = Latest; const FORK: Fork = Fork::Initial; }
 
 // inside a commit closure
 let mut inbox = tx.doc(DocAddress::<Inbox>::new(conversation)).await?;
@@ -247,8 +286,9 @@ the document and yields a diffed batch.
 ## Differences from upstream
 
 - A trait with associated types instead of a definition object, eight `defineDoc` overloads
-  and twelve token aliases; scope, family and history are types, so misuse is a compile error
-  where upstream throws `TypeError` at run time.
+  and twelve token aliases; scope, history and fork are types and the version and family
+  rules are `const` assertions, so misuse is a compile error where upstream throws
+  `TypeError` at run time.
 - Definitions are stateless: `initial`, `migrate` and `checkpoint_when` take no `self`, and a
   definition is a type name, not a value to pass around.
 - Values are `delta_chord::Json`, not a generic `T`. Typing is at the edges (`update_as`,
@@ -264,13 +304,14 @@ the document and yields a diffed batch.
   ([session.md](session.md)).
 - Observers get a read-only `DocumentState` over the incarnation's `delta_chord::State`.
 - The crate's own kinds start with `delta.` and are version 1 (README).
-
-## Open (minor)
-
-- Associated-type scope and marker-type history, versus one trait with runtime `Semantics`
-  only (fewer generics; `snapshot_as_of` on a `latest` document becomes a runtime error).
-- `DocAddress<D>` as the single argument shape of `tx.doc`, `snapshot`, `document_state` and
-  `retire_doc`, versus per-scope methods such as `tx.conversation_doc::<D>(id)`.
+- Scope, history and fork are types: `ConversationScope<H, F>` with marker types, chosen over
+  a separate `ConversationDoc` impl with associated items (which `semantics::<D>()` could not
+  read from a plain `D: DocDefinition` bound). `ConversationDoc` remains as a blanket helper
+  trait for bounds.
+- `DocAddress<D>` is the single argument shape of `tx.doc`, `snapshot`, `document_state` and
+  `retire_doc`; its `to_address()` (a `DocumentAddress`) is the Session's cache key, so there
+  is no separate `AddressId`.
+- No `define_doc!` macro: inline `const` assertions give the compile-time checks.
 - Documents stay untyped `Json` at the API; a typed convenience wrapper would be additive.
-- A `define_doc!` macro for the compile-time assertions; without it the checks run once at
-  first use and panic.
+- Module layout: `documents/` with `definition.rs` (trait and markers), `address.rs` and
+  `validate.rs` (semantics, access checks, `DocumentError`).
