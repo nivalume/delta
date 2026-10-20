@@ -31,8 +31,9 @@ pub fn char_end(bytes: &[u8], index: usize) -> usize;
   string to bytes and decodes the slice back).
 - `sanitize_output` removes C0 control characters other than tab and newline, and
   U+FFF9–U+FFFB. It borrows when there is nothing to remove.
-- `char_end(bytes, index)` is the last UTF-8 character boundary at or before `index` in a
-  byte buffer that may not be valid UTF-8 (durable's `read` tool cuts raw lines with it).
+- `char_end(bytes, index)` is the last UTF-8 character boundary at or before `index`
+  (clamped to the length) in a byte buffer that may not be valid UTF-8 (durable's `read`
+  tool cuts raw lines with it).
   For `&str`, `str::floor_char_boundary` does the same.
 - Line counting is as upstream: a final line without a newline counts as a line.
 
@@ -62,48 +63,69 @@ pub struct BoundedOutput { pub text: String, pub dropped_bytes: usize, pub dropp
   `<[u8]>::utf8_chunks`.)
 - Totals over the whole stream (bytes, newlines, whether it ends with a newline) are kept, so
   `dropped_bytes` and `dropped_lines` are exact.
-- **Head**: stores decoded text until it holds more than `max_bytes` bytes or `max_lines`
-  newlines, then only counts.
+- **Head**: stores decoded text until it holds more than `max_bytes` bytes or at least
+  `max_lines` newlines, then only counts. It keeps at most the first `max_bytes + 1` bytes:
+  nothing past them can be in the window, and the extra byte tells whether a cut at
+  `max_bytes` falls inside a character.
 - **Tail**: stores the last `max_bytes + 1` bytes in a ring buffer. A window of the last
   lines never spans more than `max_bytes` bytes, and the one extra byte tells whether the
   window starts at a line start. Each pushed byte is copied once. Upstream keeps a list of
   chunks and drops whole leading chunks, then trims to a margin at each snapshot.
 - `skip` records output a producer omitted before the next chunk (for example a process
-  whose output was read from the end of a log file). It must exceed the tail window, so the
-  stored text is discarded and only the totals grow. It panics with `Retain::Head`, where
-  upstream throws.
+  whose output was read from the end of a log file). The output pushed after it, before the
+  next snapshot, must by itself exceed the tail window (more than `max_bytes` bytes or more
+  than `max_lines` newlines), so the stored text is discarded and only the totals grow. It
+  panics with `Retain::Head`, where upstream throws. Upstream passes the skip with the
+  chunk that follows it (`push(chunk, skipped)`); `skip` followed by `push_str` is the same.
+- `stored_bytes` is at most `max_bytes + 1` in both modes (upstream: the limits plus one
+  chunk, trimmed to a margin at each snapshot).
 - `snapshot` returns the window, sanitized, and the dropped totals.
 
 ## `Progress`
 
 ```rust
 pub struct Progress<E>;
+pub const PROGRESS_BYTES_PER_SECOND: usize = 100 * 1024;
 
-impl<E: Send + 'static> Progress<E> {
+impl<E: Send + Sync + 'static> Progress<E> {
     pub fn spawn<W, F>(write: W, min_interval: Duration) -> Self
-    where W: FnMut() -> F + Send + 'static, F: Future<Output = Result<usize, E>> + Send;
+    where W: FnMut() -> F + Send + 'static, F: Future<Output = Result<usize, E>> + Send + 'static;
 
     pub fn mark(&self);
-    pub async fn mark_and_wait(&self) -> Result<(), Arc<E>>;
-    pub fn errors(&self) -> impl Stream<Item = Arc<E>>;
-    pub async fn stop(self) -> PendingWaiters;
+    pub fn mark_and_wait(&self) -> impl Future<Output = Result<(), Arc<E>>> + Send + use<E>;
+    pub fn errors(&self) -> impl Stream<Item = Arc<E>> + Send + Unpin + use<E>;
+    pub async fn stop(self) -> PendingWaiters<E>;
 }
 
-impl PendingWaiters {
+pub struct PendingWaiters<E>;
+
+impl<E> PendingWaiters<E> {
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
     pub fn settle(self, result: Result<(), Arc<E>>);
 }
 ```
 
 - `write` commits the current value and returns how many bytes it wrote. It runs on a
-  task owned by `Progress`.
+  tokio task owned by `Progress` (`spawn` must be called within a runtime). Errors are
+  shared as `Arc<E>` between waiters and error streams, hence `E: Send + Sync`.
 - Pacing as upstream: the first `mark` after an idle period commits at once; each commit
   delays the next one by at least `min_interval` and by its size at 100 KiB/s
   (`PROGRESS_BYTES_PER_SECOND`). At most one commit is in flight; marks made meanwhile
   coalesce into the next commit.
-- `mark_and_wait` resolves with the commit that includes this mark, or that commit's error.
+- `mark_and_wait` marks when it is called, not when its future is first polled, and the
+  future does not borrow the `Progress`: it can be awaited after `stop`, as upstream's
+  promise can. It resolves with the commit that includes this mark, or that commit's error.
+  A waiter handed back by `stop` resolves only through `PendingWaiters::settle`; dropping
+  the `PendingWaiters` unsettled leaves it pending, as an unsettled promise upstream.
+- `errors` streams the errors of commits that fail after it is called; the stream ends when
+  the progress stops or is dropped.
 - `stop` stops scheduling, waits for the commit in flight, and returns the waiters that no
   commit has settled yet. The caller makes the final commit itself and settles them, as
-  upstream (durable's final tool result is written by the caller, not by `Progress`).
+  upstream (durable's final tool result is written by the caller, not by `Progress`). A
+  mark the commit task has not picked up yet is left to that final commit (upstream starts
+  a commit synchronously inside `mark`). A panic in `write` resumes in `stop`.
+- Dropping a `Progress` without `stop` lets the commit in flight finish and ends the task.
 - Timers are tokio timers. Tests pause tokio's clock (`#[tokio::test(start_paused = true)]`)
   instead of injecting a clock.
 
@@ -112,7 +134,10 @@ impl PendingWaiters {
 - Bytes are the native unit. `utf8_byte_length` is `str::len` and is not ported; upstream
   needs it because JS strings are UTF-16 (and counts a lone surrogate as three bytes, which
   cannot occur in Rust).
-- Tail retention uses a byte ring instead of a chunk list with margin trimming.
+- `OutputSlice` has no `bytes` field; it is `text.len()`.
+- Tail retention uses a byte ring instead of a chunk list with margin trimming, and head
+  retention stores at most `max_bytes + 1` bytes, so snapshots never compact.
+- `skip` is a call of its own instead of `push`'s second argument.
 - No injected `ProgressClock`; tokio's paused clock covers tests. Durable passes its own
   durable timers to upstream's `Progress`; whether delta's durable needs the same is
   decided when it is designed, and a clock parameter can be added then.
