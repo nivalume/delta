@@ -1040,6 +1040,28 @@ fn gaps(times: &Mutex<Vec<tokio::time::Instant>>) -> Vec<Duration> {
     times.windows(2).map(|pair| pair[1] - pair[0]).collect()
 }
 
+/// SSE options for the paused-clock tests: a client without connect or pool-idle timers, so
+/// the only timer while a request is in flight is the retry delay under test. With other
+/// timers pending, the paused clock can jump to them while loopback I/O is still in transit
+/// (seen on macOS).
+fn paused_sse_options(token: &str) -> StreamOptions {
+    StreamOptions {
+        http_client: Some(
+            reqwest::Client::builder()
+                .pool_idle_timeout(None)
+                .pool_max_idle_per_host(0)
+                .build()
+                .unwrap(),
+        ),
+        ..sse_options(token)
+    }
+}
+
+/// `run` without the outer timeout, whose timer the paused clock could also jump to.
+async fn run_paused(model: &Model, context: &TranscriptContext, options: StreamOptions) -> AssistantMessage {
+    openai_codex_responses::stream(model, context, options).result().await
+}
+
 fn approx(actual: Duration, expected: Duration) -> bool {
     actual >= expected && actual < expected + Duration::from_millis(500)
 }
@@ -1049,9 +1071,9 @@ async fn uses_retry_after_ms_for_sse_retries() {
     let (server, times) = retry_server(1, || vec![("retry-after-ms", "1500".into())]).await;
     let options = StreamOptions {
         max_retries: Some(1),
-        ..sse_options(&mock_token("acc"))
+        ..paused_sse_options(&mock_token("acc"))
     };
-    let result = run(&model(&server.base_url()), &context("Say hello"), options).await;
+    let result = run_paused(&model(&server.base_url()), &context("Say hello"), options).await;
     assert_eq!(text_of(&result), "Hello");
     assert_eq!(server.http_requests().len(), 2);
     assert!(
@@ -1066,9 +1088,9 @@ async fn uses_retry_after_seconds_for_sse_retries() {
     let (server, times) = retry_server(1, || vec![("retry-after", "60".into())]).await;
     let options = StreamOptions {
         max_retries: Some(1),
-        ..sse_options(&mock_token("acc"))
+        ..paused_sse_options(&mock_token("acc"))
     };
-    let result = run(&model(&server.base_url()), &context("Say hello"), options).await;
+    let result = run_paused(&model(&server.base_url()), &context("Say hello"), options).await;
     assert_eq!(text_of(&result), "Hello");
     assert!(approx(gaps(&times)[0], Duration::from_secs(60)), "{:?}", gaps(&times));
 }
@@ -1109,9 +1131,9 @@ async fn uses_a_retry_after_http_date_for_sse_retries() {
     let (server, times) = retry_server(1, || vec![("retry-after", http_date(45))]).await;
     let options = StreamOptions {
         max_retries: Some(1),
-        ..sse_options(&mock_token("acc"))
+        ..paused_sse_options(&mock_token("acc"))
     };
-    let result = run(&model(&server.base_url()), &context("Say hello"), options).await;
+    let result = run_paused(&model(&server.base_url()), &context("Say hello"), options).await;
     assert_eq!(text_of(&result), "Hello");
     let gap = gaps(&times)[0];
     assert!(
@@ -1135,9 +1157,9 @@ async fn fails_immediately_when_a_retry_delay_exceeds_the_limit() {
         let options = StreamOptions {
             max_retries: Some(3),
             max_retry_delay: Some(Duration::from_secs(1)),
-            ..sse_options(&mock_token("acc"))
+            ..paused_sse_options(&mock_token("acc"))
         };
-        let result = run(&model(&server.base_url()), &context("Say hello"), options).await;
+        let result = run_paused(&model(&server.base_url()), &context("Say hello"), options).await;
         assert_eq!(result.stop_reason, StopReason::Error);
         assert_eq!(
             result.error_message.as_deref(),
@@ -1152,9 +1174,9 @@ async fn uses_exponential_backoff_across_repeated_sse_retries_without_retry_head
     let (server, times) = retry_server(3, Vec::new).await;
     let options = StreamOptions {
         max_retries: Some(3),
-        ..sse_options(&mock_token("acc"))
+        ..paused_sse_options(&mock_token("acc"))
     };
-    let result = run(&model(&server.base_url()), &context("Say hello"), options).await;
+    let result = run_paused(&model(&server.base_url()), &context("Say hello"), options).await;
     assert_eq!(text_of(&result), "Hello");
     assert_eq!(server.http_requests().len(), 4);
     let gaps = gaps(&times);
