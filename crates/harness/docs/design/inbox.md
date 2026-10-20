@@ -42,7 +42,7 @@ pub struct InboxState { pub items: Vec<InboxItem> }   // ID order
 | checkpoint | complete base whenever `items` is empty |
 | created | with every Harness conversation (creation hook, [harness.md](harness.md)) |
 
-The definition type `Inbox` is in [documents.md](documents.md); this module owns the contents, read and written through `Doc::update_as::<InboxState, _>` and the draft handle. A
+The definition type is `InboxDoc` ([documents.md](documents.md)); this module owns the contents, read and written through `Doc::update_as::<InboxState, _>` and the draft handle. A
 queued input stores its content and its entry's `kind` and `data` (nothing else from the
 host's draft); its entry gets the Harness clock's timestamp at placement. A queued write
 stores the `EntryDraft` as JSON.
@@ -55,20 +55,21 @@ events and run accounting go by `model` and the submission records.
 ## API
 
 ```rust
-pub struct Boundary<'tx> { conversation: ConversationId, inbox: Doc<'tx, Inbox>,
-                           steering_mode: QueueMode, follow_up_mode: QueueMode, head: Option<EntryId> }
+pub struct Boundary { conversation: ConversationId, modes: QueueModes, pub head: Option<EntryId> }
+pub struct QueueModes { pub steering: QueueMode, pub follow_up: QueueMode }   // From<&Settings>
 pub enum At { PostTools, Final }
 pub struct BoundaryResult { pub users: Vec<SubmissionId>, pub reset: bool }
 
 /// Table reads precede the commit's first table write: callers prepare the boundary first.
-pub async fn prepare_boundary(tx: &mut Tx, conversation: ConversationId, modes: &QueueModes) -> Result<Boundary, TxError>;
-pub async fn apply_boundary(tx: &mut Tx, boundary: Boundary, at: At, now: i64) -> Result<BoundaryResult, TxError>;
+pub async fn prepare_boundary(tx: &mut Tx<'_>, conversation: ConversationId, modes: QueueModes) -> Result<Boundary, TxError>;
+pub async fn apply_boundary(tx: &mut Tx<'_>, boundary: &mut Boundary, at: At, now: i64) -> Result<BoundaryResult, TxError>;
 
-pub async fn admit_submission(tx: &mut Tx, conversation: ConversationId, draft: SubmissionDraft, now: i64, modes: &QueueModes)
+pub async fn admit_submission(tx: &mut Tx<'_>, conversation: ConversationId, draft: SubmissionDraft, now: i64, modes: QueueModes)
     -> Result<Admission /* { id, status: Queued | Placed | Done } */, SubmitError>;
-pub async fn append_input(tx: &mut Tx, conversation: ConversationId, content: UserContent, entry: Option<&InputEntry>, now: i64) -> Result<EntryRecord, TxError>;
-pub async fn withdraw_queued_inputs(tx: &mut Tx, conversation: ConversationId, reason: &str /* "aborted" */) -> Result<(), TxError>;
-pub async fn remove_inbox_item(tx: &mut Tx, conversation: ConversationId, id: SubmissionId) -> Result<(), TxError>;
+pub async fn append_input(tx: &mut Tx<'_>, conversation: ConversationId, content: UserContent, entry: Option<&InputEntry>, now: i64) -> Result<EntryRecord, TxError>;
+pub async fn withdraw_queued_inputs(tx: &mut Tx<'_>, conversation: ConversationId, reason: &str /* "aborted" */) -> Result<(), TxError>;
+pub async fn withdraw_inputs(tx: &mut Tx<'_>, conversation: ConversationId, queued: &[SubmissionRecord]) -> Result<(), TxError>;   // the scheduler hook's
+pub async fn remove_inbox_item(tx: &mut Tx<'_>, conversation: ConversationId, id: SubmissionId) -> Result<(), TxError>;
 pub fn is_display_only(entry: &EntryDraft) -> bool;   // no model, no head, no edits (present counts, even empty)
 pub fn has_queued_reset(items: &[InboxItem]) -> bool; // a Write whose entry has head: "self"
 pub fn is_stale(boundary: &Boundary, entry: &EntryDraft) -> bool;   // numeric head < active range start
@@ -208,10 +209,15 @@ withdrawal while placed, and the positional ops of item removal (asserted on the
 - `InboxItem` is a serde-tagged enum stored in snake_case (`{"mode":"follow_up","id":7,
   "content":...}`), not upstream's camelCase.
 - Admission failures are `SubmitError` variants (`ConversationBusy`, `InvalidEntryKind`,
-  `RequestIdTypeMismatch`, `Closed`), not thrown errors.
-- The boundary borrows its inbox draft from the `Tx` (`Doc<'tx, Inbox>`), so it cannot outlive
-  the commit; upstream's "prepare before the first table write" rule becomes a borrow rule
-  plus the `ReadAfterWrite` check the session enforces.
+  `RequestIdTypeMismatch`, or a transaction error), not thrown errors; inside a commit they
+  travel as the closure's error (`SubmitError::into_tx`) and the surface returns them as
+  `HarnessError::Submit`. A closed Harness is `HarnessError::Closed`.
+- The boundary holds what it read (the head and the queue modes), not an inbox draft: a
+  `Doc<'tx, _>` borrows the `Tx` mutably, and placing items appends entries through the same
+  `Tx`. `apply_boundary` acquires `delta.inbox` again (the same change, memoized per
+  address) and removes the placed items positionally through the draft API. Upstream's
+  "prepare before the first table write" rule is the `ReadAfterWrite` check the session
+  enforces.
 - Telemetry links between a steer and the run's trace are not ported (no telemetry crate).
 
 ## Decisions

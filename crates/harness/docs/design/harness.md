@@ -20,17 +20,20 @@ models are read live at each use and never copied into storage.
 
 ```rust
 pub struct HarnessOptions {
-    pub models: ModelsSource,                       // Models, or a closure called at each use
+    pub models: Arc<dyn ModelClient>,               // model access, read at each use (ModelsClient over delta_ai::Models)
     pub registry: Registry,                         // must hold the built-in tasks
     pub settings: SettingsSource,                   // HarnessSettings, or a closure; read at each resolution
     pub env: Option<Arc<dyn EnvBuilder>>,           // builds a conversation's ExecutionEnv (env.md); never on the line
     pub approval: Arc<dyn ApprovalPolicy>,          // approval.md; default AllowAll
-    pub conversation_created: Option<Arc<dyn Fn(&mut Tx, &ConversationRecord) -> Result<(), TxError> + Send + Sync>>,
-    pub clock: Arc<dyn Clock>,                      // now() -> i64 epoch ms; default system time
-    pub on_wake: Option<Arc<dyn Fn(Wake) + Send + Sync>>,
-    pub on_report: Option<Arc<dyn Fn(ReportError, ReportInfo) + Send + Sync>>,
+    pub compactor: Arc<dyn Compactor>,              // compaction.md; default NoCompaction until the task lands
+    pub conversation_created: Option<Arc<dyn ConversationHook>>,   // the session's async creation hook
+    pub clock: Clock,                               // Arc<dyn Fn() -> i64>, epoch ms; default system time
+    pub on_wake: Option<WakeListener>,
+    pub on_report: Option<Reporter>,
 }
+impl HarnessOptions { pub fn new(models: Arc<dyn ModelClient>) -> Self; }   // every other field defaulted
 
+pub struct ModelsClient { /* ModelsSource */ }   // ModelClient over delta_ai::Models
 pub enum ModelsSource { Fixed(Models), Dynamic(Arc<dyn Fn() -> Models + Send + Sync>) }
 pub enum SettingsSource { Fixed(HarnessSettings), Dynamic(Arc<dyn Fn() -> HarnessSettings + Send + Sync>) }
 
@@ -101,7 +104,7 @@ pub struct Conversation { /* Arc<HarnessInner>, id */ }   // stateless; compare 
 
 impl Conversation {
     pub fn id(&self) -> ConversationId;
-    pub async fn submit(&self, draft: SubmissionDraft, ctx: &Context) -> Result<Submission, SubmitError>;
+    pub async fn submit(&self, draft: SubmissionDraft, ctx: &Context) -> Result<Submission, HarnessError>;   // HarnessError::Submit(SubmitError)
     pub async fn agent(&self, ctx: &Context) -> Result<Arc<Agent>, HarnessError>;       // current snapshot + settings; never writes
     pub async fn configure(&self, change: AgentChange, ctx: &Context) -> Result<(), HarnessError>;   // its own commit
     pub async fn commit<R>(&self, ctx: &Context, f: impl FnOnce(&mut Tx) -> Result<R, TxError> + Send) -> Result<R, HarnessError>;
@@ -274,7 +277,7 @@ pub trait PromptSection: Send + Sync {
     async fn render(&self, input: &PromptInput<'_>, ctx: &Context) -> Result<Option<String>, SectionError>;
 }
 pub struct PromptInput<'a> { pub conversation: ConversationId, pub agent: &'a Agent, pub env: Option<&'a dyn ExecutionEnv>,
-                             pub shown: &'a IndexMap<String, String>, pub read: &'a dyn DocumentReader }
+                             pub shown: &'a IndexMap<String, String> }
 
 #[derive(Clone)]
 pub struct Registry { /* Arc<RwLock<Inner>>, tokio::sync::watch<u64> generation */ }   // the scheduler's TaskCatalog
@@ -329,18 +332,25 @@ kernel's `TaskDefinition` has no hook type, and a task declares one with `TaskHo
 /// Beside `TaskDefinition` (scheduler.md): the hook trait a task dispatches to.
 pub trait TaskHooks: TaskDefinition { type Hooks: ?Sized + Send + Sync; }
 
-/// What agent-layer tasks reach through their runtime, built from `rt.services()` and the
-/// phase's catalog snapshot (the registry snapshot).
+/// What agent-layer tasks reach through their runtime (the `agent` module, agent layer),
+/// built from `rt.services()` (the `AgentServices` session service), the phase's catalog
+/// snapshot (downcast to the registry snapshot) and `rt.phase_data()` (the agent resolved
+/// once per phase, an `Arc<tokio::sync::OnceCell<Arc<Agent>>>`).
 pub trait AgentRuntime {
-    fn registry(&self) -> &RegistrySnapshot;
-    async fn agent(&self, ctx: &Context) -> Result<Arc<Agent>, HarnessError>;   // resolved once per phase
-    fn settings(&self) -> Settings;                                             // resolved at each call
-    fn models(&self) -> Models;                                                 // HarnessOptions.models at each call
-    async fn env(&self, ctx: &Context) -> Result<Option<Arc<dyn ExecutionEnv>>, HarnessError>;
-    async fn context_view(&self, conversation: ConversationId, at: Option<EntryId>, ctx: &Context) -> Result<ContextView, HarnessError>;
+    fn agent_services(&self) -> Result<Arc<AgentServices>, AgentError>;   // models(), settings(), storage(), contexts(), compactor(), approval()
+    fn registry(&self) -> Result<RegistrySnapshot, AgentError>;
+    async fn agent(&self, ctx: &Context) -> Result<Arc<Agent>, AgentError>;     // resolved once per phase
+    async fn env(&self, ctx: &Context) -> Result<Option<Arc<dyn ExecutionEnv>>, AgentError>;
+    async fn context_view(&self, conversation: ConversationId, at: Option<EntryId>, ctx: &Context) -> Result<ContextView, AgentError>;
 }
 impl<T: TaskDefinition> AgentRuntime for TaskRuntime<T> { .. }
-impl<T: TaskHooks> TaskRuntime<T> { pub fn hooks(&self) -> &HookRunner<T::Hooks>; }   // in `registry`
+pub trait HookRuntime: AgentRuntime {                                         // for tasks that declare TaskHooks
+    type Hooks: ?Sized;
+    async fn hooks(&self, ctx: &Context) -> Result<HookRunner<Self::Hooks>, AgentError>;   // the phase agent's, extension order
+    fn hook_api(&self) -> Result<HookApi<'_>, AgentError>;
+    fn report_hook(&self, error: &(dyn Error + Send + Sync), extension: &str);  // extension_error naming the extension
+}
+impl<T: TaskHooks> HookRuntime for TaskRuntime<T> { .. }
 
 pub trait GenerationHooks: Send + Sync {
     fn before_request<'a>(&'a self, request: &'a RequestMessages, api: &'a HookApi, ctx: &'a Context) -> BoxFuture<'a, HookResult<Vec<Message>>> { none() }
@@ -357,12 +367,13 @@ pub trait CompactionHooks: Send + Sync {
 }
 pub type HookResult<T> = Result<Option<T>, HookError>;
 
-pub struct HookApi<'a> { pub task_id: TaskId, pub conversation_id: ConversationId, /* models(), memo(), snapshot(), snapshot_as_of() */ }
+pub struct HookApi<'a> { pub task_id: TaskId, pub conversation_id: ConversationId, /* models(), memo(), memo_or_insert() */ }
 pub struct HookRunner<H: ?Sized> { /* the phase's resolved hooks, extension order */ }
 impl<H: ?Sized> HookRunner<H> {
-    /// Calls `invoke` with every handler; an `Err` is reported and the next handler runs; a
-    /// cancelled invocation context propagates.
-    pub async fn each<F>(&self, invoke: impl FnMut(&H, &str /* extension */) -> F) -> Result<(), Cancelled> where F: Future<Output = Result<(), HookError>>;
+    /// The handlers with their extension's name. The caller composes them (a replacement
+    /// chain, observers, first-wins); an `Err` is reported with `report_hook` and the next
+    /// handler runs; once the invocation context is cancelled the phase stops.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &H)>;
 }
 ```
 
@@ -385,8 +396,8 @@ later maps the column names onto these methods mechanically; it is out of phase 
 
 ## Environment
 
-`EnvBuilder::build(&self, target: EnvTarget { conversation_id, cwd, read: &dyn DocumentReader }, ctx)
--> Result<Option<Arc<dyn ExecutionEnv>>, EnvError>` is called at each use, never on the
+`EnvBuilder::build(&self, target: EnvTarget { conversation_id, cwd }, ctx)
+-> Result<Option<Arc<dyn ExecutionEnv>>, EnvBuildError>` is called at each use, never on the
 line: by the tool task per execution (an error becomes an error result), by generation
 `prepare` once for the section renderers (an error is reported; sections render with no
 env), and by `rt.env()`. Without a builder there is no environment. The host caches what is
@@ -432,6 +443,28 @@ snapshot immutability, and handover after reinstall.
   is kept for pi.
 - The approval policy comes through `HarnessOptions.approval`; `decide` is on both
   `Harness` and `Conversation` ([approval.md](approval.md)).
+
+- Phase 4 (implementation):
+  - Agent resolution, `delta.agent`, the settings types, `EnvBuilder` and the runtime traits
+    live in an agent-layer module `agent`, and `ModelClient` in `model`, so no agent-layer
+    module names the surface (`tests/layering.rs` checks it). `HarnessError` is the
+    surface's; the agent layer's operations fail with `AgentError`.
+  - `HarnessOptions.models` is an `Arc<dyn ModelClient>`; `ModelsClient` is the adapter over
+    `delta_ai::Models` and takes the `Fixed` / `Dynamic` source. `HarnessOptions.compactor`
+    is the compaction seam. `conversation_created` is the session's async
+    `ConversationHook` (it acquires documents), not a synchronous closure.
+  - `AgentRuntime` exposes `agent_services()` instead of separate `settings()` / `models()`
+    (one fallible lookup of the session service); hooks are dispatched through
+    `HookRuntime` (`hooks()`, `hook_api()`, `report_hook()`) and `HookRunner::iter`, since each
+    hook method composes differently and an `each` over futures that borrow their arguments
+    buys nothing over a loop.
+  - `HookApi` offers models and memos; document snapshots are added once a hook needs them
+    (they are generic over the definition, so they need the typed runtime).
+  - `PromptInput` and `EnvTarget` carry no document reader yet: the kernel has no
+    object-safe one, and no built-in section reads documents.
+  - `Conversation::submit` fails with `HarnessError::Submit(SubmitError)`.
+  - Not in phase 4: `Conversation::compact` (the compaction task), `decide` and
+    `pending_approvals` (approval), `view` and `task_graph` (observe).
 
 ## Open (minor)
 

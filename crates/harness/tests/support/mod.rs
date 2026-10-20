@@ -1,6 +1,13 @@
-//! Helpers shared by the storage test files.
+//! Helpers shared by the test files.
 
 #![allow(dead_code, unreachable_pub)] // Each test file uses a subset.
+
+mod durable;
+pub mod fixture;
+pub mod model;
+pub mod tools;
+
+pub use durable::Durable;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

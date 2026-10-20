@@ -64,7 +64,7 @@ pub struct ToolSlot { pub call_id: String, pub name: String, pub task_id: Option
 | checkpoint | complete base whenever nothing runs: `generation` absent and no `Running` tool or nested slot |
 | created | with every Harness conversation |
 
-The definition types `Live` and `Usage` are in [documents.md](documents.md); `LiveState` and
+The definition types `LiveDoc` and `UsageDoc` are in [documents.md](documents.md); `LiveState` and
 `UsageState` are the typed views this module reads and writes through `Doc::update_as`
 and the draft handle.
 
@@ -260,6 +260,27 @@ a scripted `fetch_deferred`.
 - `is_context_overflow`, `is_retryable_assistant_error`, `retry_delay` and
   `to_tool_declaration` are added to `delta_ai`.
 - Hooks are `GenerationHooks`, a per-task trait ([harness.md](harness.md)).
+
+- Phase 4 (implementation):
+  - Model access goes through the `ModelClient` seam (`model` module): `model(ref)`,
+    `stream(request, ctx)` (an `AssistantMessageEventStream`), `fetch_deferred`,
+    `cancel_deferred`. A stream that ends without a terminal event is an `error` attempt.
+  - The throttle is a `tokio::select!` loop over the stream, an `rt.timer` and the one commit
+    in flight; the in-flight commit is awaited before classification.
+  - A tool round creates each call's task through `tool::create_model_call_task` (kind
+    `delta.tool`, version 1, input `{ kind: "model", assistant, call_id }`, first checkpoint
+    `{"phase":"call"}`), the seam the tool task of phase 5 fills; results are read back as
+    `tool::ToolTaskResult`. `tool_unavailable` and `aborted` results are written with
+    `tool::append_tool_result` / `harness_error`.
+  - Thresholds and overflow call the `Compactor` seam (`select_cut`, `create`); the default
+    `NoCompaction` finds no cut, so phase 4 never compacts and an overflow fails
+    `model_error`. The estimate and thresholds themselves (`compaction::estimate_context`,
+    `compaction::threshold`) are implemented.
+  - `LiveState` carries `nested_tools`, `compactions` and `compaction_failure` as JSON until
+    the tool and compaction tasks type them; a typed edit round-trips them unchanged.
+  - The scheduler cleanup hooks are `generation::AgentSchedulerHooks`: a run generation's
+    partial, inputs and run marker, a tool task's slot (and nested slots); compaction status
+    joins in phase 5. Its `withdraw_inputs` also removes the inputs from `delta.inbox`.
 
 ## Open (minor)
 

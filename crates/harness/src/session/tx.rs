@@ -301,7 +301,6 @@ impl Tx<'_> {
     }
 
     /// The reserved root conversation (id 1), ownerless; the layer above bootstraps it once.
-    #[allow(dead_code, reason = "the harness bootstraps the root conversation (later phase)")]
     pub(crate) async fn create_root_conversation(&mut self) -> Result<ConversationRecord, TxError> {
         self.stage_conversation(None, ConversationOwnership::Ownerless, Some(ROOT_CONVERSATION_ID))
             .await

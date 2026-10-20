@@ -20,10 +20,10 @@ scoped this crate is [docs/research/harnesses.md](../../../../docs/research/harn
 | [storage.md](storage.md) | `storage` | The `Storage` trait, memory and SQLite backends, schema, scans, the fatal-error model, the conformance suite |
 | [session.md](session.md) | `session` | The commit actor, `Tx`, drafts over chord, base/delta planning, document cache, forks, snapshots and subscriptions |
 | [scheduler.md](scheduler.md) | `scheduler` | Reservation, the step rules, invocations, ownership and abort cascades, waiting / sleeping / completing, restarts and parking |
-| [harness.md](harness.md) | `harness`, `registry` | `Harness::open`, conversations, agent resolution, settings, extensions, `inspect` |
+| [harness.md](harness.md) | `harness`, `registry`, `agent`, `model` | `Harness::open`, conversations, agent resolution, settings, extensions, `inspect` |
 | [inbox.md](inbox.md) | `inbox` | Submissions, request ids, steer / follow-up / write placement, turn boundaries |
 | [context.md](context.md) | `context`, `prompt` | Model context from entries, head markers and edits, positional system sections, prompt-cache stability |
-| [generation.md](generation.md) | `generation` | The `delta.generation` task: prepare, request, retry, poll, tool rounds, handover, usage |
+| [generation.md](generation.md) | `generation`, `usage` | The `delta.generation` task: prepare, request, retry, poll, tool rounds, handover, usage |
 | [tool.md](tool.md) | `tool` | The `delta.tool` task: validation, hooks, approval, execution with output windows, results, nested calls, replay safety |
 | [approval.md](approval.md) | `approval` | The approval seam: policy, request and decision records, timeout, later rules and modes |
 | [compaction.md](compaction.md) | `compaction` | The `delta.compaction` task: thresholds, range selection, overflow retry, stale summaries |
@@ -72,15 +72,18 @@ crates/harness/
     storage/         # trait, shared commit/scan/ancestry/replay rules, memory, sqlite
     session/         # line (actor), tx, drafts, plan, cache, observation, forks, snapshot
     scheduler/       # reservation, invocations, ownership
-    harness.rs       # public surface, settings
-    registry.rs      # extensions
-    inbox.rs
-    context.rs       # model context derivation
-    prompt.rs        # sections, delta.system planning
-    generation.rs
-    tool.rs
-    approval.rs
-    compaction.rs
+    harness/         # public surface: Harness, Conversation, Submission, creation, errors
+    registry/        # extensions, hook traits, HookRunner / HookApi
+    agent/           # delta.agent, resolution, settings, env seam, the agent runtime traits
+    inbox/           # submissions, admission, boundaries, withdrawal
+    context/         # model context derivation, result ordering, kept ranges
+    prompt/          # sections, delta.system planning
+    generation/      # the delta.generation task, delta.live, delta.provider, cleanup hooks
+    model.rs         # the ModelClient seam, ModelsClient, pinned request types
+    usage.rs         # delta.usage
+    tool.rs          # HarnessTool (declaration side), results, the tool-task seam (phase 5: the task)
+    approval.rs      # ApprovalPolicy and AllowAll (phase 5: requests and decisions)
+    compaction.rs    # thresholds and the Compactor seam (phase 5: the task)
     observe/         # view, events, task_graph
     env/             # trait, local
     tools/           # read, write, edit, bash
@@ -114,9 +117,10 @@ One crate, as upstream's package: decoupling comes from module layers and trait 
 from crate boundaries. Each layer depends only on the layers below it.
 
 ```
-surface   harness (Harness, Conversation, Submission, Settings), observe (view, events, task graph)
-agent     inbox, context, prompt, generation, tool, approval, compaction, usage,
-          registry (Extension and the hook traits)
+surface   harness (Harness, Conversation, Submission), observe (view, events, task graph)
+agent     agent (delta.agent, resolution, settings, AgentRuntime), registry (Extension and the
+          hook traits), inbox, context, prompt, generation, model (ModelClient), tool,
+          approval, compaction, usage
 kernel    records, documents, storage (trait; memory, sqlite), session (actor, Tx),
           scheduler (the TaskDefinition runtime)
 side      env (ExecutionEnv trait; local), tools (read, write, edit, bash)
@@ -132,18 +136,24 @@ New features plug in through these traits; none needs a kernel change:
 | `HarnessTool` | New tools; the built-in tools are ordinary implementations |
 | `ApprovalPolicy` | Rules engine and permission modes later |
 | `GenerationHooks`, `ToolHooks`, `CompactionHooks` | Extension behaviour; a command-hook bridge later |
-| `ModelClient` | Model access; wraps `delta_ai::Models`, tests inject a fake |
+| `ModelClient` | Model access; `ModelsClient` wraps `delta_ai::Models`, tests inject a fake |
+| `Compactor` | Range selection and starting a `delta.compaction` task; the generation's thresholds and overflow path call it (`NoCompaction` until the compaction task lands) |
+| `EnvBuilder` | A conversation's `ExecutionEnv`, built at each use |
 | `ExecutionEnv` | Remote environments later |
 
 Rules:
 
 - The kernel modules (`records`, `documents`, `storage`, `session`, `scheduler`) never name
-  an agent, surface or side module. `tests/layering.rs` scans their sources and fails on a
-  `crate::` path into an upper layer.
+  an agent, surface or side module; the agent modules never name a surface module; `env`
+  names nothing else in the crate. `tests/layering.rs` scans the sources and fails on a
+  `crate::` path into a layer a module may not reach. Within the agent layer modules may
+  name each other (the generation starts runs the inbox places, the registry lists the
+  built-in tasks).
 - Built-in tasks, documents and tools use only the public traits, so an extension can do
   anything a built-in can.
-- No module-level mutable state. The clock, models, environment builder and approval policy
-  come through `HarnessOptions`.
+- No module-level mutable state. The clock, models, environment builder, approval policy
+  and compactor come through `HarnessOptions`; the agent layer's tasks reach them through
+  the `AgentServices` session service.
 - Each module has its own error enum; errors convert only at layer boundaries.
 
 ## Design decisions

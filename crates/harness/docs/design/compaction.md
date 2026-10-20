@@ -239,6 +239,15 @@ writes a complete system baseline ([context.md](context.md)).
 - Hooks are `CompactionHooks`, a per-task trait ([harness.md](harness.md)).
 - `delta.compaction` is version 1 (task) and the summary entry kind is `delta.compaction`.
 
+- Phase 4 left the generation's side in place behind a seam: `compaction::Compactor`
+  (`select_cut(view, keep_recent_tokens) -> Option<usize>`, `create(tx, conversation,
+  input, owner) -> TaskId`) reached through `HarnessOptions.compactor` and the agent
+  services. Phase 5 implements it with `select_cut` and `create_compaction` above (and makes
+  it the default instead of `NoCompaction`), adds the `delta.compaction` task and its
+  status handling in `AgentSchedulerHooks`, and `Conversation::compact`.
+  `CompactionPolicy`, the per-model overrides, `estimate_context` and the threshold check
+  are implemented (`agent::settings`, `compaction`).
+
 ## Open (minor)
 
 - Whether `before_compact` receives `&[EntryRecord]` and `&[Message]` borrowed from the

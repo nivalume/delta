@@ -4,22 +4,32 @@
 //! delta's counterpart of [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable).
 //! Design notes live in `docs/design/` of this crate.
 //!
-//! Implemented so far:
+//! The modules form layers; each depends only on the layers below it:
 //!
-//! - [`records`]: ids, conversation / entry / submission / task / document records, storage
-//!   writes and scan queries.
-//! - [`documents`]: document definitions, typed addresses and their validation.
-//! - [`storage`]: the [`Storage`](storage::Storage) contract with memory and SQLite backends.
-//! - [`session`]: the commit line ([`Session`](session::Session), [`Tx`](session::Tx)),
-//!   document drafts, caching, observation and forks.
-//! - [`scheduler`]: durable tasks ([`TaskDefinition`](scheduler::TaskDefinition)), their
-//!   reservation, invocations, ownership and abort cascades, waits, sleeps and recovery.
-//! - [`env`](mod@env): the execution environment (file system and shell) and its local
-//!   implementation.
+//! - surface: [`harness`](mod@harness) ([`Harness`](harness::Harness),
+//!   [`Conversation`](harness::Conversation), [`Submission`](harness::Submission)).
+//! - agent: [`registry`] (extensions and hooks), [`agent`] (`delta.agent`, resolution,
+//!   settings, the runtime of agent-layer tasks), [`inbox`], [`context`], [`prompt`],
+//!   [`generation`], [`usage`], [`model`] (the [`ModelClient`](model::ModelClient) seam), and
+//!   the generation's sides of [`tool`], [`compaction`] and [`approval`].
+//! - kernel: [`records`], [`documents`], [`storage`], [`session`], [`scheduler`].
+//! - side: [`env`](mod@env), the execution environment and its local implementation.
 
+pub mod agent;
+pub mod approval;
+pub mod compaction;
+pub mod context;
 pub mod documents;
 pub mod env;
+pub mod generation;
+pub mod harness;
+pub mod inbox;
+pub mod model;
+pub mod prompt;
 pub mod records;
+pub mod registry;
 pub mod scheduler;
 pub mod session;
 pub mod storage;
+pub mod tool;
+pub mod usage;

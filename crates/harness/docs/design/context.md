@@ -29,11 +29,12 @@ pub struct ContextView {
 
 pub struct ContextBounds { head: Option<EntryRecord /* with head */>, tail: EntryId }
 
-/// Two O(1) storage reads on the line: the newest visible entry (or `at`, which must be
-/// visible) and the newest head marker at or before it. Entries at or below `tail` never change.
-pub async fn capture_bounds(storage: &dyn Storage, conversation: ConversationId, at: Option<EntryId>, ctx: &Context) -> Result<Option<ContextBounds>, StorageError>;
-/// Off the line: scan the range and derive the view.
-pub async fn derive_context(storage: &dyn Storage, conversation: ConversationId, bounds: Option<ContextBounds>, ctx: &Context) -> Result<ContextView, StorageError>;
+/// Two O(1) storage reads: the newest visible entry (or `at`, which must be visible) and the
+/// newest head marker at or before it. Entries at or below `tail` never change.
+pub async fn capture_bounds(storage: &dyn Storage, conversation: ConversationId, at: Option<EntryId>, ctx: &Context) -> Result<Option<ContextBounds>, ContextError>;
+/// Scan the range and derive the view.
+pub async fn derive_context(storage: &dyn Storage, conversation: ConversationId, bounds: Option<&ContextBounds>, ctx: &Context) -> Result<ContextView, ContextError>;
+pub fn derive_view(head: Option<&EntryRecord>, entries: &[EntryRecord]) -> ContextView;   // the rules over scanned entries
 pub fn order_tool_results(messages: &[Message]) -> Vec<Message>;    // rules 7 and 8
 ```
 
@@ -77,33 +78,30 @@ reduction are separate consumers. Older history is read through `Conversation::e
 ## Kept ranges
 
 ```rust
-pub struct ContextRange {
-    bounds: ContextBounds,
-    entries: Arc<[EntryRecord]>,            // frozen; from `from` through `tail`
-    view: ContextView,
-    edited: HashSet<EntryId>,
-    settled: Vec<Message>,                  // view.messages before the last assistant message: later entries cannot change them
-    open: Vec<Message>,                     // contributions from the last assistant message on, before result ordering
-    baseline: Baseline,
+pub struct ContextRanges { /* Mutex<HashMap<ConversationId, Kept { bounds, entries: Arc<[EntryRecord]>, view, used }>> */ }
+impl ContextRanges {
+    pub async fn read(&self, storage: &dyn Storage, conversation: ConversationId, at: Option<EntryId>,
+                      retention: Duration, ctx: &Context) -> Result<ContextView, ContextError>;
 }
-pub async fn read_context_from(session: &Session, storage: &dyn Storage, conversation: ConversationId, at: Option<EntryId>,
-                               previous: Option<&ContextRange>, ctx: &Context) -> Result<(ContextView, Option<ContextRange>), StorageError>;
 ```
 
-- A session service of the agent layer keeps each conversation's last range in memory. A later read with the same
-  head marker and a newer tail scans only `previous.tail + 1 ..= tail` and extends the range:
-  `settled` is kept, `open` is recomputed from the last assistant message, tool results are
-  re-ordered only over `open`. A shorter tail (a `fork(at)` preview) filters the kept
-  entries; a different head marker rescans.
-- A conversation keeps its range while busy and for `settings.context_retention` (default
-  10 min) once idle; expiry is checked on task changes and by one background sweep.
-- Kept entries are shared (`Arc`) and never mutated; each read returns its own `Vec`s.
-- Edits of every entry in the scanned range count, including those of older head markers
-  the active selection drops. An added entry that carries edits or a head, or that is itself
-  a target in `edited`, can change earlier contributions, so the range is derived again from
-  the kept entries plus the added ones (no storage rescan); otherwise only the added
-  contributions and `open` are derived, and the baseline is searched among the added
-  entries only while it is still undecided.
+- A session service of the agent layer (inside `AgentServices`) keeps each conversation's
+  last range in memory; agent-layer tasks read context through it (`rt.context_view`), hosts
+  through `Conversation::context` without it. A later read with the same head marker and a
+  newer tail scans only `previous.tail + 1 ..= tail`; an equal tail returns the kept view; a
+  shorter tail (a `fork(at)` preview, a request's `cutoff`) filters the kept entries without
+  replacing the range; a different head marker rescans.
+- The view is derived again from the kept entries plus the added ones, in memory: the scan
+  is what the range saves. Upstream's incremental split (`settled` / `open`, a baseline
+  searched only among added entries) is an optimization of that derivation and can be added
+  behind the same function when profiles ask for it.
+- A range unused for `settings.context_retention` (default 10 min) is dropped at the next
+  read of any conversation; there is no background sweep. A busy conversation reads its
+  context at every request, so its range stays.
+- Kept entries are shared (`Arc`) and never mutated; each read returns its own view.
+- Bounds are captured from storage directly, not on the session line: a storage commit is
+  durable before it is published, and reading the head marker at or before the captured tail
+  makes the two reads consistent.
 
 ## System prompt and dynamic tools (§7.4)
 
@@ -189,8 +187,8 @@ is pure and unit-tested on `ContextView` fixtures; derivation is tested on `Memo
 - `replay_sections` and `plan_system_entries` are pure functions over `IndexMap`s, which
   carry insertion order natively; upstream relies on `Map` iteration order.
 - The kept range is `Arc`-shared and immutable by construction, so upstream's deep
-  `freezeJson` and per-read array copies are replaced by cheap clones of the `Vec<Message>`
-  views. `edited` invalidation is explicit.
+  `freezeJson` is not needed; the view is re-derived from kept entries instead of extended
+  incrementally (see "Kept ranges").
 - Section failures are `Result`s, not thrown errors; cancellation is `delta_chord::Context`.
 - `delta_ai` provides `declarations_equal` and `get_current_tools` (present) and
   `to_tool_declaration`, the plain-declaration conversion, which is added there.
@@ -201,5 +199,6 @@ is pure and unit-tested on `ContextView` fixtures; derivation is tested on `Memo
   message shape.
 - `to_tool_declaration` is added to `delta_ai`.
 - Kept context ranges are an agent-layer session service, not scheduler state.
+- `PromptInput` has no document reader in phase 4 (harness.md, "Phase 4").
 - Otherwise the module ports §2.1 and §7.4 as specified, including upstream's kept-range
   extension rules; nothing is open.

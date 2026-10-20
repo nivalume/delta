@@ -31,7 +31,7 @@ tokio-util.workspace = true
 # `file://` paths in `env::local`.
 url.workspace = true
 # Random names of temporary files and directories in `env::local`.
-uuid.workspace = true
+uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

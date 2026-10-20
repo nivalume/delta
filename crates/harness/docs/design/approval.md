@@ -266,6 +266,12 @@ later plugs into it without changing the tool task:
 - Visibility: `delta.approvals` mounted in the view, the `approval_update` event, the
   decision as a display-only `delta.approval` entry.
 
+- Phase 4 defined `ApprovalPolicy::decide(&ApprovalCall, &Context)`, `PolicyDecision` and
+  `AllowAll`, passed through `HarnessOptions.approval` and held by the agent services.
+  `ApprovalCall` carries the delta_ai `ToolCall` with its final arguments; phase 5 adds the
+  `HookApi` argument (once hooks read documents), `ToolHookCall`, the records, the waiting
+  phase and `decide` on the surface.
+
 ## Open (minor)
 
 - `AllowAll` as the default: a host that wants fail-closed sets `AskAll` or `DenyAll`.

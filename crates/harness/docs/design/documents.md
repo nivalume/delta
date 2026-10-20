@@ -245,18 +245,19 @@ The agent layer defines its documents with this trait, as an extension would; th
 has no special case for any of them. They are listed here so their semantics are in one
 place; each is specified in its own note.
 
-| Kind | Scope | History | Fork | `checkpoint_when` | Note |
-| --- | --- | --- | --- | --- | --- |
-| `delta.live` | conversation | latest | initial | nothing runs: no generation and no running tool slot | generation.md, tool.md |
-| `delta.inbox` | conversation | latest | initial | `items` is empty | inbox.md |
-| `delta.agent` | conversation | rewindable | as_of | always | harness.md |
-| `delta.provider` | conversation | latest | initial | always | generation.md |
-| `delta.usage` | conversation | latest | initial | always | generation.md |
-| `delta.approvals` | conversation | latest | initial | `requests` is empty | approval.md |
-| `delta.tool.nested-call` | task, family (seed `null`) | — | — | never | tool.md |
-| `delta.codemode.run` | task | — | — | — | deferred with code mode |
+| Kind | Definition | Scope | History | Fork | `checkpoint_when` | Note |
+| --- | --- | --- | --- | --- | --- | --- |
+| `delta.live` | `generation::LiveDoc` | conversation | latest | initial | nothing runs: no generation and no running tool slot | generation.md, tool.md |
+| `delta.inbox` | `inbox::InboxDoc` | conversation | latest | initial | `items` is empty | inbox.md |
+| `delta.agent` | `agent::AgentDoc` | conversation | rewindable | as_of | always | harness.md |
+| `delta.provider` | `generation::ProviderDoc` | conversation | latest | initial | always | generation.md |
+| `delta.usage` | `usage::UsageDoc` | conversation | latest | initial | always | generation.md |
+| `delta.approvals` | (phase 5) | conversation | latest | initial | `requests` is empty | approval.md |
+| `delta.tool.nested-call` | (phase 5) | task, family (seed `null`) | — | — | never | tool.md |
+| `delta.codemode.run` | — | task | — | — | — | deferred with code mode |
 
-All are version 1. `delta.live` is the one high-churn document: its rule keeps every base
+All are version 1; the definitions carry a `Doc` suffix so they do not shadow the record
+and message types of the same names (`Agent`, `Usage`). `delta.live` is the one high-churn document: its rule keeps every base
 small and bounds a delta chain to one generation or one round of tools.
 
 ## Example

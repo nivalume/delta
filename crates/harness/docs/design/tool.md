@@ -328,6 +328,16 @@ are not rerun on recovery: the arguments they produced are in the checkpoint.
   `approval timed out` message; the structured decision is in the `delta.approval` entry.
 - Hooks run before the approval policy; `ToolHooks` is the tool task's hook trait.
 
+- Phase 4 defined the declaration side of `HarnessTool` (`definition`, `name`,
+  `execution_mode`, `callers`, `deferred`, `extra`), `ToolExecutionMode`, `Callers`,
+  `ToolExecutionResult`, `ToolDiagnostic`, `ToolControl`, `ToolTaskInput::Model`,
+  `ToolTaskResult`, `harness_error`, `append_tool_result` and the generation's seam
+  `create_model_call_task` (kind `delta.tool`, version 1, first checkpoint
+  `{"phase":"call"}`). Phase 5 adds `execute` and the rest of the trait, the `Nested`
+  input, `ToolApi` and the task itself, registered as a built-in beside the generation
+  (`generation::builtin_tasks`). `deferred()` is new: resolution offers a deferred tool only once
+  `model_tools` loads it (harness.md).
+
 ## Open (minor)
 
 - `output()` panicking after the invocation ends (upstream throws). Alternative: ignore
