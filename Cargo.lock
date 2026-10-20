@@ -927,6 +927,7 @@ dependencies = [
  "indexmap 2.14.2",
  "jsonschema",
  "pretty_assertions",
+ "regex",
  "reqwest",
  "ruzstd",
  "serde",

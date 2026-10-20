@@ -34,6 +34,7 @@ jsonschema = { version = "0.59", default-features = false }
 schemars = "1.2"
 rusqlite = { version = "0.40", features = ["bundled"] }
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+regex = "1.13"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "http2", "system-proxy", "charset"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }

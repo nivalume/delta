@@ -10,6 +10,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::{fmt, fs, thread};
 
+/// The driver this module runs on, for its types (`params!`, `ToSql`, `OptionalExtension`, ...).
+pub use rusqlite;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use tokio::sync::oneshot;
 
