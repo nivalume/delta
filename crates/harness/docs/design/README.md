@@ -126,9 +126,28 @@ From spec §1, kept as stated:
 | Tasks | A `TaskDefinition` trait: `name`, `version`, `run(phase)`, `abort`, `migrate`; built-in checkpoints are serde-tagged enums, user tasks work on `Json`. Hand-over after a reload is detected by a registry generation counter, not object identity |
 | Ids | Newtypes over `u64`, serialized as JSON numbers; `Seq` likewise |
 | Wire compatibility | Entry kinds, document kinds, record JSON shapes and the SQLite schema (v2, optional prefix) stay as upstream's, so a storage written by pi opens in delta |
-| Hooks | One `Hooks` trait per extension with default methods (`before_request`, `after_response`, `on_yield`, `after_tools`, `before_tool`, `after_tool`, `before_compact`), as `delta_agent::AgentHooks`; each note maps its hooks onto the Claude Code / Codex names so a command-hook bridge later is mechanical |
+| Hooks | Per-task hook traits with default methods, as `delta_agent::AgentHooks`: `GenerationHooks` (`before_request`, `after_response`, `on_yield`, `after_tools`), `ToolHooks` (`before_tool`, `after_tool`), `CompactionHooks` (`before_compact`). [harness.md](harness.md) maps them onto the Claude Code / Codex names so a command-hook bridge later is mechanical |
+| Phase commits | A phase handler returns `Next`, a closure the scheduler runs on the session line, so the phase's last writes, its next state and the step decision are one commit ([scheduler.md](scheduler.md)) |
 | Cancellation | `delta_chord::context::Context` everywhere upstream passes a chord `Context` |
 | Tests | Never the network: fake models replay recorded stream events; storage in memory or in SQLite files under a temp dir |
+
+## Open questions across the notes
+
+Collected from the module notes' "Pending confirmation" sections; each note has the detail.
+
+| # | Question | Proposal | Notes |
+| --- | --- | --- | --- |
+| 1 | How an approval answer wakes the parked tool task | A delta scheduler primitive `Tx::wake_task(id)` (the spec already tolerates early wakes) | approval.md, scheduler.md |
+| 2 | `pi.tool` version with the new `approval` phase | Stay at version 2: pi storages open in delta; a delta storage with a task parked in `approval` faults in pi | tool.md |
+| 3 | Approval visibility | A `delta.approvals` conversation document mounted in the view, an `approval_update` agent event, denial as `blocked` with an "approval denied:" message | approval.md, observe.md |
+| 4 | Structural edits that end equal to the base | No batch and no publication (chord's rule); the spec publishes them | session.md |
+| 5 | Watch overflow | chord's merge (concatenated ops, `r` past `MAX_OPS`); the spec replaces the backlog with `r` | session.md, observe.md |
+| 6 | Document drafts | `tx.doc::<D>()` borrows the `Tx`: one document is edited at a time | session.md |
+| 7 | `close()` | Cancel every invocation, join them, abort stragglers after `close_grace` (30 s), write them back as `pending` | scheduler.md |
+| 8 | Retry and overflow helpers missing from `delta_ai` (`is_context_overflow`, `is_retryable_assistant_error`, `retry_delay`, `to_tool_declaration`) | Add them to `delta_ai`, as upstream has them in pi-ai | generation.md, compaction.md |
+| 9 | `rusqlite` types for SQLite storage | Re-export `rusqlite` from `delta_chord::sqlite` | storage.md |
+| 10 | Id range | Cap minting at 2^53 − 1 so pi can read every id | records.md |
+| 11 | `watch` and `list_files` in the env | Optional methods returning `not_supported` until `notify` / `ignore` are accepted as dependencies | env.md |
 
 ## Later
 
