@@ -13,6 +13,10 @@ pub mod output;
 pub mod sqlite;
 pub mod state;
 
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 #[doc(hidden)]
 pub mod __private {
     pub use serde_json;

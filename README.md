@@ -38,8 +38,10 @@ This workspace contains one crate per ported upstream package.
 |-------|--------|----------|-------------|
 | **[delta-ai](crates/ai)** | `delta_ai` | `@earendil-works/pi-ai` | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
 | **[delta-agent](crates/agent)** | `delta_agent` | `@earendil-works/pi-agent-core` | Agent runtime with tool calling and state management |
+| **[delta-chord](crates/chord)** | `delta_chord` | `@earendil-works/chord` (base library) | JSON revisions with op batches, replicated state, contexts, bounded output, SQLite helpers. Not published yet |
 
-Not ported yet: `@earendil-works/chord`, `@earendil-works/pi-telemetry`, `@earendil-works/pi-durable`,
+Chord's host runtime (objects, links, hot reload) is not ported; see
+[docs/research/chord.md](docs/research/chord.md). Not ported yet: `@earendil-works/pi-telemetry`, `@earendil-works/pi-durable`,
 `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`.
 
 Each crate has design notes in `crates/<crate>/docs/design/`. They describe the modules and list
