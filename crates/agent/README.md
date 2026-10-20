@@ -25,12 +25,10 @@ parameter, no global default stream function), the sections below say so. The de
 cargo add delta-agent
 ```
 
-Nothing is published to crates.io yet. Use a git dependency meanwhile:
+`delta-agent` re-exports nothing from `delta-ai`; add it too when you use its types directly:
 
-```toml
-[dependencies]
-delta-agent = { git = "https://github.com/nivalume/pi-rs" }
-delta-ai = { git = "https://github.com/nivalume/pi-rs" }
+```bash
+cargo add delta-ai
 ```
 
 The examples below also use `tokio`, `tokio-util` (`CancellationToken`), `futures` (`BoxFuture`,

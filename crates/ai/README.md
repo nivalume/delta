@@ -6,7 +6,7 @@ Unified LLM API for Rust with provider collections, automatic auth resolution, t
 
 **Note**: The chat catalog only includes models that support tool calling. The catalog also lists image and classifier models from upstream; they run through [Image Generation](#image-generation) and [Classification](#classification).
 
-**Status**: in development. Nothing is published to crates.io yet. The design notes, including every difference from upstream, are in [docs/design/README.md](docs/design/README.md).
+The design notes, including every difference from upstream, are in [docs/design/README.md](docs/design/README.md).
 
 ## Table of Contents
 
@@ -113,15 +113,11 @@ Any OpenAI-compatible API (Ollama, vLLM, LM Studio, and so on) works through [`c
 cargo add delta-ai
 ```
 
-The crate is not on crates.io yet. Until it is, use a git dependency:
-
-```bash
-cargo add delta-ai --git https://github.com/nivalume/pi-rs
-```
+With the optional providers:
 
 ```toml
 [dependencies]
-delta-ai = { git = "https://github.com/nivalume/pi-rs", features = ["bedrock", "vertex"] }
+delta-ai = { version = "1", features = ["bedrock", "vertex"] }
 ```
 
 Requests run on Tokio, so a Tokio runtime is required. The examples also use `futures` (for `StreamExt`), `serde_json`, and `tokio-util` (for `CancellationToken`). Upstream re-exports TypeBox for tool schemas; in Rust a tool schema is a plain `serde_json::Value`.
@@ -2132,7 +2128,7 @@ Rust has no bundler or tree shaking step. Cargo features choose what is compiled
 
 ```toml
 [dependencies]
-delta-ai = { git = "https://github.com/nivalume/pi-rs", features = ["bedrock"] }
+delta-ai = { version = "1", features = ["bedrock"] }
 ```
 
 Rules:

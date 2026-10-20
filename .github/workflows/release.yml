@@ -1,6 +1,6 @@
 name: Release
 
-# Publish the workspace version to crates.io, either by pushing a tag like v0.1.0 or by
+# Publish the workspace version to crates.io, either by pushing a tag like v1.0.0 or by
 # running this workflow manually (Actions -> Release -> Run workflow), which then creates
 # the tag itself.
 #

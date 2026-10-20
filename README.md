@@ -7,22 +7,19 @@ with tool calling.
 Messages, models and credentials keep upstream's JSON shape, so transcripts and `auth.json` entries
 move between pi, [pi-py](https://github.com/nivalume/pi-py) and delta.
 
-Status: in development. Nothing is published to crates.io yet.
+Both crates are published on crates.io: [delta-ai](https://crates.io/crates/delta-ai) and
+[delta-agent](https://crates.io/crates/delta-agent).
 
 ## Getting started
 
-Add the crates you need. Until the first release, depend on the git repository:
+Add the crates you need:
 
-```toml
-[dependencies]
-delta-ai = { git = "https://github.com/nivalume/pi-rs" }
-delta-agent = { git = "https://github.com/nivalume/pi-rs" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```bash
+cargo add delta-ai delta-agent
+cargo add tokio --features macros,rt-multi-thread
 ```
 
-After the first release: `cargo add delta-ai delta-agent`.
-
-Delta requires Rust 1.90 or newer (edition 2024) and a Tokio runtime.
+Delta requires Rust 1.94.1 or newer (edition 2024) and a Tokio runtime.
 
 Set the API key of a provider in its environment variable, for example `ANTHROPIC_API_KEY` or
 `OPENAI_API_KEY`, or pass credentials through a credential store. Then follow the quick start of

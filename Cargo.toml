@@ -3,16 +3,16 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.94.1"
 license = "MIT"
 authors = ["nivalume"]
 repository = "https://github.com/nivalume/pi-rs"
 homepage = "https://github.com/nivalume/pi-rs"
 
 [workspace.dependencies]
-delta-ai = { path = "crates/ai", version = "0.1.0" }
+delta-ai = { path = "crates/ai", version = "1.0.0" }
 
 aws-config = { version = "1.12", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client", "credentials-process", "sso"] }
 aws-sdk-bedrockruntime = { version = "1.148", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
