@@ -13,6 +13,7 @@ homepage = "https://github.com/nivalume/pi-rs"
 
 [workspace.dependencies]
 delta-ai = { path = "crates/ai", version = "1.0.0" }
+delta-chord = { path = "crates/chord", version = "1.0.0" }
 
 aws-config = { version = "1.12", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client", "credentials-process", "sso"] }
 aws-sdk-bedrockruntime = { version = "1.148", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
@@ -30,6 +31,7 @@ http = "1.5"
 indexmap = { version = "2.14", features = ["serde"] }
 jsonschema = { version = "0.59", default-features = false }
 schemars = "1.2"
+rusqlite = { version = "0.40", features = ["bundled"] }
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "http2", "system-proxy", "charset"] }
 serde = { version = "1.0.229", features = ["derive"] }

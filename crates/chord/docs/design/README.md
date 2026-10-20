@@ -81,15 +81,7 @@ Dependencies: `serde`, `serde_json`, `indexmap`, `thiserror`, `tokio`, `tokio-ut
 | Scope | The base library only. The host runtime waits for a consumer in delta and for upstream's design to settle |
 | JSON representation | An `Arc`-shared copy-on-write tree (`Json`), not `serde_json::Value`. See [json.md](json.md) |
 | Op sequences | delta's tracker does not reproduce upstream's op sequences. Batches must be correct and as fine-grained as the edit allows (an append is an `a`, a push is an insert-only `p`) |
-| Package name | crates.io package `delta-chord`, library `delta_chord` |
-
-## Proposed design decisions
-
-These follow from the confirmed ones. Each is explained in its document.
-
-| Question | Proposal |
-| --- | --- |
-| Op wire shape | Keep upstream's tuples and their meaning, `t` counted in UTF-16 code units included, so stored batches and transcripts move between pi and delta. See [delta.md](delta.md) |
+| Op wire shape | Upstream's tuples and their meaning, `t` counted in UTF-16 code units included, so stored batches and transcripts move between pi and delta. See [delta.md](delta.md) |
 | Immutability | No ownership rules: every `Json` is a value, and mutating one never affects another holder. Upstream's "never mutate what you transferred" contract and its footguns go away |
 | Drafts | Explicit handles. Structural edits (push, insert, remove, splice, append) are recorded as they happen; assignments are diffed against the value they replace. Upstream reconstructs every op from base vs. final at `prepare()` |
 | Change lifecycle | Ownership replaces runtime checks: `prepare(self)` consumes the change, `adopt` consumes the preparation, dropping either aborts it. A stale preparation is refused by revision number |
@@ -99,6 +91,7 @@ These follow from the confirmed ones. Each is explained in its document.
 | Telemetry | Not in `Context` yet. It waits for delta's telemetry design, as in `delta_ai` |
 | SQLite | One concrete driver (`rusqlite`) on a dedicated thread. Transaction bodies are synchronous closures on that thread; no portable async trait |
 | Encoder/decoder (path interning) | Not ported. It only serves the host runtime's links |
+| Package name | crates.io package `delta-chord`, library `delta_chord` |
 
 ## Not ported
 

@@ -1,11 +1,11 @@
 # Delta
 
-Delta is a Rust port of the libraries behind [pi](https://github.com/earendil-works/pi), a minimal,
+Delta is a Rust implementation of the libraries behind [pi](https://github.com/earendil-works/pi), a minimal,
 extensible agent harness. It provides a unified LLM API across providers and a stateful agent runtime
 with tool calling.
 
 Messages, models and credentials keep upstream's JSON shape, so transcripts and `auth.json` entries
-move between pi, [pi-py](https://github.com/nivalume/pi-py) and delta.
+move between pi and delta.
 
 Both crates are published on crates.io: [delta-ai](https://crates.io/crates/delta-ai) and
 [delta-agent](https://crates.io/crates/delta-agent).

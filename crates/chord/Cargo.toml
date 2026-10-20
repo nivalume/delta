@@ -15,5 +15,26 @@ homepage.workspace = true
 [lib]
 name = "delta_chord"
 
+[features]
+# The `sqlite` module, on rusqlite with the bundled SQLite.
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+futures.workspace = true
+indexmap.workspace = true
+rusqlite = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+[package.metadata.docs.rs]
+all-features = true
+
 [lints]
 workspace = true
