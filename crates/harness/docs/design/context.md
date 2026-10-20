@@ -2,7 +2,7 @@
 
 Corresponds to upstream `src/harness/context.ts` and `src/harness/prompt.ts`. Follows spec
 §2.1 (entries and context derivation), §7.4 (system prompt and dynamic tools) and the
-`pi.system` row of §8.1. Entry records, `ContextEdit` and head markers are in
+`delta.system` row of §8.1. Entry records, `ContextEdit` and head markers are in
 [records.md](records.md); the extension sections and agent resolution the prompt consumes
 in [harness.md](harness.md); the generation phase that calls both in
 [generation.md](generation.md).
@@ -58,8 +58,8 @@ baseline search needs the per-entry contributions, not the reordered list. The s
 entries and `contributions` keep the committed order.
 
 **Baseline (rule 10).** The baseline is the system message generation wrote with every
-section and tool in effect: with `H`, the first `pi.system` entry after `H` (unless an edit
-targets it); without `H`, the first `pi.system` entry, unless an earlier entry carries a
+section and tool in effect: with `H`, the first `delta.system` entry after `H` (unless an edit
+targets it); without `H`, the first `delta.system` entry, unless an earlier entry carries a
 system message in its own messages or in an edit's replacement (even one an edit later
 omits), in which case there is no baseline. A run's input is committed before generation
 renders the prompt, so a context otherwise starts with the input, or with kept history. Only
@@ -90,7 +90,7 @@ pub async fn read_context_from(session: &Session, storage: &dyn Storage, convers
                                previous: Option<&ContextRange>, ctx: &Context) -> Result<(ContextView, Option<ContextRange>), StorageError>;
 ```
 
-- The scheduler keeps each conversation's last range in memory. A later read with the same
+- A session service of the agent layer keeps each conversation's last range in memory. A later read with the same
   head marker and a newer tail scans only `previous.tail + 1 ..= tail` and extends the range:
   `settled` is kept, `open` is recomputed from the last assistant message, tool results are
   re-ordered only over `open`. A shorter tail (a `fork(at)` preview) filters the kept
@@ -108,8 +108,8 @@ pub async fn read_context_from(session: &Session, storage: &dyn Storage, convers
 ## System prompt and dynamic tools (§7.4)
 
 Durable has no stored prompt sections. The resolved agent produces the desired sections
-for each request; the transcript's `pi.system` entries are the only durable record of what
-the model saw. Every `pi.system` entry is `model: [SystemMessage { content: "", sections,
+for each request; the transcript's `delta.system` entries are the only durable record of what
+the model saw. Every `delta.system` entry is `model: [SystemMessage { content: "", sections,
 tools_added, tools_removed, timestamp }]` (`delta_ai::SystemMessage`; `sections` is an
 `IndexMap<String, Option<String>>`, `None` removes).
 
@@ -124,7 +124,7 @@ pub fn replay_sections(messages: &[Message]) -> IndexMap<String, String>;
 pub async fn render_sections(sections: &[Arc<dyn PromptSection>], input: &PromptInput<'_>, shown: &IndexMap<String, String>,
                              report: impl FnMut(SectionError, &dyn PromptSection), ctx: &Context) -> Result<IndexMap<String, String>, Cancelled>;
 
-/// The `pi.system` entries that make the replayed sections and tools of `view` equal `desired`
+/// The `delta.system` entries that make the replayed sections and tools of `view` equal `desired`
 /// in values and order. Zero, one or two drafts.
 pub fn plan_system_entries(view: &ContextView, desired: &IndexMap<String, String>, tools: &[Tool], now: i64) -> Vec<EntryDraft>;
 ```
@@ -140,11 +140,11 @@ current; display-only writes may land meanwhile and contribute nothing.
 
 Planning rules, in precedence order:
 
-1. **Head rebaseline.** When the active context has a head marker and no `pi.system` entry
+1. **Head rebaseline.** When the active context has a head marker and no `delta.system` entry
    after it (`id > H.id`), the new entry is a complete baseline: every desired section in
    order, every desired tool in `tools_added`, plus `ContextEdit::Omit` for every earlier
-   `pi.system` entry still retained after the cut. It is written even when it restates the
-   replayed values, so every later preparation finds a `pi.system` entry after the marker. A
+   `delta.system` entry still retained after the cut. It is written even when it restates the
+   replayed values, so every later preparation finds a `delta.system` entry after the marker. A
    `SystemMessage` is a patch, not a reset: it cannot remove previous `content` or restore
    order by restating values, hence the omissions.
 2. **Order mismatch.** If patching values would leave the shown order different from the
@@ -192,10 +192,14 @@ is pure and unit-tested on `ContextView` fixtures; derivation is tested on `Memo
   `freezeJson` and per-read array copies are replaced by cheap clones of the `Vec<Message>`
   views. `edited` invalidation is explicit.
 - Section failures are `Result`s, not thrown errors; cancellation is `delta_chord::Context`.
-- `delta_ai` must provide `declarations_equal` (present), `get_current_tools` (present) and a
-  plain-declaration conversion (`to_tool_declaration`, to add when `HarnessTool` lands).
+- `delta_ai` provides `declarations_equal` and `get_current_tools` (present) and
+  `to_tool_declaration`, the plain-declaration conversion, which is added there.
 
-## Pending confirmation
+## Decisions
 
-- Nothing beyond [README.md](README.md); the module ports §2.1 and §7.4 as specified,
-  including upstream's kept-range extension rules.
+- System entries are `delta.system`; their `SystemMessage` is `delta_ai`'s, in upstream's
+  message shape.
+- `to_tool_declaration` is added to `delta_ai`.
+- Kept context ranges are an agent-layer session service, not scheduler state.
+- Otherwise the module ports §2.1 and §7.4 as specified, including upstream's kept-range
+  extension rules; nothing is open.

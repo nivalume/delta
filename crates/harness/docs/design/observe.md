@@ -2,7 +2,7 @@
 
 Follows spec §9.2 (`watchDoc` delivery rules), §9.3 (conversation view), §9.4 (agent
 events) and §9.5 (task graph view). Corresponds to upstream `src/harness/view.ts`,
-`events.ts` and `task-graph.ts`. The document-level primitive (`watch_doc`, the commit
+`events.ts` and `task-graph.ts`. The document-level primitive (`DocumentState`, the commit
 publication stream) is [session.md](session.md); this note builds on it.
 
 ## Problem
@@ -15,36 +15,33 @@ mounts documents into one Chord value per conversation and derives events from t
 each commit; delta does the same on `delta_chord::State`, whose subscriptions already
 deliver values with ops and merge backlog ([chord state.md](../../../chord/docs/design/state.md)).
 
-## `watch_doc`
+## Document subscriptions (upstream `watchDoc`)
 
 ```rust
 impl Session {   // session.md
-    pub async fn watch_doc<D: DocumentDef>(&self, key: D::Key, ctx: &Context) -> Result<Option<DocWatch<D>>, HarnessError>;
+    pub async fn document_state<D: DocDefinition>(&self, at: DocAddress<D>, ctx: &Context) -> Result<Option<DocumentState>, SessionError>;
 }
-pub struct DocWatch<D> { /* State subscription bound to one incarnation */ }
-impl<D> DocWatch<D> {
-    pub fn value(&self) -> Json;                          // the acquisition revision until the first `next`
-    pub async fn next(&mut self) -> Option<Delivery>;     // value + exact ops; None once retired or stopped
-}
+// DocumentState: a read-only wrapper over the incarnation's `delta_chord::State`.
+// value() -> Json; subscribe() -> Subscription (`Hydrate`, then `Update { value, ops, context }`).
 ```
 
 Rules kept from §9.2: acquisition on the session line captures the current revision in
-O(1) and registers for every later committed revision; at most 100 pending deliveries,
-then the backlog merges into one (chord merges ops, or `["r", value]` past `MAX_OPS`);
-retirement delivers `["r", null]` and ends the subscription, never following a
-replacement incarnation; the delivery's context carries the commit's values without its
-cancellation. Pull-based, so upstream's listener rules (`start`, `stop`, `listener_error`)
-have no counterpart: dropping the watch stops it.
+O(1) and registers for every later committed revision; retirement delivers `["r", null]`
+and ends the subscription, never following a replacement incarnation; the delivery's
+context carries the commit's values without its cancellation. Two rules are chord's
+(decided): a change that ends equal to its base publishes nothing, and a subscriber that
+falls behind gets merged batches (ops concatenated, `["r", value]` past `MAX_OPS`) instead
+of upstream's root replacement. Pull-based, so upstream's listener rules (`start`, `stop`,
+`listener_error`) have no counterpart: dropping the subscription stops it.
 
 ## Conversation view
 
 ```rust
-#[serde(rename_all = "camelCase")]
 pub struct ConversationView {
     pub conversation: ConversationRecord,
     /// The head marker, then the non-head entries from its head (ContextView.entries).
     pub entries: Vec<EntryRecord>,
-    /// pi.agent, pi.live, pi.inbox, pi.provider, pi.usage, and delta.approvals, keyed by kind; absent documents absent.
+    /// delta.agent, delta.live, delta.inbox, delta.provider, delta.usage, and delta.approvals, keyed by kind; absent documents absent.
     pub docs: IndexMap<String, Json>,
 }
 
@@ -149,12 +146,12 @@ this conversation). `before`/`after` comparisons use the mounted values; ops dec
 
 | op pattern / record change | event |
 | --- | --- |
-| `pi.live.run` appears, or its first input differs from before | `run_end` of the old (if any), then `run_start` |
-| `run.task_id` changes to a `pi.generation` task created in this commit | `turn_start` |
-| a `pi.generation` record becomes `completing` (first time) or terminal without having held | `turn_end` (once per commit) |
-| `pi.live.generation.message` appears | `message_start` with the partial |
-| ops below `docs.pi.live.generation.message` on an existing partial | `message_update` with the partial's usage and the translated changes (below); only-`usage` changes send no event |
-| a `tools` or `nestedTools` slot becomes `running` | `tool_execution_start`; `args` from the task's intent checkpoint published in the same commit (nested: the slot's arguments) |
+| `delta.live.run` appears, or its first input differs from before | `run_end` of the old (if any), then `run_start` |
+| `run.task_id` changes to a `delta.generation` task created in this commit | `turn_start` |
+| a `delta.generation` record becomes `completing` (first time) or terminal without having held | `turn_end` (once per commit) |
+| `delta.live.generation.message` appears | `message_start` with the partial |
+| ops below `docs.delta.live.generation.message` on an existing partial | `message_update` with the partial's usage and the translated changes (below); only-`usage` changes send no event |
+| a `tools` or `nested_tools` slot becomes `running` | `tool_execution_start`; `args` from the task's intent checkpoint published in the same commit (nested: the slot's arguments) |
 | ops below a running slot's `output` | `tool_execution_update.output`: `t` ops sum into `trim_start`, `a` ops concatenate into `append`; any other op, or a changed output without `t`/`a`, is `Set(slot.output)` |
 | a running slot's `details` / `diagnostics` differ | the same event's `details` (`null` when removed) / `diagnostics` (`[]` when removed) |
 | `generation.retry` appears / disappears | `auto_retry_start { attempt, at, error }` / `auto_retry_end { attempt }` |
@@ -164,13 +161,13 @@ this conversation). `before`/`after` comparisons use the mounted values; ops dec
 | a nested slot ends or disappears unfinished | `tool_execution_end` with the `NestedCallDoc` result published in this commit, else none; children before parents (the lists hold parents first; walk backwards) |
 | entry appended with `model` | `message_start` (unless it is the streamed assistant answer whose partial already started) then `message_end`; a tool result's `tool_execution_end` directly precedes its `message_start` |
 | entry appended without `model` | `entry_appended` |
-| a status leaves `pi.live.compactions` | `compaction_end`, with `error` when `compactionFailure` names that task in the same commit |
+| a status leaves `delta.live.compactions` | `compaction_end`, with `error` when `compaction_failure` names that task in the same commit |
 | a task record settles `faulted` / `orphaned` | `task_failed { task_id, kind, message }` |
 | submission records in the publication | `submission { record }` in id order |
-| `pi.inbox` value differs | `inbox_update` (retired reads as initial) |
-| `pi.agent` / `pi.usage` value differs | `agent_changed` / `usage_changed` |
+| `delta.inbox` value differs | `inbox_update` (retired reads as initial) |
+| `delta.agent` / `delta.usage` value differs | `agent_changed` / `usage_changed` |
 | `delta.approvals` value differs | `approval_update` |
-| a status joins `pi.live.compactions` | `compaction_start { task_id, reason, blocking }` |
+| a status joins `delta.live.compactions` | `compaction_start { task_id, reason, blocking }` |
 
 `message_update` translation of the ops under `generation.message`: an insert-only `p`
 into `content` at index `i` starts one block per inserted item (`text_start`,
@@ -202,7 +199,6 @@ pub enum TaskGraphState {
     Sleeping { phase: String, until: u64 },
     Completing { outcome: OutcomeStatus },
 }
-#[serde(rename_all = "camelCase")]
 pub struct TaskGraphNode {
     pub id: TaskId, pub kind: String, pub conversation_id: ConversationId,
     pub owner: Option<TaskId>, pub background: bool, pub abort_requested: bool,
@@ -250,10 +246,17 @@ impl Harness {
 - `approval_update` and `docs["delta.approvals"]` are delta additions.
 - Op translation reads `delta_chord::delta::Op` variants instead of tuple positions.
 
-## Pending confirmation
+## Decisions
 
-- Mounting `delta.approvals` and emitting `approval_update` (spec §9.3 mounts the five
-  built-in kinds only).
+- `delta.approvals` is mounted in the view and drives the `approval_update` event
+  ([approval.md](approval.md)).
+- chord's rules for no-op batches and overflow (merged batches) apply to the mounts and to
+  document subscriptions.
+- `DocumentState` is a read-only wrapper; the view and the task graph hand out their
+  `State`'s read-only side the same way.
+
+## Open (minor)
+
 - `Snapshot.generation.message` as `AssistantMessage` (typed) versus `Json`; typed costs a
   deserialization per batch, `Json` keeps the mount's sharing.
 - Whether the events module lands in phase 1 or waits for the protocol crate; the view and

@@ -12,15 +12,15 @@ in [tool.md](tool.md), compaction in [compaction.md](compaction.md).
 One model request is an external effect that may take minutes, stream partial output the
 UI wants to see, fail in retryable and non-retryable ways, overflow the context window,
 return a deferred handle to poll, or call tools whose results start the next request. The
-`pi.generation` task makes each of those a durable phase: every observable step is a
-committed revision of `pi.live` or a transcript entry, a crash loses at most one throttle
+`delta.generation` task makes each of those a durable phase: every observable step is a
+committed revision of `delta.live` or a transcript entry, a crash loses at most one throttle
 window of partial output, and a reopened storage resumes from the phase checkpoint.
 
 ## Checkpoint and task
 
 ```rust
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
-#[serde(tag = "phase", rename_all = "camelCase")]
+#[serde(tag = "phase", rename_all = "snake_case")]
 pub enum GenerationCheckpoint {
     Prepare { attempt: u32, compacted: Option<TaskId>, overflow: Option<String>, threshold: Option<bool> },
     Request { attempt: u32, compacted: Option<TaskId>, model: ModelRef, thinking_level: ModelThinkingLevel,
@@ -32,12 +32,13 @@ pub enum GenerationCheckpoint {
 pub struct GenerationInput;                      // `{}`
 pub struct GenerationResult { pub entry_id: EntryId }
 
-pub struct GenerationTask;                       // name "pi.generation", version 1
-impl TaskDefinition for GenerationTask { type Hooks = dyn GenerationHooks; /* initial: Prepare { attempt: 1, .. } */ }
+pub struct GenerationTask;                       // name "delta.generation", version 1
+impl TaskDefinition for GenerationTask { /* initial: Prepare { attempt: 1, .. } */ }
+impl TaskHooks for GenerationTask { type Hooks = dyn GenerationHooks; }   // harness.md
 ```
 
-`Option` fields serialize with `skip_serializing_if`, so the stored JSON equals upstream's.
-The run's inputs live in `pi.live.run`, not in the task input.
+`Option` fields serialize with `skip_serializing_if`, so an absent field is absent in the
+stored JSON. The run's inputs live in `delta.live.run`, not in the task input.
 
 ## Live document (§8.2)
 
@@ -57,7 +58,7 @@ pub struct ToolSlot { pub call_id: String, pub name: String, pub task_id: Option
 
 | field | value |
 | --- | --- |
-| kind / version | `pi.live` / 1 |
+| kind / version | `delta.live` / 1 |
 | scope / history / fork | conversation, `latest`, `initial` |
 | `initial()` | `{}` |
 | checkpoint | complete base whenever nothing runs: `generation` absent and no `Running` tool or nested slot |
@@ -87,8 +88,8 @@ prepare) is described below and left out of the picture.
 
 | Phase | Does | Closing commit writes |
 | --- | --- | --- |
-| `Prepare` | Resolves the agent and settings once; `no_model` when the agent has no model or `models.get_model` does not know it. Resumed with `overflow` and a compaction that did not complete with an `entry_id`: fails `model_error` with the overflow text. Resumed with `threshold` and a non-completed compaction: fails `model_error` with `Compaction failed: <error>` / `Compaction was aborted`. Otherwise reads the context view, replays, renders and plans ([context.md](context.md)) and checks the compaction thresholds | Planned `pi.system` entries; `Running(Request { cutoff: new tail, model, thinking_level, stream_options })`; or a background compaction task and status in the same commit; or a blocking compaction task owned by the generation, its status, and `Waiting { on: [it], AllSettled, Prepare { attempt, compacted, threshold: true } }` |
-| `Request` | Converts a leftover committed partial into an aborted `pi.assistant` entry (first commit), resolves the pinned model, runs the `before_request` chain, streams through `cutoff` with the invocation context, `reasoning` = thinking level (omitted for `Off`), the conversation's provider `session_id`, the pinned options; commits throttled partials; stops the throttle; `after_response`; classifies | See classification |
+| `Prepare` | Resolves the agent and settings once; `no_model` when the agent has no model or `models.get_model` does not know it. Resumed with `overflow` and a compaction that did not complete with an `entry_id`: fails `model_error` with the overflow text. Resumed with `threshold` and a non-completed compaction: fails `model_error` with `Compaction failed: <error>` / `Compaction was aborted`. Otherwise reads the context view, replays, renders and plans ([context.md](context.md)) and checks the compaction thresholds | Planned `delta.system` entries; `Running(Request { cutoff: new tail, model, thinking_level, stream_options })`; or a background compaction task and status in the same commit; or a blocking compaction task owned by the generation, its status, and `Waiting { on: [it], AllSettled, Prepare { attempt, compacted, threshold: true } }` |
+| `Request` | Converts a leftover committed partial into an aborted `delta.assistant` entry (first commit), resolves the pinned model, runs the `before_request` chain, streams through `cutoff` with the invocation context, `reasoning` = thinking level (omitted for `Off`), the conversation's provider `session_id`, the pinned options; commits throttled partials; stops the throttle; `after_response`; classifies | See classification |
 | `Retry` | Due: back to `Prepare { attempt + 1 }`, so agent and settings changes during the backoff apply. Early: sleeps again with the same checkpoint | `Running(Prepare)` or `Sleeping` |
 | `Poll` | Due: `models.fetch_deferred(handle)`; a still-deferred result sleeps until a strictly later `poll_at`; another result is classified. Early: sleeps again. Model gone after reopen: `no_model` once due | See classification |
 | `Tools` | Resumed by the scheduler once every task in `on` is terminal (§8.5, below) | Next sequential task, or the round's end |
@@ -102,7 +103,7 @@ messages; without one, every message is estimated. Both thresholds apply only wh
 selection finds a cut ([compaction.md](compaction.md)). Above `context_window −
 reserve_tokens`: blocking compaction, as in the table. Above `context_window −
 reserve_tokens − background_tokens` with `background_tokens > 0` and no compaction status in
-`pi.live`: a background, conversation-owned compaction in the commit that moves to
+`delta.live`: a background, conversation-owned compaction in the commit that moves to
 `Request`; the generation does not wait for it.
 
 ### Streaming partials
@@ -133,7 +134,7 @@ the reopened run handles the committed state):
 
 | Stop reason | Condition | Commit |
 | --- | --- | --- |
-| `stop` / `length`, or `toolUse` without calls | `on_yield` chain ran before the commit; first `continue` wins | Append the answer (`pi.assistant`, usage recorded); apply the `Final` boundary. With a continuation and no selected user item or reset: append a `pi.user` with the continuation, create a successor generation and hand it `run`, inputs kept open. Otherwise settle inputs `done` (answer = the entry), remove `run` and `generation`, start a successor run for the selected user ids if any; a dropped continuation is not retried. `Terminal(Completed { entry_id })` |
+| `stop` / `length`, or `toolUse` without calls | `on_yield` chain ran before the commit; first `continue` wins | Append the answer (`delta.assistant`, usage recorded); apply the `Final` boundary. With a continuation and no selected user item or reset: append a `delta.user` with the continuation, create a successor generation and hand it `run`, inputs kept open. Otherwise settle inputs `done` (answer = the entry), remove `run` and `generation`, start a successor run for the selected user ids if any; a dropped continuation is not retried. `Terminal(Completed { entry_id })` |
 | `toolUse` with calls | — | Append the answer; start the tool round; `Waiting { on: tools, AllSettled, Tools { .. } }`; `generation` removed, `tools` slots added |
 | `error`, context overflow (`delta_ai::is_context_overflow`) | Policy enabled, `compacted` absent, range selection finds a cut | Append the error entry, remove `generation`, create a compaction owned by the generation (reason `overflow`), add its status, `Waiting { on: [it], AllSettled, Prepare { attempt, compacted, overflow } }`; does not count against retries. A second overflow, or one without a cut, fails as below |
 | `error`, retryable (`is_retryable_assistant_error`) | `retry.enabled && attempt <= max_retries` | Append the error entry; `Sleeping { until: now + retry_delay(policy, attempt), Retry { .. } }`; `generation.retry = { at, error }` |
@@ -148,12 +149,12 @@ as overflow; the next threshold check handles a silent one.
 ### Abort handler
 
 In `Poll` with a known model, `models.cancel_deferred` (a failure is reported). Then one
-commit converts a committed partial into an aborted `pi.assistant` entry (usage recorded),
+commit converts a committed partial into an aborted `delta.assistant` entry (usage recorded),
 settles the inputs `unanswered` / `aborted`, removes `run`, `generation` and `tools`, and
 ends `Terminal(Aborted)`. In the `Tools` phase it runs only after the tool tasks are
 terminal: every call still in `pending` gets an `aborted` error result entry; a started
 call whose task faulted or was orphaned keeps its `Done` slot without an entry. The
-scheduler's cleanup hook ([scheduler.md](scheduler.md)) does the same conversion and
+agent layer's scheduler cleanup hook ([scheduler.md](scheduler.md)) does the same conversion and
 settlement for `faulted` and `orphaned` outcomes, with reason `faulted` (detail: the
 message) or the blocked reason.
 
@@ -165,7 +166,7 @@ The round starts in the commit that appends the tool-calling answer:
    context through `cutoff` (`Request` holds it; `Poll` derives it again). A call to a tool
    not offered gets its `tool_unavailable` result entry here, without a task, and a slot
    that starts `Done` with that entry.
-2. Every other call gets a `pi.tool` task owned by the generation with input
+2. Every other call gets a `delta.tool` task owned by the generation with input
    `{ kind: "model", assistant, call_id }`. The round is sequential when
    `settings.tool_execution` (read as the round starts) is `Sequential` or any called tool,
    resolved from the phase's agent as the tool task would, has `execution_mode: Sequential`:
@@ -173,7 +174,7 @@ The round starts in the commit that appends the tool-calling answer:
    gets its task and they run in parallel.
 3. `Waiting { on: tools, AllSettled, Tools { assistant, tools, pending } }`; `run` stays with
    the generation.
-4. `pi.live.tools` receives one slot per call (`Pending`, or `Done` for an unoffered call);
+4. `delta.live.tools` receives one slot per call (`Pending`, or `Done` for an unoffered call);
    `generation` is removed.
 
 `Tools` phase, resumed once every task in `on` is terminal: with calls left in `pending`,
@@ -181,12 +182,12 @@ one commit creates the next call's task and waits again with the shorter `pendin
 (`tools` grows by one). Otherwise it reads the tool records with `rt.get_task`, the result
 entries from the slots, runs the `after_tools` observers, and commits once:
 
-- For every `add_tools` name in a result's `control`, edit `pi.agent`: an `Exactly` `tools`
+- For every `add_tools` name in a result's `control`, edit `delta.agent`: an `Exactly` `tools`
   gets the name appended unless present, `Remove` loses it, unset stays unset; `model_tools`
   unset or `Edit` gets the name appended to `add` (loads a deferred tool). Names are written
   without consulting the registry.
 - Every result requests `terminate`, or any requests `handoff`: append the handoff's
-  `pi.reset` entry if any, settle the inputs `done` with the tool-calling answer, remove
+  `delta.reset` entry if any, settle the inputs `done` with the tool-calling answer, remove
   `run` and `tools`, apply the `Final` boundary.
 - Otherwise remove `tools` and apply the `PostTools` boundary. A placed reset: the inputs
   settle `unanswered` / `reset` and selected user items start a successor run. Otherwise
@@ -213,14 +214,14 @@ pub fn add_usage_state(sum: &mut UsageState, state: &UsageState);
 
 | field | value |
 | --- | --- |
-| kind / version | `pi.usage` / 1 |
+| kind / version | `delta.usage` / 1 |
 | scope / history / fork | conversation, `latest`, `initial` (a fork starts at zero) |
 | `initial()` | `{ models: {}, tools: {} }` |
 | checkpoint | complete base on every change |
 
-Every writer of a `pi.assistant` entry (an answer, a failed attempt, a converted partial,
+Every writer of a `delta.assistant` entry (an answer, a failed attempt, a converted partial,
 the scheduler's cleanup) adds the message's `usage` to `models` under the message's own
-`provider/model` in the same commit; every writer of a `pi.tool-result` with `usage` adds it
+`provider/model` in the same commit; every writer of a `delta.tool-result` with `usage` adds it
 to `tools`, as does a nested call's result commit; every compaction summarization attempt
 adds its response's usage in its classifying commit. Failed and aborted attempts count.
 `Harness::usage` sums every conversation's document; nothing stores a cross-conversation
@@ -245,16 +246,23 @@ a scripted `fetch_deferred`.
 - The throttle is a small state machine over `rt.timer` and a `JoinHandle`, with the same
   observable rule (one commit per interval, one in flight, trailing flush, stop before
   classify).
-- `delta_ai` needs `is_context_overflow`, `is_retryable_assistant_error` and `retry_delay`
-  (upstream `pi-ai/utils/overflow`, `utils/retry`); they are added there, not reimplemented
-  here. `fetch_deferred` / `cancel_deferred` use `delta_ai::deferred`.
+- `is_context_overflow`, `is_retryable_assistant_error` and `retry_delay` are added to
+  `delta_ai`, as upstream has them in pi-ai (`utils/overflow`, `utils/retry`), and not
+  reimplemented here. `fetch_deferred` / `cancel_deferred` use `delta_ai::deferred`.
 - Telemetry spans and links on generation attempts are not ported.
 
-## Pending confirmation
+## Decisions
 
-- The successor generation is created in the predecessor's closing (step) commit, which the
-  `Next` design makes the same commit as the predecessor's terminal state; upstream does
-  the same in its runtime commit, so no observable change. Position: adopt.
+- `delta.generation` is version 1; its checkpoint JSON is serde's snake_case form.
+- The successor generation is created in the predecessor's closing commit (`Next`), the
+  same commit as the predecessor's terminal state; upstream does the same in its runtime
+  commit, so nothing observable changes.
+- `is_context_overflow`, `is_retryable_assistant_error`, `retry_delay` and
+  `to_tool_declaration` are added to `delta_ai`.
+- Hooks are `GenerationHooks`, a per-task trait ([harness.md](harness.md)).
+
+## Open (minor)
+
 - `ConversationStreamOptions` pinned in the checkpoint is a JSON subset of
   `delta_ai::StreamOptions`; callbacks (`on_payload`, …) come from the host at request time
   and are not pinned. Position: adopt; it matches upstream's curated type.

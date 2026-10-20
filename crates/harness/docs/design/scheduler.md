@@ -20,7 +20,9 @@ abort cascades, structured waits and durable sleeps.
 The scheduler is the component that reserves runnable tasks, runs their handlers, applies
 the precedence rules between what a handler did and what the record says, and derives the
 marks that ownership implies. It knows nothing about runs, conversations' inboxes or task
-kinds; the Harness gives it one cleanup hook for outcomes it writes itself (§5.4).
+kinds: every task, the agent layer's included, is a `TaskDefinition` found by name in a
+catalog the layer above supplies, and that layer gives it one cleanup hook for outcomes the
+scheduler writes itself (§5.4).
 
 ## Task definitions
 
@@ -34,7 +36,6 @@ pub trait TaskDefinition: Send + Sync + 'static {
     type Input: Serialize + DeserializeOwned + Send + Sync + 'static;
     type Checkpoint: Checkpoint;
     type Result: Serialize + DeserializeOwned + Send + Sync + 'static;
-    type Hooks: ?Sized + Send + Sync;           // the hook trait the task asks (harness.md)
 
     fn name(&self) -> &'static str;
     fn version(&self) -> u32;
@@ -51,14 +52,28 @@ pub trait TaskDefinition: Send + Sync + 'static {
         -> Result<(Self::Input, Self::Checkpoint), MigrateError> { Err(MigrateError::Unsupported) }
 }
 
-/// Type-erased definition held by the registry (`Arc<dyn AnyTask>`), implemented for every
-/// `T: TaskDefinition` by a blanket impl that serializes at the boundary.
+/// Type-erased definition (`Arc<dyn AnyTask>`), implemented for every `T: TaskDefinition`
+/// by a blanket impl that serializes at the boundary.
 pub trait AnyTask: Send + Sync { fn name(&self) -> &str; fn version(&self) -> u32; fn can_migrate(&self) -> bool; /* erased run/abort/migrate */ }
+
+/// Where the scheduler finds definitions. The agent layer's `Registry` implements it
+/// (harness.md); tests use a fixed catalog.
+pub trait TaskCatalog: Send + Sync {
+    fn snapshot(&self) -> Arc<dyn CatalogSnapshot>;
+    fn subscribe(&self) -> watch::Receiver<u64>;          // bumps on every publication
+}
+pub trait CatalogSnapshot: Any + Send + Sync {
+    fn generation(&self) -> u64;
+    fn task(&self, name: &str) -> Option<&Arc<dyn AnyTask>>;
+}
 ```
 
-- Built-in checkpoints are serde-tagged enums, `#[serde(tag = "phase", rename_all = "camelCase")]`,
-  so the stored JSON is upstream's `{ phase: "request", attempt, ... }`. A user task may use
-  `Json` and read its own fields.
+The kernel trait has no hook type: hooks are an agent-layer concept, declared beside the
+definition with the agent layer's `TaskHooks` trait ([harness.md](harness.md)).
+
+- Typed checkpoints are serde-tagged enums, `#[serde(tag = "phase", rename_all = "snake_case")]`,
+  stored as `{"phase":"request","attempt":1,...}`. A user task may use `Json` and read its
+  own fields.
 - `Next<T>` is the phase's closing commit, built by `rt.next(|tx, current| ...)`. The closure
   runs on the commit line inside the scheduler's step commit (below) and returns the
   `NextState`; its entries, documents and child tasks land in that same commit, so a result
@@ -91,12 +106,8 @@ impl<T: TaskDefinition> TaskRuntime<T> {
     pub fn task_id(&self) -> TaskId;
     pub fn conversation_id(&self) -> ConversationId;
     pub fn context(&self) -> &Context;                 // cancelled when the invocation ends
-    pub fn registry(&self) -> &RegistrySnapshot;       // this phase's snapshot
-    pub async fn agent(&self, ctx: &Context) -> Result<Arc<Agent>, HarnessError>;   // resolved once per phase
-    pub fn settings(&self) -> Settings;                // resolved at each call
-    pub fn models(&self) -> Models;                    // HarnessOptions.models at each call
-    pub fn hooks(&self) -> &HookRunner<T::Hooks>;      // harness.md
-    pub async fn env(&self, ctx: &Context) -> Result<Option<Arc<dyn ExecutionEnv>>, HarnessError>;
+    pub fn catalog(&self) -> &Arc<dyn CatalogSnapshot>;   // this phase's snapshot
+    pub fn services(&self) -> &Services;               // the session's services (session.md)
 
     /// An intermediate commit of this phase (intent, progress). `None` keeps the state.
     pub async fn commit<R>(&self, ctx: &Context,
@@ -113,13 +124,17 @@ impl<T: TaskDefinition> TaskRuntime<T> {
     pub async fn owned_tasks(&self, ctx: &Context) -> Result<Vec<TaskRecord>, RuntimeError>;
     pub async fn outcomes(&self, ids: &[TaskId], ctx: &Context) -> Result<Vec<TaskOutcome<Json>>, RuntimeError>;
     pub async fn entry(&self, id: EntryId, ctx: &Context) -> Result<Option<EntryRecord>, RuntimeError>;
-    pub async fn context_view(&self, conversation: ConversationId, at: Option<EntryId>, ctx: &Context) -> Result<ContextView, RuntimeError>;
     pub async fn snapshot<D: DocDefinition>(&self, at: DocAddress<D>, ctx: &Context) -> ..;   // DocumentReader: snapshot, snapshot_as_of (session.md)
-    pub fn now(&self) -> i64;                           // Harness clock, epoch ms (records.md times are i64)
+    pub fn now(&self) -> i64;                           // the session clock, epoch ms (records.md times are i64)
     pub fn report(&self, error: impl Into<ReportError>, from: Option<ReportFrom>);
     pub fn timer(&self, delay: Duration) -> Timer;      // paces work inside a phase; dropped with the invocation
 }
 ```
+
+The agent layer adds what its tasks need (`agent()`, `settings()`, `models()`, `hooks()`,
+`env()`, `context_view()`) as an extension trait on `TaskRuntime`, built from `services()`
+and the phase's catalog snapshot ([harness.md](harness.md)); the kernel defines none of
+them.
 
 Rules (§5.1):
 
@@ -135,10 +150,11 @@ Rules (§5.1):
   from an abort handler.
 - No in-phase sleeping: `tokio::time::sleep` inside a phase is a bug (a rerun would recompute
   the deadline). Work after a wait belongs in the next phase with its data in the checkpoint.
+  A phase may await an in-memory signal (a oneshot from a service) under a timeout whose
+  deadline is in its checkpoint: a rerun recomputes nothing and waits until the same
+  deadline. The invocation stays `running` meanwhile; close and abort cancel the await.
 - Memos are first-writer-wins values in the live record; `memo_or_insert` is one gated commit
   that returns the stored winner. Hooks share the task's memo namespace.
-- `context_view` captures its bounds on the line and derives off it, reusing the
-  conversation's kept range ([context.md](context.md)).
 
 Effect sandwich (§5.2): commit intent → perform → commit outcome. A reopen in an intent
 phase means the effect may have happened; the phase retries idempotently, polls a handle, or
@@ -148,7 +164,7 @@ document.
 ## Actor and invocations
 
 The scheduler lives inside the session actor ([session.md](session.md)): its state (live
-task index, owner edges, invocation table, waiters, kept contexts, wake state) is owned by
+task index, owner edges, invocation table, waiters, wake state) is owned by
 the actor task and touched only on the line. Phase handlers run in tokio tasks:
 
 ```rust
@@ -157,7 +173,7 @@ struct Invocation {
     mode: Mode,                        // Run | Abort
     ctx: Context, cancel: Canceller,   // signalled by abort marks, close and `end`
     definition: Arc<dyn AnyTask>,      // what it started with; handover compares identity
-    snapshot: RegistrySnapshot,        // refreshed at each phase boundary
+    snapshot: Arc<dyn CatalogSnapshot>,   // refreshed at each phase boundary
     join: JoinHandle<()>,
 }
 ```
@@ -174,8 +190,8 @@ struct Invocation {
 | 1 | State is `terminal`, `completing`, `waiting` or `sleeping` | Stop the invocation; nothing written |
 | 2 | Harness closing | Stop; keep checkpoint and abort mark for reopen |
 | 3 | Run mode and `abort_requested`, or a non-background task below a live owner with cancellation intent | Stop the run invocation; schedule a reconcile; an abort invocation starts once its ordinary owned work drained |
-| 4 | The phase returned `Err` or its closing closure failed (not a `TxError::Storage`) | Write terminal `faulted` with the error message; run the Harness cleanup hook |
-| 5 | Checkpoint changed, including a new checkpoint within the same phase | Refresh the registry snapshot; hand over (below) or invoke the next phase in the same invocation |
+| 4 | The phase returned `Err` or its closing closure failed (not a `TxError::Storage`) | Write terminal `faulted` with the error message; run the cleanup hook |
+| 5 | Checkpoint changed, including a new checkpoint within the same phase | Refresh the catalog snapshot; hand over (below) or invoke the next phase in the same invocation |
 | 6 | Checkpoint unchanged | Write terminal `faulted` ("returned without durable progress") |
 
 Before the first phase only rules 1–3 apply. An abort invocation runs `abort` once; then
@@ -218,7 +234,7 @@ equal                              -> commit running
 ```
 
 A blocked task keeps its record, stays live (blocks idle waits), is reconsidered on every
-registry publication and is not active in `wake()`. The blocked reason is derived, never
+catalog publication and is not active in `wake()`. The blocked reason is derived, never
 stored. Open never terminalizes a task for a missing or incompatible definition.
 
 **Restarts.** Open writes every surviving `running` task back to `pending` with
@@ -292,21 +308,20 @@ Cascade rules (§5.4, §5.5):
 7. Directly aborting a live background task includes it and its ordinary subtree; nested
    background owners remain boundaries.
 
-**Orphaning.** Aborting a blocked task cannot run its handler; the Harness settles it
+**Orphaning.** Aborting a blocked task cannot run its handler; the scheduler settles it
 `orphaned` with the blocked reason: directly in the marking commit when there is no active
 invocation, no live ordinary owned work and the current snapshot cannot take it; otherwise
 when the scheduler would reserve the abort invocation. Only an abort orphans; a missing
-definition alone never does. The orphaning commit runs the Harness cleanup hook.
+definition alone never does. The orphaning commit runs the cleanup hook.
 
-**Cleanup hook.** `HarnessHooks::settle_scheduler_outcome(tx, record)` is called in the commit
-that makes a scheduler-written outcome (`faulted`, `orphaned`) terminal, which is the final
-commit after a hold. It ignores kinds other than `pi.generation`, `pi.tool` and
-`pi.compaction`; for a run task named by `pi.live.run` it converts a committed partial into
-an aborted `pi.assistant` entry (no `by_task_id`: the commit has no task scope), records its
-usage, settles the inputs `unanswered` with `faulted` (detail: the message) or the blocked
-reason, and removes `run`, `generation` and `tools` ([generation.md](generation.md)); for a
-`pi.tool` task it marks the slot `done` without an entry; for a compaction it removes its
-status.
+**Cleanup hook.** `SchedulerHooks::settle_scheduler_outcome(tx, record)`, installed by the
+layer above, is called in the commit that makes a scheduler-written outcome (`faulted`,
+`orphaned`) terminal, which is the final commit after a hold. The scheduler passes every
+such record and does nothing kind-specific; the hook cleans up what the task's own handlers
+would have (no `by_task_id` there: the commit has no task scope). The agent layer's hook
+handles its three kinds and ignores the rest: a run generation's partial, inputs and run
+marker ([generation.md](generation.md)), a tool task's slot ([tool.md](tool.md)), a
+compaction's status ([compaction.md](compaction.md)).
 
 ## Structured concurrency (§5.5)
 
@@ -323,7 +338,7 @@ status.
 4. Writes split at the hold: a task-written terminal commit lands its other writes at hold;
    the terminal state, task-document retirement and waiter resolution follow in the final
    commit. A scheduler-written outcome writes only the record at hold; its cleanup runs in
-   the final commit (a faulted run keeps `pi.live.run` until its tools drained).
+   the final commit (a faulted generation, say, keeps its run marker until its tools drained).
 5. Waiters, idle waits, inspection and traversal see `completing` as live.
 
 New owned work needs a live owner: `create_task` / `create_conversation` with task ownership
@@ -350,14 +365,17 @@ which holds its invocation.
 
 - `Sleeping { until }` (epoch ms on the Harness clock) parks the task without an invocation;
   it resumes once the clock reaches `until`. The deadline survives reopens. An abort mark ends
-  a sleep. A phase run before its time, as a built-in retry or poll after an early wake,
-  sleeps again with the same checkpoint, which is progress (the state is a sleep, the
+  a sleep. A phase run before its time (a retry or poll phase after a host's early
+  `resume`, say) sleeps again with the same checkpoint, which is progress (the state is a sleep, the
   invocation ends by rule 1 at the next step).
 - The scheduler arms one tokio timer for the earliest sleep while scheduling is enabled and
   none when `on_wake` is given; every expiry rechecks the clock. `rt.timer(delay)` paces
   work inside a phase (progress commits) and is dropped with the invocation.
-- Background sweeps (kept contexts, document retention) are tokio interval tasks that free
-  memory; the host-declinable "background timer" distinction of upstream has no equivalent,
+- There is no wake primitive: a sleeping task resumes only when due or when an abort mark
+  ends its sleep. Work that waits for an outside answer awaits it inside a running
+  invocation, as above (the tool task's approval phase, [approval.md](approval.md)).
+- Background sweeps (document retention here; the layers above sweep their own services,
+  such as kept context ranges) are tokio interval tasks that free memory; the host-declinable "background timer" distinction of upstream has no equivalent,
   because a tokio timer never keeps a process alive by itself.
 - `Harness::wake() -> Wake { active, at }` from memory: `active` when a non-blocked pending
   task, a running invocation, a waiting task whose `on` settled, a due sleep, an abort-marked
@@ -377,8 +395,8 @@ which holds its invocation.
 
 **Open.** Reconciliation: surviving `running` → `pending` with the restart count; `waiting`
 and `sleeping` kept; `completing` and `waiting` re-evaluated (finalization, `FailFast`);
-cascades re-derived. No handler runs during open. The registry must hold the built-in task
-definitions.
+cascades re-derived. No handler runs during open. The layer above checks that the catalog
+holds the definitions it requires (the agent layer's built-in tasks, harness.md).
 
 **Close.** `close()` seals admission and reservation on the line, cancels every invocation's
 `Context` and ends states, watches and waiters with the close reason. Off the line it lets
@@ -406,22 +424,23 @@ under the same name) and the restart limit (reopen a storage with `running` reco
 
 - `run` returns the phase's closing commit (`Next`); the step commit and the handler's last
   commit are one. Intermediate commits keep upstream's `runtime.commit` shape.
-- Checkpoints are typed (`Checkpoint` trait, serde-tagged enums for built-ins); the stored
-  JSON is unchanged.
-- Definitions are `Arc<dyn AnyTask>`; handover compares `Arc` identity after a generation
-  counter check instead of object identity alone.
+- Checkpoints are typed (`Checkpoint` trait, serde-tagged snake_case enums); the stored
+  JSON is serde's, not upstream's camelCase.
+- Definitions are `Arc<dyn AnyTask>` from a `TaskCatalog`; handover compares `Arc` identity
+  after a generation counter check instead of object identity alone.
 - Cancellation is `delta_chord::Context`; dropping an awaited future cancels it, so close can
   rely on cooperative handlers ending at their next await and aborts the rest after a grace.
 - No `setTimer` host option and no background/foreground timer distinction; tokio timers.
 - `TaskRuntime::sleep_until` is `Next::sleep`; `setTimer` is `rt.timer`.
 
-## Pending confirmation
+## Decisions
 
-- Folding the handler's last commit into the step commit (`Next`). Position: adopt it; it
-  removes a commit per phase and the queued-commit race, and keeps upstream's rules
-  observable (progress, fault, handover) unchanged.
-- Session actor + tokio tasks for invocations, `close()` joining through a `JoinSet` with a
-  grace period and `JoinHandle::abort` afterwards. Position: adopt; the grace is a setting
-  (`close_grace`, default 30 s) so tests can shorten it.
-- Progress detection by `Json` equality of the stored state (key order ignored), not typed
-  `PartialEq`. Position: adopt; it matches upstream exactly and covers user tasks.
+- `run` returns `Next`, a closure run on the session line: the handler's last writes, its
+  next state and the step decision are one commit. It removes a commit per phase and the
+  queued-commit race and keeps upstream's observable rules (progress, fault, handover).
+- `close()` cancels every invocation, joins them (`JoinSet`), aborts stragglers after
+  `close_grace` (default 30 s, a setting so tests can shorten it) and writes the stopped
+  tasks back as `pending`.
+- A repeated checkpoint is detected by `delta_chord::json::Json` `PartialEq` on the stored
+  state (deep, key order ignored), not typed `PartialEq`; it covers `Json` user tasks.
+- No wake primitive; a sleeping task is woken only by its deadline or an abort mark.

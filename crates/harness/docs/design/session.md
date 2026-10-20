@@ -49,6 +49,15 @@ pub struct SessionOptions {
     pub document_retention: Option<Duration>,     // Some(0): drop after use; None: keep; default 10 min
     pub now: Arc<dyn Fn() -> i64 + Send + Sync>,  // ms wall clock for task times; default system time
     pub reporter: Option<Reporter>,
+    pub services: Services,                       // in-memory services of the layers above
+}
+
+/// A type map of per-session, in-memory services (`http::Extensions`-like). Never persisted,
+/// dropped at close; the kernel stores them and never reads them.
+pub struct Services { /* RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>> */ }
+impl Services {
+    pub fn insert<T: Send + Sync + 'static>(&self, service: Arc<T>) -> Option<Arc<T>>;
+    pub fn get<T: Send + Sync + 'static>(&self) -> Option<Arc<T>>;
 }
 
 impl Session {
@@ -69,11 +78,16 @@ impl Session {
     pub async fn close(&self, ctx: &Context) -> Result<(), SessionError>;
     pub fn closed(&self) -> impl Future<Output = SessionEnd> + Send;
     pub fn failure(&self) -> Option<SessionFailed>;
+    pub fn services(&self) -> &Services;
 }
 pub enum SessionEnd { Closed, Failed(SessionFailed) }
 ```
 
-A commit:
+Services let an upper layer keep process-local state per session without a kernel type
+for it: the approval waiters of [approval.md](approval.md), for instance, are a service the
+agent layer inserts at open and reads from its tasks and its `decide` call.
+
+A commit (`Live` and `Follow` stand for any document and task definitions):
 
 ```rust
 let entry_id = session.commit(&ctx, |tx| Box::pin(async move {
@@ -143,7 +157,7 @@ impl<D> Doc<'_, D> {
   only a placed input takes `done { answer }`; a settled record stays unchanged.
 - Task-scoped `doc` validates against the latest candidate task record (not a caller read):
   a missing task rejects; a terminal candidate rejects later task-document access.
-- `pub(crate)` for the Harness: `set_task` (whole-record replacement, stamps `started_at` on
+- `pub(crate)` for the scheduler and the layers above: `set_task` (whole-record replacement, stamps `started_at` on
   the first `running` and `ended_at` on `terminal`, refuses a conversation change or a second
   terminal candidate), `create_root_conversation`, `staged_tasks`, `staged_conversations`,
   and a `TransactionScope` binding the default conversation of `create_task` and the task
@@ -266,11 +280,12 @@ pub enum WatchEnd { Retired, SessionClosed, SessionFailed(SessionFailed) }
 1. `visible_entry(parent, at)` must exist (`TxError::Fork`); keep its `conversation_id` and
    `commit_seq`.
 2. Scan the entry's own conversation at `At(commit_seq)` and take the documents with
-   `fork: asOf`; scan `parent` at `Current` and take those with `fork: current`. Each becomes
+   `fork: as_of`; scan `parent` at `Current` and take those with `fork: current`. Each becomes
    a staged copy `{record: DocumentCreate with a fresh id and the child's scope, source: {id, at}}`;
    a second source for one child address rejects (`"Fork selects multiple source documents"`).
 3. Stage the conversation record (owner derived from the owning task's final candidate), then
-   run the Harness hook that stages built-in documents for a new conversation.
+   run the conversation-creation hook the layer above installs (the agent layer stages its
+   documents there, [harness.md](harness.md)).
 4. At assembly, reject if the transaction writes any source incarnation or any
    `fork: current` document of `parent`
    (`"Cannot fork conversation {id} while changing its current-policy documents"`).
@@ -293,8 +308,9 @@ pub trait CommitObserver: Send {
 }
 ```
 
-- On-line observers (`observe_commits`) are the Session's own components (scheduler,
-  submissions, views, task graph): they run synchronously after adoption to keep memory in
+- On-line observers (`observe_commits`) are components registered at open (the scheduler,
+  and the indexes of the layers above: submission waiters, view mounts, the task graph):
+  they run synchronously after adoption to keep memory in
   step with storage, before subscribers are fed, and one that fails fails the Session.
 - `subscribe_commits` returns a bounded channel of `Arc<CommitPublication>`; a slow subscriber
   delays only itself, and on overflow the subscription records a gap so the subscriber can
@@ -344,15 +360,23 @@ failed call cannot succeed; the host reopens.
   `Option<Duration>`; eviction timers are tokio's, with no host `setTimer`.
 - No telemetry events on publish until delta has a telemetry crate.
 
-## Pending confirmation
+## Decisions
+
+- No-op batches: chord's rule. A change that ends equal to its base, structural edits
+  included, writes and publishes nothing.
+- Overflow: chord's merge. A `DocumentState` subscriber that falls behind gets merged
+  batches (`["r", value]` past `MAX_OPS`), not upstream's root replacement.
+- `DocumentState` is a read-only wrapper over the incarnation's `delta_chord::State`; the
+  Session holds the only writable handle.
+- One document is edited at a time: `Doc<'tx, D>` borrows the `Tx`; "edit, table write,
+  edit again" re-acquires.
+
+## Open (minor)
 
 - The `commit` signature (`FnOnce(&mut Tx) -> BoxFuture<Result<T, TxError>>`) versus a
   generic error type; boxing costs one allocation per commit.
-- `Doc<'tx>` borrowing `Tx` (one document editable at a time; re-acquire after a table write)
-  versus index handles edited through `tx.edit(&handle, |draft| ..)`.
-- Overflow policy: chord's merged batches for `DocumentState` subscriptions instead of
-  upstream's root replacement; a gap marker rather than merged publications for
-  `subscribe_commits`.
+- A gap marker rather than merged publications when a `subscribe_commits` channel
+  overflows.
 - `document_retention: Option<Duration>` with `None` meaning forever, versus an enum.
 - `Session::open(Arc<dyn Storage>)` rather than a generic `S: Storage`, so the Harness stays
   non-generic.

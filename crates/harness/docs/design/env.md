@@ -144,7 +144,7 @@ pub struct ExecResult { pub exit_code: i32, pub spill_path: Option<String> }
   pipes. A panic in the callback kills the command and fails `CallbackError`.
 - `spill`: once the seen output exceeds `after_bytes` or `after_lines` (complete or
   partial lines), the complete raw output (the prefix kept so far and everything after)
-  streams to a temp file `pi-output-*.log` created through `create_temp_file`; the
+  streams to a temp file `delta-output-*.log` created through `create_temp_file`; the
   writer's backpressure pauses the child's pipes. The path is `ExecResult.spill_path`, or
   `ExecError.spill_path` when the command then timed out or was aborted. A spill write
   failure kills the command and fails `Unknown`.
@@ -236,9 +236,10 @@ The suite runs against `LocalEnv` in `tests/`, in temp directories, without the 
 
 ## Phase 1 and later
 
-- Phase 1 ships the traits and `LocalEnv`. `watch` needs `notify` and `list_files` needs
-  `ignore`; both are optional methods, so `LocalEnv` can ship `NotSupported` for them
-  until those dependencies are accepted.
+- Phase 1 ships the traits and `LocalEnv`. `watch` and `list_files` are optional methods
+  whose default returns `not_supported`; `LocalEnv` keeps that default until `notify`
+  (for `watch`) and `ignore` (for `list_files`) are dependencies, and their conformance
+  cases are skipped meanwhile.
 - A remote environment on pi-env's daemon protocol is later; the `window` and `skipped`
   contract exists for it, and the conformance suite is what it must pass.
 
@@ -254,10 +255,13 @@ The suite runs against `LocalEnv` in `tests/`, in temp directories, without the 
   (`&[u8]`, and `&str` through `as_bytes`).
 - No PowerShell support in the shell discovery beyond `shell_path`.
 
-## Pending confirmation
+## Decisions
 
-- `notify` and `ignore` as dependencies for `watch` and `list_files` in phase 1, or
-  `NotSupported` until a consumer (instructions, skills, file completion) needs them.
+- `watch` and `list_files` are optional methods returning `not_supported` until `notify` /
+  `ignore` are dependencies.
+
+## Open (minor)
+
 - `BoxFuture` methods versus `async fn` in traits with `#[trait_variant::make]`; the
   former matches `delta_agent`, the latter reads better but needs a dependency.
 - The process-group kill strategy on Unix (`setsid` per command, as upstream's

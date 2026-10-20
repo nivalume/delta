@@ -11,9 +11,10 @@ Five record kinds make up everything the harness persists: conversations, entrie
 submissions and document incarnations. Upstream brands their numeric ids at compile time
 only (`Id<"task">` is a `number` at run time), writes the records as TypeScript unions whose
 `never`-typed fields say which fields a status may carry, and stores them as JSON. delta
-keeps the JSON shapes so a storage written by pi opens in delta, and represents them as Rust
-types that carry the same invariants: newtype ids, tagged enums for the status unions,
-`Option` where upstream has `undefined`.
+keeps the record model and represents it as Rust types that carry the same invariants:
+newtype ids, tagged enums for the status unions, `Option` where upstream has `undefined`.
+The JSON is delta's own (serde-native, snake_case, `delta.*` kinds); a storage written by pi
+does not open in delta, and nothing here is shaped for it.
 
 ## Ids and sequences
 
@@ -29,8 +30,6 @@ pub struct DocumentId(pub u64);
 pub struct Seq(pub u64);
 
 pub const ROOT_CONVERSATION_ID: ConversationId = ConversationId(1);
-/// JavaScript's largest safe integer. No id or sequence above it is minted, so pi reads it back.
-pub const MAX_ID: u64 = (1 << 53) - 1;
 
 /// A freshly minted id before it has a kind. `Storage::mint_id` returns one; the Session types it.
 pub struct RawId(pub u64);
@@ -39,8 +38,9 @@ pub trait RecordId:
     Copy + Ord + Hash + Serialize + DeserializeOwned + From<RawId> + Into<u64> + sealed::Sealed {}
 ```
 
-- Ids and sequences serialize as JSON numbers. `Seq` is a separate type, so an entity id cannot
-  be passed as a document point.
+- Ids and sequences are `u64` and serialize as JSON numbers; there is no cap below the
+  type's range (and SQLite's `INTEGER`, storage.md). `Seq` is a separate type, so an entity
+  id cannot be passed as a document point.
 - One global numeric namespace for all five kinds. Ids never repeat, also across reopen, and
   scans order by id, which is creation order ([storage.md](storage.md)).
 - Upstream's `TaskId<R>` carries an erased result type. delta's `TaskId` is untyped; a
@@ -61,7 +61,7 @@ pub struct ConversationOwner { pub conversation_id: ConversationId, pub task_id:
 pub enum ConversationOwnership { Ownerless, Task(TaskId) }
 ```
 
-JSON: `{"id":1}`; `{"id":7,"parent":{"conversationId":1,"at":42},"owner":{"conversationId":1,"taskId":40}}`.
+JSON: `{"id":1}`; `{"id":7,"parent":{"conversation_id":1,"at":42},"owner":{"conversation_id":1,"task_id":40}}`.
 
 - The root conversation is id 1, ownerless, without parent; storage reserves the id.
 - `parent.at` is an entry visible in the parent; the child sees parent entries through it.
@@ -73,7 +73,7 @@ JSON: `{"id":1}`; `{"id":7,"parent":{"conversationId":1,"at":42},"owner":{"conve
 pub struct EntryRecord {
     pub id: EntryId,
     pub conversation_id: ConversationId,
-    pub kind: String,                           // `pi.*` kinds belong to built-ins by convention
+    pub kind: String,                           // `delta.*` kinds belong to built-ins by convention
     pub model: Option<Vec<delta_ai::Message>>,  // absent: contributes no model messages
     pub data: Option<Json>,
     pub head: Option<EntryId>,                  // head marker: context starts at `head`
@@ -100,9 +100,10 @@ pub struct TypedEntryDraft<D> { /* EntryDraft without `kind`, `data: D` */ }
 ```
 
 - Entries are immutable; ids are Session-global and ordered.
-- `model` holds `delta_ai::Message`, whose JSON is pi-ai's, including the
-  `SystemMessage { content: "", sections, toolsAdded, toolsRemoved }` that durable writes
-  for `pi.system` entries.
+- `model` holds `delta_ai::Message`, whose JSON keeps upstream's (pi-ai's) shape as every
+  `delta_ai` message does, including the `SystemMessage { content: "", sections,
+  toolsAdded, toolsRemoved }` written for `delta.system` entries. It is the one camelCase
+  island inside a record.
 - `head` and `edits` change later context, never storage; the derivation rules (§2.1, steps
   1–10) are context.md's.
 - `EditAction` serializes flat beside `target` (`action` tag and `messages` payload in one
@@ -185,7 +186,7 @@ pub enum TaskOutcome {
     Faulted { error: TaskOutcomeError },
 }
 pub struct TaskOutcomeError { pub message: String, pub detail: Option<Json> }
-pub enum JoinPolicy { FailFast, AllSettled }          // "failFast" | "allSettled"
+pub enum JoinPolicy { FailFast, AllSettled }          // "fail_fast" | "all_settled"
 pub enum AbortReason { Restart }
 pub enum TaskStatus { Pending, Running, Waiting, Sleeping, Completing, Terminal }
 
@@ -201,7 +202,7 @@ impl TaskState {
   it, as it refuses a `Completed` outcome without `result` (the enum already does).
 - `input`, `checkpoint` and `result` are `Json` here; built-in tasks convert them to their
   serde-tagged enums at the definition boundary (scheduler.md), user tasks work on `Json`.
-- Times are `i64` milliseconds as JS `Date.now()`; the Session stamps them.
+- Times are `i64` Unix epoch milliseconds; the Session stamps them.
 
 ## Documents
 
@@ -220,7 +221,7 @@ pub struct DocumentRecord {
 pub enum DocumentScope { Session, Conversation { conversation_id: ConversationId }, Task { task_id: TaskId } }
 pub struct ConversationPolicy { pub history: History, pub fork: Fork }
 pub enum History { Latest, Rewindable }
-pub enum Fork { AsOf, Current, Initial }       // "asOf" | "current" | "initial"
+pub enum Fork { AsOf, Current, Initial }       // "as_of" | "current" | "initial"
 pub struct DocumentCreate { pub id, pub kind, pub key, pub scope, pub policy }   // no lifetime fields
 pub struct DocumentAddress { pub kind: String, pub scope: DocumentScope, pub key: Option<String> }
 pub enum DocumentPoint { Current, At(Seq) }
@@ -230,8 +231,8 @@ pub struct StoredDocument { pub record: DocumentRecord, pub version: u32, pub va
 pub struct DocumentCopySource { pub id: DocumentId, pub at: DocumentPoint }
 ```
 
-JSON: `{"id":12,"kind":"pi.live","scope":{"kind":"conversation","conversationId":1},"history":"latest","fork":"initial","createdAt":3}`;
-a family member adds `"key":"call-7"`; retirement adds `"retiredAt":9`.
+JSON: `{"id":12,"kind":"delta.live","scope":{"kind":"conversation","conversation_id":1},"history":"latest","fork":"initial","created_at":3}`;
+a family member adds `"key":"call-7"`; retirement adds `"retired_at":9`.
 
 - A singleton is identified by kind and scope, a family member by kind, scope and key: the
   address is the logical identity, the id one incarnation of it.
@@ -268,9 +269,8 @@ pub struct DocumentQuery { pub scope: DocumentScope, pub at: DocumentPoint, pub 
 pub struct StoredEntry { pub entry: EntryRecord, pub commit_seq: Seq }
 ```
 
-Memory and SQLite do not persist `StorageWrite` itself; its serde tags
-(`"type":"document.create"`, …) stay upstream's so a JSONL backend can later write
-`main.jsonl` lines unchanged.
+Memory and SQLite do not persist `StorageWrite` itself; its serde form (`"type":
+"document_create"`, …) is what a later JSONL backend writes as its log lines.
 
 ## Errors and reports
 
@@ -281,7 +281,7 @@ pub enum StorageError {
     /// bad cursor, history the document does not keep). Fails only that read.
     #[error("{0}")] Request(String),
     #[error("storage is closed")] Closed,
-    #[error("ID space is exhausted")] IdSpaceExhausted,
+    #[error("ID space is exhausted")] IdSpaceExhausted,   // past the backend's integer range; unreachable in practice
     #[error("{0}")] Rejected(String),           // a batch the backend refuses: id ownership, document consistency, copy source
     #[error("{0}")] Corrupt(String),            // missing base, version change inside a delta tail, unreadable row
     #[error(transparent)] Sqlite(#[from] delta_chord::sqlite::SqliteError),
@@ -348,22 +348,28 @@ Messages keep upstream's wording where its tests match on them (`cannot read tab
 the first table write`, `does not retain historical content`, `has newer version`,
 `requires migration`, `already belongs to`).
 
-## Wire compatibility
+## JSON encoding
+
+Records are serde-native; nothing is shaped for another implementation.
 
 | Rule | Detail |
 | --- | --- |
-| Field names | `#[serde(rename_all = "camelCase")]` on every record |
-| Absent fields | Every `Option` is `default` and `skip_serializing_if = "Option::is_none"`; an absent key and `undefined` are the same thing. `null` is a value only inside `data`, `detail`, `input`, `checkpoint`, `result` and document values |
-| Booleans | `background` and `abortRequested` always written; `abandonOnRestart` only when `true` |
-| Numbers | Ids, sequences and timestamps are integers ≤ `MAX_ID`; floats never appear in records |
+| Field names | Rust field names, snake_case; no `rename_all` on structs |
+| Tags | Enum tags and unit variants `#[serde(rename_all = "snake_case")]` (`"status":"completing"`, `"fail_fast"`, `"as_of"`) |
+| Absent fields | Every `Option` is `default` and `skip_serializing_if = "Option::is_none"`. `null` is a value only inside `data`, `detail`, `input`, `checkpoint`, `result` and document values |
+| Booleans | `background` and `abort_requested` always written; `abandon_on_restart` only when `true` |
+| Numbers | Ids and sequences are `u64`, timestamps `i64`; floats never appear in records |
 | Unknown fields | Accepted on read; `trace` and `links` are kept explicitly, other unknown fields are dropped |
 | Key order | Not significant for readers; delta writes records in field order |
-| Messages | `delta_ai::Message` JSON (pi-ai's) |
+| Messages | `delta_ai::Message` JSON, which keeps upstream's shape (the workspace rule for messages) |
 | Ops | `delta_chord::delta::Op` tuples |
 
 ## Differences from upstream
 
-- Newtype ids and `Seq` instead of branded numbers; `RawId` marks the one untyped point.
+- Newtype ids and `Seq` over `u64` instead of branded numbers, without upstream's 2^53
+  limit; `RawId` marks the one untyped point.
+- Record JSON, kinds and tags are delta's (snake_case, `delta.*`); upstream's camelCase
+  records and `pi.*` kinds are not read.
 - Status unions are tagged enums: a `placed` write or a terminal task with memos is either
   unrepresentable or refused by `check()`, where upstream relies on `never`-typed fields.
 - `Option` instead of `undefined`; `Head::SelfRef` instead of a string sharing a field with ids.
@@ -373,9 +379,14 @@ the first table write`, `does not retain historical content`, `has newer version
   exemption rule reads the variant.
 - Errors are `thiserror` enums with `source()` chains instead of `Error` subclasses.
 
-## Pending confirmation
+## Decisions
 
-- `MAX_ID = 2^53 − 1` as a hard minting cap, for wire compatibility, rather than `u64::MAX`.
+- Ids are `u64` newtypes with no minting cap of their own (README).
+- Record JSON is serde-native snake_case; built-in kinds are `delta.*` (README); no
+  compatibility with pi's records.
+
+## Open (minor)
+
 - `RawId` plus a sealed `RecordId` for typed minting, versus a generic `mint_id::<I>()` that
   would make `Storage` non-object-safe.
 - `TaskRecord` keeps `trace`/`links` as `Json` rather than dropping them on read.

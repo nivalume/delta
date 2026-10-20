@@ -23,10 +23,10 @@ scoped this crate is [docs/research/harnesses.md](../../../../docs/research/harn
 | [harness.md](harness.md) | `harness`, `registry` | `Harness::open`, conversations, agent resolution, settings, extensions, `inspect` |
 | [inbox.md](inbox.md) | `inbox` | Submissions, request ids, steer / follow-up / write placement, turn boundaries |
 | [context.md](context.md) | `context`, `prompt` | Model context from entries, head markers and edits, positional system sections, prompt-cache stability |
-| [generation.md](generation.md) | `generation` | The `pi.generation` task: prepare, request, retry, poll, tool rounds, handover, usage |
-| [tool.md](tool.md) | `tool` | The `pi.tool` task: validation, hooks, approval, execution with output windows, results, nested calls, replay safety |
+| [generation.md](generation.md) | `generation` | The `delta.generation` task: prepare, request, retry, poll, tool rounds, handover, usage |
+| [tool.md](tool.md) | `tool` | The `delta.tool` task: validation, hooks, approval, execution with output windows, results, nested calls, replay safety |
 | [approval.md](approval.md) | `approval` | The approval seam: policy, request and decision records, timeout, later rules and modes |
-| [compaction.md](compaction.md) | `compaction` | The `pi.compaction` task: thresholds, range selection, overflow retry, stale summaries |
+| [compaction.md](compaction.md) | `compaction` | The `delta.compaction` task: thresholds, range selection, overflow retry, stale summaries |
 | [observe.md](observe.md) | `observe` | Conversation view, agent events derived from ops, task graph |
 | [env.md](env.md) | `env` | `ExecutionEnv`: file system and shell, the local implementation |
 | [tools.md](tools.md) | `tools` | `read`, `write`, `edit`, `bash`; the file mutation queue; output limits |
@@ -34,27 +34,27 @@ scoped this crate is [docs/research/harnesses.md](../../../../docs/research/harn
 ## How the pieces fit
 
 ```
-  Harness ── conversations ── submit() ──► inbox ──► run (pi.live.run)
+  Harness ── conversations ── submit() ──► inbox ──► run (delta.live.run)
      │                                                  │
   Registry (extensions: tools, sections, hooks, tasks)  │
      │                                                  ▼
-  Scheduler ── reserves tasks ──► pi.generation ──► model (delta_ai)
+  Scheduler ── reserves tasks ──► delta.generation ──► model (delta_ai)
      │                               │  owns
      │                               ▼
-     │                           pi.tool ×n ──► approval ──► env / tool body
+     │                           delta.tool ×n ──► approval ──► env / tool body
      │                                                  │
   Session (one commit line) ◄── every checkpoint, entry, document change ──┘
      │
   Storage (memory | sqlite)        Observe: view, agent events, task graph
 ```
 
-- A **submission** is admitted in one commit: the `pi.user` entry, the run marker in
-  `pi.live`, and the first `pi.generation` task.
+- A **submission** is admitted in one commit: the `delta.user` entry, the run marker in
+  `delta.live`, and the first `delta.generation` task.
 - The **scheduler** reserves runnable tasks in commits on the session line and runs their
   phase handlers off it. Every phase ends by committing the next state; a reopened storage
   reruns the current phase from its checkpoint.
-- A **generation** streams the model's answer into `pi.live` on a throttle, commits the
-  assistant entry, and either ends the run or creates the round's `pi.tool` tasks, waits
+- A **generation** streams the model's answer into `delta.live` on a throttle, commits the
+  assistant entry, and either ends the run or creates the round's `delta.tool` tasks, waits
   for them, and hands the run to the next generation.
 - Everything observable is a committed revision: documents are `delta_chord::State`s whose
   subscriptions deliver values with ops; the conversation view and agent events derive
@@ -76,7 +76,7 @@ crates/harness/
     registry.rs      # extensions
     inbox.rs
     context.rs       # model context derivation
-    prompt.rs        # sections, pi.system planning
+    prompt.rs        # sections, delta.system planning
     generation.rs
     tool.rs
     approval.rs
@@ -108,46 +108,67 @@ From spec §1, kept as stated:
    only to capture immutable state, subscribers run off it.
 7. A storage error is fatal to the open session: it publishes nothing and must be reopened.
 
-## Confirmed design decisions
+## Architecture and seams
+
+One crate, as upstream's package: decoupling comes from module layers and trait seams, not
+from crate boundaries. Each layer depends only on the layers below it.
+
+```
+surface   harness (Harness, Conversation, Submission, Settings), observe (view, events, task graph)
+agent     inbox, context, prompt, generation, tool, approval, compaction, usage,
+          registry (Extension and the hook traits)
+kernel    records, documents, storage (trait; memory, sqlite), session (actor, Tx),
+          scheduler (the TaskDefinition runtime)
+side      env (ExecutionEnv trait; local), tools (read, write, edit, bash)
+```
+
+New features plug in through these traits; none needs a kernel change:
+
+| Trait | For |
+| --- | --- |
+| `Storage` | Another backend (JSONL later) |
+| `TaskDefinition` | New durable work. The built-in tasks register through the same registry user tasks use; the scheduler has no special cases |
+| `DocDefinition` | New durable state |
+| `HarnessTool` | New tools; the built-in tools are ordinary implementations |
+| `ApprovalPolicy` | Rules engine and permission modes later |
+| `GenerationHooks`, `ToolHooks`, `CompactionHooks` | Extension behaviour; a command-hook bridge later |
+| `ModelClient` | Model access; wraps `delta_ai::Models`, tests inject a fake |
+| `ExecutionEnv` | Remote environments later |
+
+Rules:
+
+- The kernel modules (`records`, `documents`, `storage`, `session`, `scheduler`) never name
+  an agent, surface or side module. `tests/layering.rs` scans their sources and fails on a
+  `crate::` path into an upper layer.
+- Built-in tasks, documents and tools use only the public traits, so an extension can do
+  anything a built-in can.
+- No module-level mutable state. The clock, models, environment builder and approval policy
+  come through `HarnessOptions`.
+- Each module has its own error enum; errors convert only at layer boundaries.
+
+## Design decisions
 
 | Question | Decision |
 | --- | --- |
 | Kernel | pi-durable's model (storage-first commits, task state machines, documents, inbox, ownership tree), not pi-coding-agent's in-memory loop |
+| Compatibility with pi | None for the harness's own records and storage: kinds, record JSON and the SQLite schema are delta's. Messages inside entries are `delta_ai` types, which keep upstream's shape |
+| Namespace | Built-in entry, document and task kinds start with `delta.` (`delta.user`, `delta.assistant`, `delta.tool-result`, `delta.system`, `delta.reset`, `delta.compaction`, `delta.approval`; documents `delta.agent`, `delta.provider`, `delta.live`, `delta.inbox`, `delta.usage`, `delta.approvals`; tasks `delta.generation`, `delta.tool`, `delta.compaction`, each at version 1) |
 | Phase 1 scope | Kernel, built-in tools and a local execution env. Deferred: code mode, remote env, JSONL storage, telemetry, Durable Object hosting, images |
-| Approval | A seam with a minimal implementation (see [approval.md](approval.md)); rules and permission modes later |
-| Package name | crates.io package `delta-harness`, library `delta_harness`; not published until phase 1 is complete |
-
-## Proposed design decisions
-
-| Question | Proposal |
-| --- | --- |
-| The session line | One tokio task owns the session state. `commit` sends a closure that receives `&mut Tx`; a document that is not loaded is read through `tx`, so upstream's "a read inside a commit never resolves" footgun cannot be written |
-| Documents | `tx.doc::<D>()` returns a draft handle from `delta_chord::delta::Change`; the prepared ops become `base` or `delta` writes under `checkpoint_when`; committed revisions publish through `delta_chord::State` subscriptions (pull-based, values with ops) |
-| Tasks | A `TaskDefinition` trait: `name`, `version`, `run(phase)`, `abort`, `migrate`; built-in checkpoints are serde-tagged enums, user tasks work on `Json`. Hand-over after a reload is detected by a registry generation counter, not object identity |
-| Ids | Newtypes over `u64`, serialized as JSON numbers; `Seq` likewise |
-| Wire compatibility | Entry kinds, document kinds, record JSON shapes and the SQLite schema (v2, optional prefix) stay as upstream's, so a storage written by pi opens in delta |
-| Hooks | Per-task hook traits with default methods, as `delta_agent::AgentHooks`: `GenerationHooks` (`before_request`, `after_response`, `on_yield`, `after_tools`), `ToolHooks` (`before_tool`, `after_tool`), `CompactionHooks` (`before_compact`). [harness.md](harness.md) maps them onto the Claude Code / Codex names so a command-hook bridge later is mechanical |
-| Phase commits | A phase handler returns `Next`, a closure the scheduler runs on the session line, so the phase's last writes, its next state and the step decision are one commit ([scheduler.md](scheduler.md)) |
-| Cancellation | `delta_chord::context::Context` everywhere upstream passes a chord `Context` |
+| The session line | One tokio task owns the session state. `commit` sends a closure that receives `&mut Tx`; a document that is not loaded is read through `tx`, so a read inside a commit cannot hang |
+| Documents | `tx.doc::<D>()` borrows the `Tx` and returns a draft over `delta_chord::delta::Change` (one document edited at a time); prepared ops become `base` or `delta` writes under `checkpoint_when`; observers get a read-only `DocumentState` over a `delta_chord::State` |
+| No-op batches and overflow | chord's rules: a change that ends equal to its base writes and publishes nothing; a subscriber that falls behind gets merged batches (`r` past `MAX_OPS`) |
+| Tasks | `TaskDefinition` trait (`name`, `version`, `initial`, `run`, `abort`, `migrate`); built-in checkpoints are serde-tagged enums, user tasks may use `Json`. A phase returns `Next`, a closure run on the session line, so its last writes, its next state and the step decision are one commit. A repeated checkpoint is detected by `Json` equality |
+| `close()` | Cancel every invocation, join them, abort stragglers after `close_grace` (30 s), write them back as `pending` |
+| Approval | codex-rs's flow made durable ([approval.md](approval.md)): the request is committed, the tool phase awaits an in-memory waiter keyed by approval id, `Conversation::decide` commits the decision and notifies the waiter; a rerun reads a committed decision first; `ReviewDecision { Approved, ApprovedForSession, Denied, TimedOut, Abort }`; session grants skip later prompts with the same approval key |
+| Approval visibility | A `delta.approvals` conversation document in the view, an `approval_update` agent event, denials reported as `blocked` |
+| Hooks | Per-task traits with default methods, as `delta_agent::AgentHooks`: `GenerationHooks` (`before_request`, `after_response`, `on_yield`, `after_tools`), `ToolHooks` (`before_tool`, `after_tool`), `CompactionHooks` (`before_compact`); [harness.md](harness.md) maps them to the Claude Code / Codex names |
+| Ids | Newtypes over `u64` |
+| `delta_ai` additions | `is_context_overflow`, `is_retryable_assistant_error`, `retry_delay`, `to_tool_declaration`, as upstream has them in pi-ai |
+| SQLite types | `delta_chord::sqlite` re-exports `rusqlite` |
+| Env `watch` and `list_files` | Optional methods that return `not_supported` until `notify` / `ignore` are dependencies |
+| Cancellation | `delta_chord::context::Context` wherever upstream passes a chord `Context` |
 | Tests | Never the network: fake models replay recorded stream events; storage in memory or in SQLite files under a temp dir |
-
-## Open questions across the notes
-
-Collected from the module notes' "Pending confirmation" sections; each note has the detail.
-
-| # | Question | Proposal | Notes |
-| --- | --- | --- | --- |
-| 1 | How an approval answer wakes the parked tool task | A delta scheduler primitive `Tx::wake_task(id)` (the spec already tolerates early wakes) | approval.md, scheduler.md |
-| 2 | `pi.tool` version with the new `approval` phase | Stay at version 2: pi storages open in delta; a delta storage with a task parked in `approval` faults in pi | tool.md |
-| 3 | Approval visibility | A `delta.approvals` conversation document mounted in the view, an `approval_update` agent event, denial as `blocked` with an "approval denied:" message | approval.md, observe.md |
-| 4 | Structural edits that end equal to the base | No batch and no publication (chord's rule); the spec publishes them | session.md |
-| 5 | Watch overflow | chord's merge (concatenated ops, `r` past `MAX_OPS`); the spec replaces the backlog with `r` | session.md, observe.md |
-| 6 | Document drafts | `tx.doc::<D>()` borrows the `Tx`: one document is edited at a time | session.md |
-| 7 | `close()` | Cancel every invocation, join them, abort stragglers after `close_grace` (30 s), write them back as `pending` | scheduler.md |
-| 8 | Retry and overflow helpers missing from `delta_ai` (`is_context_overflow`, `is_retryable_assistant_error`, `retry_delay`, `to_tool_declaration`) | Add them to `delta_ai`, as upstream has them in pi-ai | generation.md, compaction.md |
-| 9 | `rusqlite` types for SQLite storage | Re-export `rusqlite` from `delta_chord::sqlite` | storage.md |
-| 10 | Id range | Cap minting at 2^53 − 1 so pi can read every id | records.md |
-| 11 | `watch` and `list_files` in the env | Optional methods returning `not_supported` until `notify` / `ignore` are accepted as dependencies | env.md |
+| Package name | crates.io package `delta-harness`, library `delta_harness`; not published until phase 1 is complete |
 
 ## Later
 

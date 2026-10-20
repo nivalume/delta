@@ -24,6 +24,7 @@ pub struct HarnessOptions {
     pub registry: Registry,                         // must hold the built-in tasks
     pub settings: SettingsSource,                   // HarnessSettings, or a closure; read at each resolution
     pub env: Option<Arc<dyn EnvBuilder>>,           // builds a conversation's ExecutionEnv (env.md); never on the line
+    pub approval: Arc<dyn ApprovalPolicy>,          // approval.md; default AllowAll
     pub conversation_created: Option<Arc<dyn Fn(&mut Tx, &ConversationRecord) -> Result<(), TxError> + Send + Sync>>,
     pub clock: Arc<dyn Clock>,                      // now() -> i64 epoch ms; default system time
     pub on_wake: Option<Arc<dyn Fn(Wake) + Send + Sync>>,
@@ -49,6 +50,8 @@ impl Harness {
     pub async fn wait_for_task(&self, id: TaskId, ctx: &Context) -> Result<SettledTask, HarnessError>;
     pub async fn wait_for_idle(&self, ctx: &Context) -> Result<(), HarnessError>;
     pub async fn usage(&self, ctx: &Context) -> Result<UsageState, HarnessError>;
+    pub async fn decide(&self, id: ApprovalId, decision: ReviewDecision, ctx: &Context) -> Result<(), ApprovalError>;   // approval.md
+    pub async fn pending_approvals(&self, ctx: &Context) -> Result<Vec<(ConversationId, ApprovalRequest)>, HarnessError>;
     pub async fn task_graph(&self, ctx: &Context) -> ..;                       // observe.md
     pub fn session(&self) -> &Session;                                         // Harness derefs to Session
     pub async fn close(&self, ctx: &Context) -> Result<(), CloseError>;
@@ -57,8 +60,11 @@ impl Harness {
 
 - `Harness` is a cheap handle (`Clone`, `Arc` inside); `Deref<Target = Session>` gives the
   generic document operations.
-- `open` runs reconciliation ([scheduler.md](scheduler.md)), rejects a registry snapshot
-  that lacks a built-in task, and starts paused: nothing runs until `resume()` or a
+- `open` inserts the agent layer's session services (`PendingApprovals`, the kept context
+  ranges) into `SessionOptions.services`, hands the scheduler the registry as its
+  `TaskCatalog` and the agent layer's cleanup hook, runs reconciliation
+  ([scheduler.md](scheduler.md)), rejects a registry snapshot that lacks a built-in task,
+  and starts paused: nothing runs until `resume()` or a
   progress-asking call. Install extensions before open so recovered work resumes at once;
   an install after open also unblocks it.
 - `root` creates conversation `1` lazily in one commit (ownerless, creation hook, `agent`
@@ -74,9 +80,10 @@ impl Harness {
 **Creation hook.** Every commit that creates or forks a conversation, through the
 conveniences or raw `tx.create_conversation()` / `tx.fork_conversation()` (inside a tool
 commit, say), runs the built-in hook inside those calls, before they return: empty
-`pi.live`, `pi.inbox`, `pi.usage`; `pi.provider` with a fresh UUIDv7; and `pi.agent`:
+`delta.live`, `delta.inbox`, `delta.usage`; `delta.provider` with a fresh UUIDv7; and
+`delta.agent` (`delta.approvals` is created by the first approval request):
 
-| Path | `pi.agent` |
+| Path | `delta.agent` |
 | --- | --- |
 | Fork | The `as_of` copy of the parent's (documents.md, fork policy) |
 | New task-owned conversation | A copy of the owner task's conversation's stored document, every field |
@@ -105,6 +112,7 @@ impl Conversation {
     pub async fn reset(&self, handoff: Option<String>, ctx: &Context) -> Result<(), HarnessError>;
     pub async fn abort(&self, options: AbortOptions, ctx: &Context) -> Result<(), HarnessError>;   // { background: bool }
     pub async fn wait_for_idle(&self, ctx: &Context) -> Result<(), HarnessError>;
+    pub async fn decide(&self, id: ApprovalId, decision: ReviewDecision, ctx: &Context) -> Result<(), ApprovalError>;   // approval.md
     pub async fn view(&self, ctx: &Context) -> ..;      // observe.md: State<ConversationView> and watch
 }
 
@@ -119,9 +127,9 @@ impl Submission {
 
 - A `Conversation::commit` is a session commit bound to the conversation: `tx.create_task`
   defaults to it; `entries` binds the query to it and paginates fork-aware history.
-- `compact` admits a manual, conversation-owned, non-background `pi.compaction` task and
+- `compact` admits a manual, conversation-owned, non-background `delta.compaction` task and
   returns its id; it does not take run control ([compaction.md](compaction.md)).
-- `reset` admits a write submission of a `pi.reset` entry with `head: "self"` and the
+- `reset` admits a write submission of a `delta.reset` entry with `head: "self"` and the
   handoff as a user message; placement follows [inbox.md](inbox.md) and may happen later.
 - `abort` withdraws queued inputs, marks the tasks ordinary traversal selects, signals them,
   and returns once the scope is ordinarily idle; `background: true` crosses boundaries.
@@ -145,6 +153,7 @@ pub struct HarnessSettings {                       // every field optional; read
     pub after_failed_run: Option<AfterFailedRun>,
     pub restart_limit: Option<Option<u32>>,       // Some(None): never park
     pub close_grace: Option<Duration>,
+    pub approval: Option<PartialApprovalSettings>,
 }
 
 pub struct Settings {                               // resolved: defaults filled, object fields merged key by key
@@ -161,6 +170,7 @@ pub struct Settings {                               // resolved: defaults filled
     pub after_failed_run: AfterFailedRun,          // Keep
     pub restart_limit: Option<u32>,                // Some(5)
     pub close_grace: Duration,                     // 30 s
+    pub approval: ApprovalSettings,                // timeout 15 min (approval.md)
 }
 ```
 
@@ -174,7 +184,7 @@ preferences without a session write. Who resolves what, and when (spec §7.1):
 | Reader | Resolves | When |
 | --- | --- | --- |
 | Generation `prepare` | Agent, stream options, compaction thresholds for the model | Once per request; model, options, offered tools fixed in the `request` checkpoint |
-| Every task phase | Extension selection for hooks; `rt.agent()` | At most once per phase, at the first hook dispatch or `agent()` call, from the phase snapshot and committed `pi.agent` |
+| Every task phase | Extension selection for hooks; `rt.agent()` | At most once per phase, at the first hook dispatch or `agent()` call, from the phase snapshot and committed `delta.agent` |
 | Tool task | The implementation of a call | At `call` and `execute`, by name among the phase agent's `tools`; none: `tool_unavailable` |
 | Generation, round start | Tool execution mode | Once per round |
 | Generation, compaction | Retry policy | At each attempt's classification |
@@ -186,7 +196,7 @@ preferences without a session write. Who resolves what, and when (spec §7.1):
 ## The agent document and resolution
 
 ```rust
-pub struct AgentState {                            // stored `pi.agent`; names, never code
+pub struct AgentState {                            // stored `delta.agent`; names, never code
     pub model: Option<ModelRef>,                   // { provider, model_id }
     pub thinking_level: Option<ModelThinkingLevel>,
     pub extensions: Option<ExtensionSelection>,    // Exactly(Vec<String>) | Edit { add, remove }
@@ -216,11 +226,11 @@ pub struct Agent {                                 // resolved; `Arc<Agent>` per
 ```
 
 `configure` replaces whole fields (`Set`), clears (`Clear`) or leaves (`Keep`); extension and
-tool objects given by a host stand for their names. `pi.agent` is rewindable with fork
+tool objects given by a host stand for their names. `delta.agent` is rewindable with fork
 policy `as_of`, complete base on every change, `initial = {}`. Nothing checks that a stored
 name is installed: resolution skips unknown names and the name takes effect when installed
 again. A change neither starts generation nor appends a system entry; the next preparation
-does ([context.md](context.md)). `pi.provider` holds the provider-facing `session_id`
+does ([context.md](context.md)). `delta.provider` holds the provider-facing `session_id`
 (UUIDv7, never copied by a fork, created on the line for a legacy conversation before its
 first request).
 
@@ -267,7 +277,7 @@ pub struct PromptInput<'a> { pub conversation: ConversationId, pub agent: &'a Ag
                              pub shown: &'a IndexMap<String, String>, pub read: &'a dyn DocumentReader }
 
 #[derive(Clone)]
-pub struct Registry { /* Arc<RwLock<Inner>>, tokio::sync::watch<u64> generation */ }
+pub struct Registry { /* Arc<RwLock<Inner>>, tokio::sync::watch<u64> generation */ }   // the scheduler's TaskCatalog
 impl Registry {
     pub fn new() -> Registry;                                       // holds the built-in tasks
     pub fn install(&self, extension: Extension) -> Result<(), RegistryError>;   // replace in place by name; validates first
@@ -309,11 +319,29 @@ Rules (§7.1, §7.5):
 
 ## Hooks (§7.2)
 
-One trait per built-in task's hook set, every method with a default that does nothing, as
-`delta_agent::AgentHooks`; a registration is `hook::<GenerationHooks>(Arc<dyn GenerationHooks>)`
-stored as `(task name, Arc<dyn Any>)` and downcast at dispatch by the task's `Hooks` type.
+One trait per built-in task's hook set (decided), every method with a default that does
+nothing, as `delta_agent::AgentHooks`; a registration is
+`hook::<GenerationHooks>(Arc<dyn GenerationHooks>)` stored as `(task name, Arc<dyn Any>)`
+and downcast at dispatch by the task's `Hooks` type. Hooks are an agent-layer concept: the
+kernel's `TaskDefinition` has no hook type, and a task declares one with `TaskHooks`.
 
 ```rust
+/// Beside `TaskDefinition` (scheduler.md): the hook trait a task dispatches to.
+pub trait TaskHooks: TaskDefinition { type Hooks: ?Sized + Send + Sync; }
+
+/// What agent-layer tasks reach through their runtime, built from `rt.services()` and the
+/// phase's catalog snapshot (the registry snapshot).
+pub trait AgentRuntime {
+    fn registry(&self) -> &RegistrySnapshot;
+    async fn agent(&self, ctx: &Context) -> Result<Arc<Agent>, HarnessError>;   // resolved once per phase
+    fn settings(&self) -> Settings;                                             // resolved at each call
+    fn models(&self) -> Models;                                                 // HarnessOptions.models at each call
+    async fn env(&self, ctx: &Context) -> Result<Option<Arc<dyn ExecutionEnv>>, HarnessError>;
+    async fn context_view(&self, conversation: ConversationId, at: Option<EntryId>, ctx: &Context) -> Result<ContextView, HarnessError>;
+}
+impl<T: TaskDefinition> AgentRuntime for TaskRuntime<T> { .. }
+impl<T: TaskHooks> TaskRuntime<T> { pub fn hooks(&self) -> &HookRunner<T::Hooks>; }   // in `registry`
+
 pub trait GenerationHooks: Send + Sync {
     fn before_request<'a>(&'a self, request: &'a RequestMessages, api: &'a HookApi, ctx: &'a Context) -> BoxFuture<'a, HookResult<Vec<Message>>> { none() }
     fn after_response<'a>(&'a self, message: &'a AssistantMessage, api: &'a HookApi, ctx: &'a Context) -> BoxFuture<'a, HookResult<()>> { none() }
@@ -395,11 +423,18 @@ snapshot immutability, and handover after reinstall.
 - The surface returns `Result`s with typed errors (`HarnessError`, `SubmitError` with
   `ConversationBusy`, `Closed`, `NotFound`) instead of thrown `Error`s.
 
-## Pending confirmation
+## Decisions
 
-- `Change<T>` for `AgentChange`, and keeping `AgentState`'s JSON exactly as upstream (wire
-  compatibility of `pi.agent`). Position: adopt both.
+- Hooks are per-task traits with default methods: `GenerationHooks`, `ToolHooks`,
+  `CompactionHooks`. The Claude Code / Codex columns of the hook table are informative
+  until the bridge lands.
+- `delta.agent` and the other documents written here use delta's snake_case JSON; nothing
+  is kept for pi.
+- The approval policy comes through `HarnessOptions.approval`; `decide` is on both
+  `Harness` and `Conversation` ([approval.md](approval.md)).
+
+## Open (minor)
+
+- `Change<T>` (`Keep | Clear | Set`) for `AgentChange`. Position: adopt.
 - Tool metadata through `extra() -> Option<&dyn Any>` rather than a generic registry.
   Position: adopt; a generic parameter would spread through every task and hook type.
-- The Codex column of the hook table is a mapping onto Codex's hook event names for the
-  events it supports; the bridge is deferred, so the column is informative only.

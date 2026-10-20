@@ -22,7 +22,7 @@ conversation id and `snapshot_as_of` cannot be called on a `latest` document.
 
 ```rust
 pub trait DocDefinition: Send + Sync + 'static {
-    /// Stable persisted kind; `pi.*` belongs to built-ins by convention.
+    /// Stable persisted kind; `delta.*` belongs to the crate's own definitions by convention.
     const KIND: &'static str;
     /// Positive. Versions belong to stored bases and deltas.
     const VERSION: u32;
@@ -183,7 +183,7 @@ persisted in its record:
 
 | `fork` | child instance | source |
 | --- | --- | --- |
-| `asOf` | copy of the value at `E`'s commit | `At(commit_seq(E))` on the ancestor conversation that owns `E` |
+| `as_of` | copy of the value at `E`'s commit | `At(commit_seq(E))` on the ancestor conversation that owns `E` |
 | `current` | copy of the committed value when the fork commit runs | `Current` on `A` |
 | `initial` | none; `initial()` on first access in `B` | — |
 
@@ -192,36 +192,39 @@ persisted in its record:
 - Task documents and tasks are never copied; session documents are shared and not rewindable.
 - Document state at `E` is the final state of the commit that wrote `E`; different states
   need different commits.
-- One fork may not select two sources for one child address (an `asOf` instance on the
+- One fork may not select two sources for one child address (an `as_of` instance on the
   ancestor and a `current` one on `A`): `TxError::Fork`.
 - The fork transaction may write neither a `fork: current` document of `A` nor a selected
   source incarnation: a copy has one unambiguous committed source.
 
 Selection and staging run in the Session (session.md, "Forks").
 
-## Built-in documents
+## The agent layer's documents
 
-Declared here so their semantics are in one place; each is specified in its own note.
+The agent layer defines its documents with this trait, as an extension would; the kernel
+has no special case for any of them. They are listed here so their semantics are in one
+place; each is specified in its own note.
 
 | Kind | Scope | History | Fork | `checkpoint_when` | Note |
 | --- | --- | --- | --- | --- | --- |
-| `pi.live` | conversation | latest | initial | nothing runs: no generation and no running tool slot | generation.md, tool.md |
-| `pi.inbox` | conversation | latest | initial | `items` is empty | inbox.md |
-| `pi.agent` | conversation | rewindable | asOf | always | harness.md |
-| `pi.provider` | conversation | latest | initial | always | generation.md |
-| `pi.usage` | conversation | latest | initial | always | generation.md |
-| `pi.tool.nested-call` | task, family (seed `null`) | — | — | never | tool.md |
-| `pi.codemode.run` | task | — | — | — | deferred with code mode |
+| `delta.live` | conversation | latest | initial | nothing runs: no generation and no running tool slot | generation.md, tool.md |
+| `delta.inbox` | conversation | latest | initial | `items` is empty | inbox.md |
+| `delta.agent` | conversation | rewindable | as_of | always | harness.md |
+| `delta.provider` | conversation | latest | initial | always | generation.md |
+| `delta.usage` | conversation | latest | initial | always | generation.md |
+| `delta.approvals` | conversation | latest | initial | `requests` is empty | approval.md |
+| `delta.tool.nested-call` | task, family (seed `null`) | — | — | never | tool.md |
+| `delta.codemode.run` | task | — | — | — | deferred with code mode |
 
-All are version 1. `pi.live` is the one high-churn document: its rule keeps every base small
-and bounds a delta chain to one generation or one round of tools.
+All are version 1. `delta.live` is the one high-churn document: its rule keeps every base
+small and bounds a delta chain to one generation or one round of tools.
 
 ## Example
 
 ```rust
 pub struct Inbox;
 impl DocDefinition for Inbox {
-    const KIND: &'static str = "pi.inbox";
+    const KIND: &'static str = "delta.inbox";
     const VERSION: u32 = 1;
     type Scope = ConversationScope;
     type Seed = ();
@@ -255,7 +258,14 @@ the document and yields a diffed batch.
   result is still refused.
 - `migrate` returns `Result` instead of throwing; `Unsupported` replaces "no `migrate`".
 
-## Pending confirmation
+## Decisions
+
+- One document is edited at a time through `Doc<'tx, D>`, which borrows the `Tx`
+  ([session.md](session.md)).
+- Observers get a read-only `DocumentState` over the incarnation's `delta_chord::State`.
+- The crate's own kinds start with `delta.` and are version 1 (README).
+
+## Open (minor)
 
 - Associated-type scope and marker-type history, versus one trait with runtime `Semantics`
   only (fewer generics; `snapshot_as_of` on a `latest` document becomes a runtime error).

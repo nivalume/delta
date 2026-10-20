@@ -13,8 +13,9 @@ creations, changes, copies and retirements. Storage makes the batch atomic, stam
 sequence, keeps one id namespace, materializes documents from a base and its delta tail, and
 answers keyed lookups and cursor scans in id order. Upstream defines this as an async
 interface with a reference implementation (memory) and two persistent ones (SQLite, JSONL)
-checked by one conformance suite. delta keeps the contract and the SQLite schema, so a
-database written by pi opens in delta, and implements memory and SQLite in phase 1.
+checked by one conformance suite. delta keeps the contract, defines its own SQLite schema
+(version 1, below; a pi database does not open in delta) and implements memory and SQLite
+in phase 1.
 
 ## `Storage`
 
@@ -153,7 +154,9 @@ along the chain: `upper = min(upper, parent.at)`.
 
 `mint_id` returns `next_id` and increments it in memory; `commit` persists
 `max(stored next_id, highest id in the batch + 1)`. Minted but uncommitted ids are lost on
-reopen; nothing stored references them. Minting at `MAX_ID` fails with `IdSpaceExhausted`.
+reopen; nothing stored references them. `next_id` never wraps: minting past the backend's
+integer range (`u64::MAX` in memory, `i64::MAX` in SQLite) fails with `IdSpaceExhausted`,
+which no real workload reaches.
 
 ## Failures (§10.1, storage side)
 
@@ -189,13 +192,15 @@ impl SqliteStorage {
     pub async fn open(path: impl AsRef<Path>, options: SqliteOptions) -> Result<SqliteStorage, StorageError>;
     pub async fn open_database(db: Database, prefix: Option<String>) -> Result<SqliteStorage, StorageError>;
 }
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 pub fn migrations(schema: &Schema) -> Vec<Migration>;        // the DDL below, rendered for one prefix
 ```
 
 - Opens through `delta_chord::sqlite::Database` (WAL, `synchronous = NORMAL`, busy timeout),
-  runs `apply_migrations(db, &migrations, "{prefix}durable_schema")`, reads `next_id` from the
+  runs `apply_migrations(db, &migrations, "{prefix}schema")`, reads `next_id` from the
   metadata row. A failed open closes the database and returns the first error.
+- `delta_chord::sqlite` re-exports `rusqlite`, so closures name `ToSql`, `FromSql` and
+  `params!` through it; the harness has no direct `rusqlite` dependency.
 - `prefix` passes `validate_schema_prefix`; every table and index name is `{prefix}{name}`.
   Data is not moved when the prefix changes.
 - One Session commit is one `BEGIN IMMEDIATE` transaction: read metadata, check ids, check
@@ -205,41 +210,56 @@ pub fn migrations(schema: &Schema) -> Vec<Migration>;        // the DDL below, r
   replace the base between them.
 - `close` waits for multi-query reads underway, then `Database::close` (checkpoint and close).
 
-### Schema (version 1, verbatim; `{t.x}` and `{i.x}` are the prefixed names)
+### Schema (version 1; `{t.x}` and `{i.x}` are the prefixed names)
+
+delta's own schema. Ids, sequences and times are `INTEGER`; kinds, keys and request ids are
+plain `TEXT`; every record keeps its JSON in `record`, and the other columns are the
+indexed or joined fields copied out of it, so reads decode `record` alone.
 
 ```sql
-CREATE TABLE {t.durable_metadata} (
+CREATE TABLE {t.metadata} (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    next_id TEXT NOT NULL,
-    next_seq INTEGER NOT NULL
+    next_id INTEGER NOT NULL CHECK (next_id >= 2),
+    next_seq INTEGER NOT NULL CHECK (next_seq >= 1)
 ) STRICT;
-INSERT INTO {t.durable_metadata} (singleton, next_id, next_seq) VALUES (1, '2', 1);
+INSERT INTO {t.metadata} (singleton, next_id, next_seq) VALUES (1, 2, 1);
+
+-- One global id namespace: every created id, with the table that owns it.
 CREATE TABLE {t.record_ids} (
     id INTEGER PRIMARY KEY,
-    record_type TEXT NOT NULL CHECK (record_type IN ('conversation', 'entry', 'task', 'submission', 'document'))
+    record_type TEXT NOT NULL
+        CHECK (record_type IN ('conversation', 'entry', 'task', 'submission', 'document'))
 ) STRICT;
+
 CREATE TABLE {t.conversations} (
     id INTEGER PRIMARY KEY,
+    parent_id INTEGER,                  -- parent.conversation_id; NULL without a parent
+    parent_at INTEGER,                  -- parent.at
     owner_conversation_id INTEGER,
     owner_task_id INTEGER,
-    record TEXT NOT NULL CHECK (json_valid(record))
+    record TEXT NOT NULL CHECK (json_valid(record)),
+    CHECK ((parent_id IS NULL) = (parent_at IS NULL)),
+    CHECK ((owner_conversation_id IS NULL) = (owner_task_id IS NULL))
 ) STRICT;
 CREATE INDEX {i.conversations_by_owner_conversation} ON {t.conversations} (owner_conversation_id, id);
 CREATE INDEX {i.conversations_by_owner_task} ON {t.conversations} (owner_task_id, id);
+
 CREATE TABLE {t.entries} (
     id INTEGER PRIMARY KEY,
     conversation_id INTEGER NOT NULL,
-    head INTEGER,
+    head INTEGER,                       -- NULL unless the entry is a head marker
     commit_seq INTEGER NOT NULL,
     record TEXT NOT NULL CHECK (json_valid(record))
 ) STRICT;
-CREATE INDEX {i.entries_by_conversation} ON {t.entries} (conversation_id, id DESC);
-CREATE INDEX {i.entry_heads_by_conversation} ON {t.entries} (conversation_id, id DESC) WHERE head IS NOT NULL;
+CREATE INDEX {i.entries_by_conversation} ON {t.entries} (conversation_id, id);
+CREATE INDEX {i.entry_heads_by_conversation} ON {t.entries} (conversation_id, id) WHERE head IS NOT NULL;
+
 CREATE TABLE {t.tasks} (
     id INTEGER PRIMARY KEY,
     conversation_id INTEGER NOT NULL,
     kind TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'waiting', 'completing', 'terminal')),
+    status TEXT NOT NULL
+        CHECK (status IN ('pending', 'running', 'waiting', 'sleeping', 'completing', 'terminal')),
     abort_requested INTEGER NOT NULL CHECK (abort_requested IN (0, 1)),
     background INTEGER NOT NULL CHECK (background IN (0, 1)),
     record TEXT NOT NULL CHECK (json_valid(record))
@@ -249,6 +269,7 @@ CREATE INDEX {i.tasks_by_conversation} ON {t.tasks} (conversation_id, id);
 CREATE INDEX {i.tasks_by_kind} ON {t.tasks} (kind, id);
 CREATE INDEX {i.tasks_by_abort_requested} ON {t.tasks} (abort_requested, id);
 CREATE INDEX {i.tasks_by_background} ON {t.tasks} (background, id);
+
 CREATE TABLE {t.submissions} (
     id INTEGER PRIMARY KEY,
     conversation_id INTEGER NOT NULL,
@@ -256,56 +277,59 @@ CREATE TABLE {t.submissions} (
     status TEXT NOT NULL CHECK (status IN ('queued', 'placed', 'done', 'unanswered')),
     record TEXT NOT NULL CHECK (json_valid(record))
 ) STRICT;
-CREATE INDEX {i.submissions_by_request} ON {t.submissions} (conversation_id, request_id);
+CREATE UNIQUE INDEX {i.submissions_by_request}
+    ON {t.submissions} (conversation_id, request_id) WHERE request_id IS NOT NULL;
 CREATE INDEX {i.submissions_by_conversation} ON {t.submissions} (conversation_id, id);
 CREATE INDEX {i.submissions_by_status} ON {t.submissions} (status, id);
+
 CREATE TABLE {t.documents} (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,
-    family INTEGER NOT NULL CHECK (family IN (0, 1)),
-    key_value TEXT NOT NULL,
+    key TEXT,                           -- family member key; NULL for a singleton
     scope_kind TEXT NOT NULL CHECK (scope_kind IN ('session', 'conversation', 'task')),
-    owner_id INTEGER NOT NULL,
+    owner_id INTEGER NOT NULL,          -- 0 for session scope
     created_at INTEGER NOT NULL,
     retired_at INTEGER,
-    record TEXT NOT NULL CHECK (json_valid(record))
+    record TEXT NOT NULL CHECK (json_valid(record)),
+    CHECK (retired_at IS NULL OR retired_at >= created_at)
 ) STRICT;
 CREATE INDEX {i.documents_by_address}
-    ON {t.documents} (kind, scope_kind, owner_id, family, key_value, created_at DESC, retired_at);
+    ON {t.documents} (kind, scope_kind, owner_id, key, created_at);
 CREATE INDEX {i.documents_by_scope} ON {t.documents} (scope_kind, owner_id, id);
 CREATE INDEX {i.documents_by_scope_kind} ON {t.documents} (scope_kind, owner_id, kind, id);
+
 CREATE TABLE {t.document_revisions} (
     document_id INTEGER NOT NULL,
     seq INTEGER NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('base', 'delta')),
-    version INTEGER NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
     content TEXT NOT NULL CHECK (json_valid(content)),
     PRIMARY KEY (document_id, seq)
-) STRICT;
-CREATE INDEX {i.document_revisions_by_kind} ON {t.document_revisions} (document_id, kind, seq DESC);
+) STRICT, WITHOUT ROWID;
+CREATE INDEX {i.document_bases} ON {t.document_revisions} (document_id, seq) WHERE kind = 'base';
 ```
 
-Version 2 rebuilds `tasks` to admit `sleeping` (SQLite cannot alter a CHECK): create
-`{t.tasks}_v2` with `status IN ('pending', 'running', 'waiting', 'sleeping', 'completing',
-'terminal')` and the same other columns, `INSERT INTO {t.tasks}_v2 (...) SELECT ... FROM
-{t.tasks}`, `DROP TABLE {t.tasks}`, `ALTER TABLE {t.tasks}_v2 RENAME TO {t.tasks}`, then
-recreate the five task indexes. The schema metadata table is chord's `{prefix}durable_schema`
-(`singleton`, `version`); a database at a later version is refused with `NewerSchema`.
+- Address lookups match the key with `key IS ?` (SQLite uses the index for `IS`), so a
+  singleton (`NULL`) and a family member keyed `""` are different addresses without a
+  separate `family` column. At most one current incarnation per address is enforced by
+  commit rule 3, not by an index (`UNIQUE` treats `NULL`s as distinct).
+- `document_bases` serves "newest base at or before `at`"; the delta tail is the primary
+  key range after it.
+- The schema version lives in chord's `{prefix}schema` table (`singleton`, `version`); a
+  database at a later version is refused with `NewerSchema`. Later versions append
+  migrations to `migrations()`; version 1 is the first and has no predecessor.
 
 ### Column encoding
 
 | Column | Content |
 | --- | --- |
 | `record` | the record's JSON (records.md shapes) |
-| `kind` (tasks, documents), `key_value`, `request_id` | the string **JSON-encoded** (`"\"pi.live\""`), so lone surrogates survive bindings that replace them; a singleton's `key_value` is `"\"\""`. Query parameters for these columns are encoded the same way |
-| `family` | 1 when `key` is present |
+| `kind`, `key`, `request_id` | plain text, bound as parameters; Rust strings are valid UTF-8, so nothing is escaped or encoded |
 | `scope_kind`, `owner_id` | `session`/0, `conversation`/conversation id, `task`/task id |
-| `next_id` | decimal text (upstream: `node:sqlite` refuses integers outside the safe range) |
+| ids, `seq`, `commit_seq`, `created_at`, `retired_at`, `next_id`, `next_seq` | `INTEGER`; a `u64` is written as `i64` through a checked conversion (a value past `i64::MAX` is never minted, see "Id minting") |
 | `content` | base: the value's JSON; delta: the op batch's JSON (chord tuples) |
-| `head`, `owner_*`, `retired_at`, `request_id` | `NULL` when absent |
+| `head`, `parent_*`, `owner_*`, `retired_at`, `key`, `request_id` | `NULL` when absent |
 | `status`, `record_type`, revision `kind` | plain text |
-
-Integers are `i64`; ids above `MAX_ID` are never written.
 
 ## JSONL
 
@@ -330,18 +354,21 @@ directory, as upstream's `createStorageConformance`:
 | 9 | scans tables in either ID order and continues a cursor in its order | `scan_orders_and_cursors` | the other order with a cursor is `Request` |
 | 10 | replaces complete task records and pages filtered task scans | `task_replacement_and_filters` | |
 | 11 | stores owners and scans waiting and completing tasks by status | `task_owner_and_status_scans` | |
-| 12 | stores and scans sleeping tasks by status | `sleeping_tasks` | schema v2 |
+| 12 | stores and scans sleeping tasks by status | `sleeping_tasks` | `sleeping` is in the v1 status CHECK |
 | 13 | stores passive write submissions without input-only lifecycle states | `write_submissions` | |
 | 14 | reconstructs rewindable documents and preserves half-open incarnations | `rewindable_documents` | historical points; create+retire; retire+create |
 | 15 | streams long document tails across root replacement deltas | `long_delta_tails` | `["r", v]` deltas stay deltas |
 | 16 | indexes logical addresses and exact-scope scans independently | `addresses_and_scope_scans` | |
-| 17 | keeps indexed string identities lossless | `indexed_strings_lossless` | kinds, keys and request ids with quotes and non-ASCII; Rust has no lone surrogates |
-| 18 | keeps one global record ID namespace and rejects exhausted ID minting | `global_id_namespace` | `next_id` at `MAX_ID` |
+| 17 | keeps indexed string identities lossless | `indexed_strings_lossless` | kinds, keys and request ids with quotes, non-ASCII and `""` round-trip through plain text; Rust has no lone surrogates |
+| 18 | keeps one global record ID namespace and rejects exhausted ID minting | `global_id_namespace` | exhaustion with `next_id` set to the backend's maximum (`i64::MAX` in SQLite) |
 | 19 | rejects every operation after close | `rejects_after_close` | `Closed` |
 
 Added for delta: `reopen_continues_ids_and_seqs` (SQLite file closed and reopened),
-`pi_database_opens` (a fixture written by pi at schema v2, with and without a prefix) and
-`copy_source_rules` (the `DocumentCopy` rejections of commit rule 4).
+`copy_source_rules` (the `DocumentCopy` rejections of commit rule 4),
+`singleton_and_empty_key` (a singleton and a member keyed `""` are separate addresses),
+`duplicate_request_id_rejected` (the unique request index; the Session never writes one,
+so this checks the backend alone) and `prefixed_schemas` (two prefixes in one database
+file stay independent; SQLite only).
 
 ## Differences from upstream
 
@@ -356,14 +383,21 @@ Added for delta: `reopen_continues_ids_and_seqs` (SQLite file closed and reopene
   no portable `SqliteDatabase` facade and no Cloudflare driver.
 - Memory tables are `BTreeMap`s rather than sorted id vectors with binary search.
 - JSONL is not implemented.
+- The SQLite schema is delta's own version 1: `INTEGER` ids and `next_id` (no decimal text,
+  no 2^53 limit), plain-text kinds, keys and request ids (no JSON encoding), `key IS NULL`
+  for singletons instead of a `family` flag and `""` key, conversation parent columns for
+  ancestry walks, `sleeping` in the task status CHECK from the start, a unique request id
+  per conversation. Upstream's schema and its v2 task rebuild are not carried.
 
-## Pending confirmation
+## Decisions
+
+- delta's own SQLite schema, version 1 as above; no compatibility with pi's databases.
+- `delta_chord::sqlite` re-exports `rusqlite`.
+- The optional table prefix stays.
+
+## Open (minor)
 
 - Async `mint_id` (kept for a later remote or JSONL backend) versus a synchronous method,
   which both phase-1 backends could offer.
-- `rusqlite` must be reachable from the harness crate for `ToSql`/`FromSql` in closures: add
-  it to the harness dependencies, or have `delta_chord::sqlite` re-export it.
 - Whether `scan_documents` ignores an `order` field in its cursor, as upstream does, or
   rejects it.
-- Keeping upstream's JSON encoding of the indexed string columns unconditionally; it is
-  required for reading pi's databases.

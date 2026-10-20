@@ -2,9 +2,9 @@
 
 Corresponds to upstream `src/harness/inbox.ts` and `src/harness/submissions.ts`. Follows
 spec §6 (submissions and inbox) and the submission parts of §2.2 (`submit`, `Submission`,
-`reset`, `abort`, request ids) and §8.1 (`pi.user`, `pi.reset`). Record shapes
+`reset`, `abort`, request ids) and §8.1 (`delta.user`, `delta.reset`). Record shapes
 (`SubmissionRecord`, `SubmissionSettlement`, `EntryDraft`) are in [records.md](records.md);
-run control (`pi.live.run`) and the boundaries' callers in [generation.md](generation.md).
+run control (`delta.live.run`) and the boundaries' callers in [generation.md](generation.md).
 
 ## Problem
 
@@ -25,7 +25,7 @@ pub enum SubmissionDraft {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "camelCase")]
+#[serde(tag = "mode", rename_all = "snake_case")]
 pub enum InboxItem {
     Steer    { id: SubmissionId, content: UserContent, #[serde(skip_serializing_if = "Option::is_none")] entry: Option<InputEntry> },
     FollowUp { id: SubmissionId, content: UserContent, #[serde(skip_serializing_if = "Option::is_none")] entry: Option<InputEntry> },
@@ -36,7 +36,7 @@ pub struct InboxState { pub items: Vec<InboxItem> }   // ID order
 
 | field | value |
 | --- | --- |
-| kind / version | `pi.inbox` / 1 |
+| kind / version | `delta.inbox` / 1 |
 | scope / history / fork | conversation, `latest`, `initial` (a fork starts empty) |
 | `initial()` | `{ items: [] }` |
 | checkpoint | complete base whenever `items` is empty |
@@ -48,8 +48,8 @@ host's draft); its entry gets the Harness clock's timestamp at placement. A queu
 stores the `EntryDraft` as JSON.
 
 An input is placed as one entry whose `model` is `[UserMessage { content, timestamp }]`: a
-`pi.user` entry, or an entry of `entry.kind` carrying `entry.data`. Admission rejects a kind
-that is empty or starts with `pi.`. Nothing reads input entries by kind: context, compaction,
+`delta.user` entry, or an entry of `entry.kind` carrying `entry.data`. Admission rejects a kind
+that is empty or starts with `delta.`. Nothing reads input entries by kind: context, compaction,
 events and run accounting go by `model` and the submission records.
 
 ## API
@@ -90,7 +90,7 @@ handle after that commit settled.
 2. A display-only write with no queued reset is appended and settled `done` at once, busy or
    idle, ahead of earlier queued submissions: it changes no model context. Between a tool
    call and its result it changes nothing either, because results are ordered by message.
-3. `busy = pi.live.run.is_some()`. A busy input with `WhenBusy::Reject` writes nothing and
+3. `busy = delta.live.run.is_some()`. A busy input with `WhenBusy::Reject` writes nothing and
    fails with `SubmitError::ConversationBusy`.
 4. Busy, or idle with a non-empty inbox: create the record `queued` and push the item
    (`Steer` when `when_busy` is `Steer`, else `FollowUp`; `Write` for a write). Idle with a
@@ -99,7 +99,7 @@ handle after that commit settled.
    write with a queued reset queues too (rule 2 does not apply), so it lands after the reset.
 5. Idle with an empty inbox: a write is appended and settled `done` (or `unanswered` / `stale`
    when its head is stale); an input is placed as its entry, the record is `placed`, and
-   `start_run` creates `pi.live.run { task_id, inputs: [id] }` with the first `pi.generation`
+   `start_run` creates `delta.live.run { task_id, inputs: [id] }` with the first `delta.generation`
    task ([generation.md](generation.md)).
 
 | action | submission state | other writes |
@@ -141,7 +141,7 @@ is deterministic by item id:
 What the caller does with the result (spec §6, §8.3, §8.5):
 
 - Ordinary `PostTools`: generation continues even with no selected item; the selected steer
-  ids join `pi.live.run.inputs`. A placed reset ends the current run with its inputs
+  ids join `delta.live.run.inputs`. A placed reset ends the current run with its inputs
   `unanswered` / `reset`, and the selected user ids start a successor run. A terminating or
   handoff tool round uses `Final` behaviour.
 - `Final`: the run's placed inputs settle `done` first (unless an `on_yield` continuation
@@ -152,7 +152,7 @@ What the caller does with the result (spec §6, §8.3, §8.5):
   was selected.
 - Only successful run ends (an answer, `terminate`, `handoff`) apply the final boundary.
   Failure, an abort handler, a fault and an orphan settle the run's inputs `unanswered` and
-  leave the inbox alone: the items stay visible in `pi.inbox` until the next input or queued
+  leave the inbox alone: the items stay visible in `delta.inbox` until the next input or queued
   write runs a boundary, or until withdrawn.
 
 **After a failed run.** `settings.after_failed_run` decides, in the commit that settles a
@@ -172,7 +172,7 @@ both are documented footguns, not bugs.
 
 ## Run control
 
-`pi.live.run: Option<{ task_id: TaskId, inputs: Vec<SubmissionId> }>` defines busy. It names
+`delta.live.run: Option<{ task_id: TaskId, inputs: Vec<SubmissionId> }>` defines busy. It names
 the generation responsible for the run, including while its tool round runs; tool tasks
 never own it. `inputs` is mutable because a boundary adds placed steering ids to an active
 run; every terminal path settles exactly the listed inputs. `tx.settle_submission(id,
@@ -190,7 +190,7 @@ candidate record during assembly, so it works after the commit's first table wri
 - `Conversation::abort` and abort cascades call `withdraw_queued_inputs`: steers and
   follow-ups settle `unanswered` / `aborted` and leave the inbox; writes stay for later
   placement.
-- `Conversation::reset(handoff)` is `submit(Write { entry: pi.reset, head: "self", model:
+- `Conversation::reset(handoff)` is `submit(Write { entry: delta.reset, head: "self", model:
   handoff.map(user message) })`; it resolves after admission, and placement follows the
   rules above. An idle wait does not guarantee placement of queued passive writes.
 
@@ -201,12 +201,12 @@ Ports of `harness-inbox`, `harness-submissions`, `harness-failed-run-inbox`,
 display-only writes before and after a queued reset, stale heads inside one boundary,
 request-id idempotency, `WhenBusy::Reject`, `after_failed_run` in all three modes,
 withdrawal while placed, and the positional ops of item removal (asserted on the
-`pi.inbox` deltas).
+`delta.inbox` deltas).
 
 ## Differences from upstream
 
-- `InboxItem` is a serde-tagged enum; the stored JSON (`mode`, `id`, `content`, `entry`) is
-  unchanged.
+- `InboxItem` is a serde-tagged enum stored in snake_case (`{"mode":"follow_up","id":7,
+  "content":...}`), not upstream's camelCase.
 - Admission failures are `SubmitError` variants (`ConversationBusy`, `InvalidEntryKind`,
   `RequestIdTypeMismatch`, `Closed`), not thrown errors.
 - The boundary borrows its inbox draft from the `Tx` (`Doc<'tx, Inbox>`), so it cannot outlive
@@ -214,7 +214,9 @@ withdrawal while placed, and the positional ops of item removal (asserted on the
   plus the `ReadAfterWrite` check the session enforces.
 - Telemetry links between a steer and the run's trace are not ported (no telemetry crate).
 
-## Pending confirmation
+## Decisions
 
-- Nothing beyond [README.md](README.md). The module is a direct port of §6 on the session
-  API; the only choices are the enum shapes above.
+- Kinds are delta's: `delta.inbox`, `delta.user`, `delta.reset`; admission reserves the
+  `delta.` prefix for the crate's own entries. The JSON is serde's snake_case.
+- Otherwise the module is a direct port of §6 on the session API; nothing is open beyond
+  the enum shapes above.

@@ -1,7 +1,7 @@
 # The tool task (`tool`)
 
-Follows spec §7.3 (tools), §8.4 (the `pi.tool` task), the parts of §8.5 a tool task sees,
-and §8.2 (the `pi.live.tools` and `nestedTools` slots). Corresponds to upstream
+Follows spec §7.3 (tools), §8.4 (upstream's `pi.tool` task, here `delta.tool`), the parts
+of §8.5 a tool task sees, and §8.2 (the `delta.live.tools` and `nested_tools` slots). Corresponds to upstream
 `src/harness/tool.ts`, `src/harness/define.ts` and `src/truncate.ts`. The approval seam
 this note slots in between `call` and `execute` is [approval.md](approval.md).
 
@@ -26,6 +26,8 @@ pub trait HarnessTool: Send + Sync {
     fn structured_output_schema(&self) -> Option<&Value> { None }
     /// Pure repair of commonly malformed arguments, before validation; an error makes them invalid.
     fn prepare_arguments(&self, arguments: JsonObject) -> Result<JsonObject, ToolError> { Ok(arguments) }
+    /// The key a session grant matches (approval.md); `None`: never granted for the session.
+    fn approval_key(&self, arguments: &JsonObject) -> Option<String> { Some(canonical_json(arguments)) }
     fn execute<'a>(&'a self, arguments: JsonObject, api: &'a ToolApi, ctx: &'a Context)
         -> BoxFuture<'a, Result<ToolExecutionResult, ToolError>>;
 }
@@ -38,7 +40,8 @@ pub type ToolError = Box<dyn std::error::Error + Send + Sync + 'static>;
 The trait mirrors `delta_agent::AgentTool` (`definition`, `execution_mode`, `replay`,
 `prepare_arguments`, boxed `execute`) so a tool written for one reads like one for the
 other; the harness adds what durability needs (`callers`, `output_limits`, the structured
-output schema) and hands the tool a `ToolApi` instead of `ToolContext`. `FnHarnessTool`
+output schema) and what approval needs (`approval_key`, as Codex's serialized approval
+key: `bash` returns its command) and hands the tool a `ToolApi` instead of `ToolContext`. `FnHarnessTool`
 and `typed_harness_tool::<P>(name, description, |args: P, api, ctx| ...)` (schema from
 `schemars`, as `delta_agent::typed_tool`) are the convenience forms; builder methods set
 `replay`, `callers`, `output_limits` and `structured_output_schema`. Tools come with
@@ -53,7 +56,7 @@ pub struct ToolExecutionResult {
     pub is_error: bool,
     pub details: Option<Value>,             // for UIs; None: the last `details()` value
     pub diagnostics: Vec<ToolDiagnostic>,
-    pub usage: Option<Usage>,               // the execution's own spend; goes to `pi.usage.tools`
+    pub usage: Option<Usage>,               // the execution's own spend; goes to `delta.usage.tools`
     pub control: Option<ToolControl>,
 }
 pub struct ToolDiagnostic { pub severity: Severity /* Info | Warn | Error */, pub message: String, pub code: Option<String> }
@@ -107,7 +110,7 @@ impl ToolApi {
 ## Checkpoints and records
 
 ```rust
-#[derive(Serialize, Deserialize)] #[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Serialize, Deserialize)] #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolTaskInput {
     Model  { assistant: EntryId, call_id: String },
     Nested { parent: TaskId, parent_call_id: String, key: String, call: ToolCall,
@@ -117,19 +120,19 @@ pub enum ToolTaskInput {
 #[derive(Serialize, Deserialize)] #[serde(tag = "phase", rename_all = "lowercase")]
 pub enum ToolTaskCheckpoint {
     Call,
-    /// delta only: parked on a durable approval request; `until` is the deadline (approval.md).
-    Approval { arguments: JsonObject, replay: ToolReplay, until: u64 },
+    /// Waiting for the decision on a committed approval request until `deadline` (approval.md).
+    Approval { id: ApprovalId, arguments: JsonObject, replay: ToolReplay, deadline: i64 },
     /// Durable intent: the final arguments and the replay policy, recorded before execution.
     Execute  { arguments: JsonObject, replay: ToolReplay },
 }
 
-#[derive(Serialize, Deserialize)] #[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Serialize, Deserialize)] #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolTaskResult { Model { entry_id: EntryId, control: Option<ToolControl> }, Nested }
 ```
 
-`pi.tool` stays version 2. `migrate` turns a version 1 input into `Model { .. }`; a
-terminal result without `kind` reads as `Model`. Field names are upstream's camelCase, so
-a `pi.tool` record written by pi resumes in delta.
+`delta.tool` is version 1 with three phases; there is nothing older to migrate. The
+`kind` tags on input and result are present from the start (upstream added them in its
+version 2).
 
 ## The pipeline (`call`)
 
@@ -150,10 +153,13 @@ One handler runs from resolution to settlement, so no phase boundary separates t
    with `Tool call blocked: <text>`, no intent.
 6. **Validate again** the hooks' arguments; failure: `invalid_arguments`.
 7. **Approval**: the `ApprovalPolicy` decides on the final arguments. `Allow` continues;
-   `Deny` settles `blocked` (`Tool call blocked: approval denied: <reason>`); `Ask` commits
-   the request and `Approval { arguments, replay, until }` as a sleep and returns. The
-   `approval` phase resumes at step 8 on `allow`, or settles `blocked` on `deny` or
-   timeout. See [approval.md](approval.md).
+   `Deny` settles `blocked` (`Tool call blocked: approval denied: <reason>`); `Ask`
+   continues when a session grant matches `approval_key`, otherwise commits the request
+   into `delta.approvals` and `Running(Approval { id, arguments, replay, deadline })`. The
+   `approval` phase then waits in the same invocation for the decision (a oneshot from
+   `PendingApprovals`, or the committed one on a rerun) until `deadline`, and continues at
+   step 8 on `Approved` / `ApprovedForSession`, settles `blocked` on `Denied` or timeout,
+   and leaves `Abort` to the abort handler. See [approval.md](approval.md).
 8. **Intent commit**: `Execute { arguments, replay: tool.replay() }`, status `running`;
    the slot becomes `running`; a nested slot gets the final arguments when they differ
    from the ones it was created with.
@@ -230,11 +236,11 @@ The abort handler builds an error result from the slot and ends `aborted`: code 
    error diagnostic turns its output text into a `tool_error` diagnostic.
 
 The settle commit, for a model-issued call: render the diagnostics as one trailing text
-item (`<harness>\n[severity] message\n...\n</harness>`), append the `pi.tool-result` entry
+item (`<harness>\n[severity] message\n...\n</harness>`), append the `delta.tool-result` entry
 (`model: [ToolResultMessage { tool_call_id, tool_name, content, details, usage, is_error,
 duration_ms, timestamp }]`, `data: { diagnostics }`, possibly empty), add `usage` to
-`pi.usage.tools[name]`, mark the slot `done` with `entry` and without progress, remove the
-nested slots below the task (transitively, only when the `pi.tool.madeNestedCalls` memo
+`delta.usage.tools[name]`, mark the slot `done` with `entry` and without progress, remove the
+nested slots below the task (transitively, only when the `delta.tool.made_nested_calls` memo
 says it made any), and end with `Model { entry_id, control }` (`control` only on
 `completed`). Outcome `completed` for a returned result (also `is_error`), `failed` for an
 error from `execute` or `env`, or an interruption; `aborted` from the abort handler. A
@@ -254,20 +260,20 @@ diagnostics and add `truncated` when the slot dropped output.
 - Keys: default the call's position among this invocation's calls (`1`, `2`, ...); an
   explicit key is non-empty, without `/`, not `__proto__`, not a positive integer. The
   nested call id is `<call_id>/<key>`.
-- First the memo `pi.tool.madeNestedCalls = true` (once per attempt), then one commit: open
-  or create the `NestedCallDoc` member (`pi.tool.nested-call`, a task-scoped family of the
-  caller keyed by the key, `{ taskId?, result? }`, retires with the caller); a member with
+- First the memo `delta.tool.made_nested_calls = true` (once per attempt), then one commit: open
+  or create the `NestedCallDoc` member (`delta.tool.nested-call`, a task-scoped family of the
+  caller keyed by the key, `{ task_id?, result? }`, retires with the caller); a member with
   a task already is reused when the name and arguments are structurally equal, otherwise
-  the call fails; else create the `pi.tool` task (`Nested` input, owned by the caller,
+  the call fails; else create the `delta.tool` task (`Nested` input, owned by the caller,
   `abandon_on_restart` unless the caller is `Safe`), store its id, push a `pending` slot to
-  `pi.live.nestedTools` with the arguments as passed.
+  `delta.live.nested_tools` with the arguments as passed.
 - Wait for the task, then read the member's `result`; without one (faulted, orphaned) a
   synthesized `is_error` result with a `faulted` / `orphaned` diagnostic.
 - `execute_tool` after `execute` returned panics; cancelling its context stops only the
   wait. Child tasks the tool creates through `create_task` with task ownership inherit
   `abandon_on_restart` the same way.
 - Before settling, by any path: let admissions in flight commit, abort every live nested
-  call the task owns (`owned_tasks` filtered to nested `pi.tool`), all at once, and wait,
+  call the task owns (`owned_tasks` filtered to nested `delta.tool`), all at once, and wait,
   so they settle into their slots before the caller's commit removes them.
 - `NestedToolExecutionResult { task_id, structured_output, is_error, details, diagnostics,
   usage, duration_ms }`: no `output`, no `control`.
@@ -296,14 +302,15 @@ are not rerun on recovery: the arguments they produced are in the checkpoint.
   inputs); it reattaches to its nested calls and owned conversations by key and by owner
   scan. Any other tool settles `interrupted` with the durable partial output.
 - The model never sees a result twice: completed, failed and aborted outcomes all keep
-  one `pi.tool-result` entry for the generation's `tools` phase.
+  one `delta.tool-result` entry for the generation's `tools` phase.
 
 ## Differences from upstream
 
-- An `approval` phase between `call` and `execute`, a sleep that a decision wakes
-  ([approval.md](approval.md)). pi does not know it: a pi process opening a delta storage
-  with a task parked there faults that task (unknown phase). The other direction is
-  unaffected.
+- An `approval` phase between `call` and `execute` that awaits a decision inside its
+  invocation, codex-rs style, with the request and the deadline committed
+  ([approval.md](approval.md)).
+- Version 1 with snake_case JSON; upstream's version 1 → 2 input migration has no
+  counterpart.
 - A trait instead of an object literal; `callers` is a bitflag; `prepare_arguments` returns
   `Result`; `ToolApi` is a struct with methods, not a spreadable object.
 - Output is bytes-native (`OutputBuffer::push_bytes`), skips are a separate call.
@@ -314,13 +321,15 @@ are not rerun on recovery: the arguments they produced are in the checkpoint.
   `HarnessTool` that holds an `Arc<dyn HarnessTool>`; the registry composes wrappers per
   resolution as [harness.md](harness.md) describes), images in `read` (tools.md).
 
-## Pending confirmation
+## Decisions
 
-- Keep `pi.tool` at version 2 with the extra phase (pi faults on it) rather than version
-  3 (pi would park every delta tool task as `task_too_old`, even in `call`).
-- A denied approval reuses code `blocked` with a `approval denied:` message prefix; the
-  structured decision is in the `delta.approval` entry. Alternative: a new code
-  `approval_denied`.
+- `delta.tool` is version 1, with the `approval` phase from the start.
+- A denied or timed-out approval reuses code `blocked` with an `approval denied:` /
+  `approval timed out` message; the structured decision is in the `delta.approval` entry.
+- Hooks run before the approval policy; `ToolHooks` is the tool task's hook trait.
+
+## Open (minor)
+
 - `output()` panicking after the invocation ends (upstream throws). Alternative: ignore
   late output and report once.
 - Nested calls land in phase 1 behind tests only; they could wait for code mode.

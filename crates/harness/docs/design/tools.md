@@ -185,7 +185,7 @@ is not a lock against `bash` or other processes.
 
 - Images in `read` (above) and the `ImageProcessor` seam.
 - `tool_search` and deferred tools: the seam is `Agent.deferred` plus
-  `ToolControl.add_tools` written to `modelTools` by the generation's `tools` phase
+  `ToolControl.add_tools` written to `model_tools` by the generation's `tools` phase
   ([generation.md](generation.md)); the BM25 ranking extension is later.
 - `powershell`: not ported in phase 1.
 - Code mode and a remote environment: later, as [README.md](README.md) lists.
@@ -202,7 +202,7 @@ is not a lock against `bash` or other processes.
   processor.
 - `BashPrepare` is a trait object instead of a function type.
 
-## Pending confirmation
+## Open (minor)
 
 - Returning `unsupported_image` for detected images in phase 1 (versus reading them as
   text, which upstream never does).

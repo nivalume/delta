@@ -1,8 +1,8 @@
 # The compaction task (`compaction`)
 
 Follows spec §8.7 (compaction), the threshold rules of §8.3 (`prepare`), the
-`beforeCompact` hook of §7.2, the `pi.compaction` entry of §8.1 and the
-`compactions` / `compactionFailure` fields of `pi.live` (§8.2). Corresponds to upstream
+`beforeCompact` hook of §7.2, the `delta.compaction` entry of §8.1 and the
+`compactions` / `compaction_failure` fields of `delta.live` (§8.2). Corresponds to upstream
 `src/harness/compaction.ts`.
 
 ## Problem
@@ -20,11 +20,9 @@ placement rule for its summary.
 #[derive(Serialize, Deserialize)] #[serde(rename_all = "lowercase")]
 pub enum CompactionReason { Manual, Threshold, Overflow }
 
-#[serde(rename_all = "camelCase")]
 pub struct CompactionInput { pub reason: CompactionReason, pub instructions: Option<String> }
 
 /// The pinned summarization request; fixed across retries.
-#[serde(rename_all = "camelCase")]
 pub struct SummaryRequest {
     pub attempt: u32,
     pub model: ModelRef,
@@ -43,12 +41,11 @@ pub enum CompactionCheckpoint {
 }
 
 /// `entry_id` for a blocking compaction's summary, `submission_id` for a conversation-owned one's write; both absent when nothing was compacted.
-#[serde(rename_all = "camelCase")]
 pub struct CompactionResult { pub entry_id: Option<EntryId>, pub submission_id: Option<SubmissionId> }
 ```
 
-`pi.compaction` is version 1 and starts at `Select`. Field names are upstream's, so a
-compaction in flight when pi wrote the storage resumes in delta.
+`delta.compaction` is version 1 and starts at `Select`; its JSON is serde's snake_case
+form (`{"phase":"retry","attempt":2,...,"until":...}`).
 
 ```rust
 pub fn create_compaction(tx: &mut Tx, conversation: ConversationId, input: CompactionInput, owner: Option<TaskId>)
@@ -57,7 +54,7 @@ pub fn create_compaction(tx: &mut Tx, conversation: ConversationId, input: Compa
 
 creates the task (owned by `owner`, the generation, or by the conversation; `background`
 when conversation-owned and not `Manual`) and adds its `CompactionStatus { task_id,
-reason, blocking: owner.is_some(), attempt: 1, retry: None }` to `pi.live.compactions` in
+reason, blocking: owner.is_some(), attempt: 1, retry: None }` to `delta.live.compactions` in
 the same commit.
 
 ## Who starts one
@@ -80,7 +77,7 @@ pub fn estimate_context(view: &ContextView, extra: &[Message]) -> u64;
 ```
 
 Defaults: `enabled`, `reserve_tokens 16384`, `keep_recent_tokens 20000`,
-`background_tokens 32768`; `settings.compaction.model_overrides["provider/modelId"]`
+`background_tokens 32768`; `settings.compaction.model_overrides["provider/model_id"]`
 replaces fields for that model.
 
 `estimate_context`: find the newest assistant message in the committed context whose
@@ -98,7 +95,7 @@ and the generation has not already compacted (`compacted` absent), and only when
   reason `Threshold`, the generation waits (`all_settled`) and sends its request when the
   compaction completed (with or without a summary), fails `model_error` otherwise.
 - estimate > `context_window - reserve_tokens - background_tokens` with
-  `background_tokens > 0` and no status in `pi.live.compactions`: a conversation-owned
+  `background_tokens > 0` and no status in `delta.live.compactions`: a conversation-owned
   background task is created in the commit that moves to `request`.
 - a context-overflow error with `compacted` absent and a cut: an `Overflow` compaction the
   generation owns; the recovery request does not count against retries; a second overflow
@@ -157,7 +154,7 @@ The summary covers 1-3; the model context becomes [summary, 4, 5, 6].
   options without `deferred`, `cache_retention: none`, the pinned `max_tokens`, the
   invocation's cancellation. Recovery resends the same request. After the response,
   check the abort mark, then classify in one commit that adds the response's usage to
-  `pi.usage.models["provider/model"]`:
+  `delta.usage.models["provider/model"]`:
   - `stop`, non-empty text, no tool call: the text is the summary; place it.
   - `error` the retry classification accepts (the same predicate generation uses) while
     `settings.retry` allows another attempt (`enabled && attempt <= max_retries`): set
@@ -184,14 +181,14 @@ at the start of the conversation into the new one.
 The summary entry:
 
 ```json
-{ "kind": "pi.compaction", "head": <first_kept>,
+{ "kind": "delta.compaction", "head": <first_kept>,
   "model": [{ "role": "user", "content": [{ "type": "text", "text": <wrapped> }], "timestamp": <now> }],
   "data": { "reason": <reason> } }
 ```
 
 `wrapped` = `"The conversation history before this point was compacted into the
 following summary:\n\n<summary>\n"` + summary + `"\n</summary>"`. The placing commit also
-removes the task's status, removes `pi.live.compactionFailure`, and commits `completed`:
+removes the task's status, removes `delta.live.compaction_failure`, and commits `completed`:
 
 - blocking (task-owned): append the entry directly; result `{ entry_id }`. The generation
   holds the run, so nothing else writes.
@@ -201,7 +198,7 @@ removes the task's status, removes `pi.live.compactionFailure`, and commits `com
   the current range; queued behind waiting items otherwise. Result `{ submission_id }`;
   the task never waits for placement, `Harness::submission` observes it.
 
-The next generation's `prepare` finds a head marker without a later `pi.system` entry and
+The next generation's `prepare` finds a head marker without a later `delta.system` entry and
 writes a complete system baseline ([context.md](context.md)).
 
 ## Cancellation and failure
@@ -213,7 +210,7 @@ writes a complete system baseline ([context.md](context.md)).
   generation, before the generation's abort handler runs. A queued summary is a write
   submission: conversation abort keeps it, `Submission::abort` withdraws it.
 - Failure (`model_error`, `no_model`): the failing commit removes the status and sets
-  `pi.live.compactionFailure { task_id, reason, error }`, replacing an older one; the
+  `delta.live.compaction_failure { task_id, reason, error }`, replacing an older one; the
   scheduler cleanup does the same for a faulted or orphaned compaction with the fault's
   message or the orphan reason. Only a placed summary removes the failure; a compaction
   that is aborted or finds nothing to compact leaves it.
@@ -226,17 +223,23 @@ writes a complete system baseline ([context.md](context.md)).
 ## Differences from upstream
 
 - Serde-tagged checkpoint enum; `SummaryRequest` flattened into `Summarize` and `Retry`,
-  so the JSON equals upstream's.
+  so a phase's JSON stays flat as upstream's, in snake_case.
 - `select_cut`, `summarized_messages`, `estimate_context`, `serialize_conversation` and
   `compaction_policy` are public functions tested against upstream's `compaction.test.ts`
-  cases with recorded responses; the retry predicate and delay are shared with generation
-  (defined there, since `delta_ai` has no `isRetryableAssistantError` / `retryDelayMs`
-  port yet).
+  cases with recorded responses; the retry predicate and delay are `delta_ai`'s
+  (`is_retryable_assistant_error`, `retry_delay`, upstream's `isRetryableAssistantError` /
+  `retryDelayMs`), shared with generation.
 - The summarization request goes through `delta_ai::Models::stream_simple` collected to a
   message (upstream `completeSimple`); the stream is cancelled by dropping it on abort.
 
-## Pending confirmation
+## Decisions
 
-- Where the retry predicate lives (`generation` or a small `retry` module both tasks use).
+- The retry predicate and delay, and `is_context_overflow`, are added to `delta_ai`; both
+  tasks call them there.
+- Hooks are `CompactionHooks`, a per-task trait ([harness.md](harness.md)).
+- `delta.compaction` is version 1 (task) and the summary entry kind is `delta.compaction`.
+
+## Open (minor)
+
 - Whether `before_compact` receives `&[EntryRecord]` and `&[Message]` borrowed from the
   phase (cheap) or owned clones (simpler hook signatures).
