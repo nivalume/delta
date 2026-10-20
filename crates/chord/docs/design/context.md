@@ -41,10 +41,11 @@ impl<T> ContextKey<T> { pub const fn new(name: &'static str) -> Self; }
 
 pub struct Canceller;
 impl Canceller {
-    pub fn cancel(&self, reason: CancelReason);
+    pub fn cancel(&self);                          // reason: Aborted
+    pub fn cancel_with(&self, reason: CancelReason);
 }
 
-pub struct CancelReason(Arc<dyn Error + Send + Sync>);
+pub struct CancelReason(Arc<dyn Error + Send + Sync>);   // new(error), message(text), aborted()
 ```
 
 ### Values
@@ -60,9 +61,9 @@ pub struct CancelReason(Arc<dyn Error + Send + Sync>);
   token, so cancelling the parent cancels it, and no task is needed.
 - `with_token` joins an outside token that is not a child of the parent's (upstream's
   `withAbortSignal(signal, context)`, which uses `AbortSignal.any`). `is_cancelled`,
-  `cancelled` and `run` check both. `token()` on such a context returns a token that a
-  small task cancels when either source fires; the task ends when the context and every
-  clone of it are dropped.
+  `cancelled` and `run` check both. `token()` on such a context, and `with_cancel` below it,
+  need one token for both: a small task joins them, so they need a tokio runtime. The task
+  ends when the last context that shares it is dropped.
 - `reason()` is the reason given to the `Canceller` closest to this context that fired, or
   a generic "aborted" reason when cancellation came from a bare `CancellationToken`.
 - `without_cancel` keeps the values and drops every cancellation source, for work that

@@ -66,8 +66,9 @@ pub struct Subscription;
 
 impl Subscription {
     pub async fn next(&mut self) -> Option<Delivery>;
+    pub fn try_next(&mut self) -> Option<Delivery>;        // a queued delivery, without waiting
+    pub fn into_stream(self) -> impl Stream<Item = Delivery>;
 }
-impl Stream for Subscription { type Item = Delivery; }
 
 pub struct Delivery {
     pub kind: DeliveryKind,        // Hydrate | Update
@@ -99,7 +100,8 @@ would exceed it, the pending deliveries merge into one:
   is itself a valid batch. If the result would exceed `MAX_OPS`, it is `["r", value]`
   instead.
 - A pending `Hydrate` stays a `Hydrate` with the newest value.
-- `skipped` counts the merged updates.
+- `skipped` counts the updates absorbed into the result: every queued update, plus the
+  newest one when the result is a hydration.
 
 So memory per subscription is bounded, and a subscriber that falls behind still receives
 ops it can apply. Upstream's `replicatedState` instead drops the backlog to the newest

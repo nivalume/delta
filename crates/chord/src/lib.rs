@@ -12,3 +12,8 @@ pub mod output;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 pub mod state;
+
+#[doc(hidden)]
+pub mod __private {
+    pub use serde_json;
+}

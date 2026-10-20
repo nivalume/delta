@@ -56,7 +56,8 @@ crates/chord/
     lib.rs
     json.rs         # Json, Path, serde bridges
     delta/
-      mod.rs        # Op, apply, errors
+      mod.rs        # Op and its tuple form
+      apply.rs      # apply, applied, ApplyError
       tracker.rs    # Tracker, Change, Prepared
       draft.rs      # Draft handles and the op log
       diff.rs       # diff of two revisions

@@ -52,7 +52,7 @@ pub enum Op {
   permutation is a bijection.
 - An `r` is always the first op of a batch when present. `Op::is_base(&[Op])` checks it.
 - Ops can be built by hand. Durable builds view batches itself (re-rooting a document's
-  ops under a prefix, inserting entries).
+  ops under a prefix, inserting entries); `Op::prefixed(prefix)` re-roots one op.
 
 ### Why keep upstream's tuples
 
@@ -111,7 +111,7 @@ impl Tracker {
     pub fn begin(&self) -> Change;                       // O(1)
     pub fn prepare_replace(&self, value: Json) -> Prepared;   // ["r", value], or empty when equal
     pub fn prepare_diff(&self, value: Json) -> Prepared;      // ops from diff(current, value)
-    pub fn adopt(&mut self, prepared: Prepared) -> Result<(), AdoptError>;
+    pub fn adopt(&mut self, prepared: Prepared) -> Result<Vec<Op>, AdoptError>;  // returns the batch
 }
 
 pub struct Change { /* base, working: Json, log, revision, tracker id */ }
@@ -180,9 +180,9 @@ pub struct StrDraft<'a>;
 
 | Handle | Methods |
 | --- | --- |
-| `Draft` | `value() -> &Json`, `set(Json)`, `update(FnOnce(&mut Json))`, `update_as::<T>(FnOnce(&mut T))`, `field(key) -> Option<Draft>`, `index(i) -> Option<Draft>`, `at(&[Seg]) -> Option<Draft>`, `into_object()`, `into_array()`, `into_str()` (each `Option`, `None` for another kind) |
+| `Draft` | `value() -> &Json`, `set(Json)`, `update(FnOnce(&mut Json))`, `update_as::<T>(FnOnce(&mut T))`, `field(key) -> Option<Draft>`, `index(i) -> Option<Draft>`, `at(&[Seg]) -> Option<Draft>`; `object()`, `array()`, `string()` (borrowing) and `into_object()`, `into_array()`, `into_string()` (consuming), each `None` for another kind |
 | `ObjectDraft` | `get(key) -> Option<&Json>`, `field(key) -> Option<Draft>`, `field_or_insert(key, default) -> Draft`, `insert(key, Json) -> Option<Json>`, `remove(key) -> Option<Json>`, `len`, `keys` |
-| `ArrayDraft` | `get(i)`, `index(i) -> Option<Draft>`, `len`, `push`, `insert(i, Json)`, `remove(i) -> Json`, `pop`, `splice(range, items) -> Vec<Json>`, `truncate`, `clear`, `set(i, Json)`, `reverse`, `sort_by(cmp)`, `retain(pred)` |
+| `ArrayDraft` | `get(i)`, `index(i) -> Option<Draft>`, `len`, `push`, `extend`, `insert(i, Json)`, `remove(i) -> Json`, `pop`, `splice(range, items) -> Vec<Json>`, `truncate`, `clear`, `set(i, Json)`, `reverse`, `sort_by(cmp)`, `retain(pred)` |
 | `StrDraft` | `as_str()`, `push_str(&str)`, `remove_prefix(byte_len)`, `set(String)` |
 
 Index methods panic out of bounds, as `Vec`'s do. `remove_prefix` panics when the length is
@@ -204,7 +204,7 @@ replace.
 | `reverse`, `sort_by` | `m` with the permutation |
 | `StrDraft::push_str` | `a` |
 | `StrDraft::remove_prefix` | `t` |
-| `Draft::set` on the root | `r` |
+| Any value or string edit at the root (`s`, `d`, `a`, `t` have no root form) | `r` |
 
 `update_as::<T>` deserializes the value into `T`, runs the closure, serializes it back and
 diffs. It is the typed escape hatch for code that would rather mutate a struct than walk a
@@ -218,8 +218,10 @@ The log merges an op into the previous one when they are adjacent:
   one change is one op.
 - An insert-only `p` that continues the previous insert-only `p` on the same array: one
   `p`. Consecutive pushes are one op.
-- An assignment at a path drops the ops directly before it whose paths are at or below
-  that path (only the adjacent run; anything earlier may have shifted indices).
+- An assignment or deletion at a path drops the ops directly before it whose paths are
+  below that path, and those at it, except a deletion (an assignment does not repeat its
+  effect on key order) and, before a deletion, a set (it may have created the key). Only
+  the adjacent run: anything earlier may address elements whose indices moved since.
 - `r` clears the log.
 
 Because the log is replayed in order, every recorded op is correct for the value as it was
