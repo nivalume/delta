@@ -32,8 +32,10 @@ pub type FileResult<T> = Result<T, FileError>;
 ```
 
 Expected failures are returned, never panicked. `io::Error` maps by kind: `NotFound`,
-`PermissionDenied`, `NotADirectory`, `IsADirectory`, `InvalidInput` → `Invalid`, else
-`Unknown`; a cancelled context is `Aborted` on every operation.
+`PermissionDenied`, `NotADirectory`, `IsADirectory`, `InvalidInput` and `InvalidFilename` →
+`Invalid`, else `Unknown`; a cancelled context is `Aborted` on every operation. Reads race the
+context; mutations check it before each step but never race it, so a write the operating
+system already started is not reported as aborted while it completes.
 
 ## The traits
 
@@ -46,7 +48,7 @@ pub trait FileSystem: Send + Sync {
     fn join_path(&self, parts: &[&str]) -> FileResult<String>;
     fn read_text_file<'a>(&'a self, path: &'a str, ctx: &'a Context) -> BoxFuture<'a, FileResult<String>>;
     fn read_binary_file(..) -> BoxFuture<FileResult<Vec<u8>>>;
-    fn read_text_lines(&self, path, max_lines: Option<usize>, ctx) -> BoxFuture<FileResult<Vec<String>>>;
+    fn read_text_lines(&self, path, max_lines: Option<usize>, ctx) -> BoxFuture<FileResult<Vec<String>>> { /* over open_text_line_reader */ }
     fn open_text_line_reader(..) -> BoxFuture<FileResult<Box<dyn TextLineReader>>>;
     fn open_binary_reader(&self, path, options: OpenOptions /* no_follow */, ctx) -> BoxFuture<FileResult<Box<dyn BinaryReader>>>;
     fn write_file(&self, path, content: &[u8], ctx) -> BoxFuture<FileResult<()>>;   // creates parents
@@ -57,22 +59,26 @@ pub trait FileSystem: Send + Sync {
     fn list_files(&self, path, options: ListFilesOptions, ctx) -> BoxFuture<FileResult<FileListing>> { not_supported() }
     fn watch(&self, targets: Vec<WatchTarget>, ctx) -> BoxFuture<FileResult<Box<dyn FileWatcher>>> { not_supported() }
     fn canonical_path(..) -> BoxFuture<FileResult<String>>;
-    fn exists(..) -> BoxFuture<FileResult<bool>>;
+    fn exists(..) -> BoxFuture<FileResult<bool>> { /* over file_info */ }
     fn create_dir(&self, path, recursive: bool, ctx); fn remove(&self, path, options: RemoveOptions /* recursive, force */, ctx);
     fn create_temp_dir(&self, prefix: Option<&str>, ctx) -> BoxFuture<FileResult<String>>;
     fn create_temp_file(&self, options: TempFileOptions /* prefix, suffix */, ctx) -> BoxFuture<FileResult<String>>;
-    fn cleanup<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, ()>;
 }
 
 pub trait Shell: Send + Sync {
-    fn exec<'a>(&'a self, command: Command, options: ExecOptions, ctx: &'a Context) -> BoxFuture<'a, Result<ExecResult, ExecError>>;
+    fn exec<'a>(&'a self, command: Command, options: ExecOptions<'a>, ctx: &'a Context) -> BoxFuture<'a, Result<ExecResult, ExecError>>;
     /// Kill every command still running; for the owner's shutdown, never for one request.
     fn cleanup<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, ()>;
 }
 
 pub trait ExecutionEnv: FileSystem + Shell {}
-impl<T: FileSystem + Shell> ExecutionEnv for T {}
+impl<T: FileSystem + Shell + ?Sized> ExecutionEnv for T {}
 ```
+
+`cleanup` lives on `Shell` only: with one on each trait, `env.cleanup(ctx)` would be
+ambiguous on `dyn ExecutionEnv`, and upstream's file-system half has nothing to clean up (its
+readers and watchers are closed by their owners). `read_text_lines` and `exists` are provided
+methods, so another environment gets them from `open_text_line_reader` and `file_info`.
 
 Tools hold `Arc<dyn ExecutionEnv>`. Methods return `BoxFuture` so the traits are object
 safe (as `delta_agent::AgentTool`); `id`, `cwd`, `absolute_path` and `join_path` are
@@ -83,11 +89,11 @@ mutable `cwd` field is not needed.
 ```rust
 pub struct FileInfo { pub name: String, pub path: String, pub kind: FileKind /* File | Directory | Symlink */, pub size: u64, pub mtime_ms: i64 }
 
-pub trait BinaryReader: Send {
+pub trait BinaryReader: Send + Sync {
     fn info(&self, ctx) -> BoxFuture<FileResult<FileInfo>>;                   // of the opened file, whatever its path names now
     fn read(&self, offset: u64, length: usize, ctx) -> BoxFuture<FileResult<Vec<u8>>>;   // fewer bytes only at end of file
     fn scan_lines(&self, start_line: u64, end_line: Option<u64>, ctx) -> BoxFuture<FileResult<LineScan>>;
-    fn close(self: Box<Self>, ctx) -> BoxFuture<'static, ()>;
+    fn close(self: Box<Self>, ctx: &Context) -> BoxFuture<'_, ()>;
 }
 pub struct LineScan { pub newlines: u64, pub start: u64, pub end: u64, pub first_line_end: u64, pub last_line_start: u64, pub selected_bytes: u64, pub first_line_bytes: u64 }
 
@@ -95,10 +101,22 @@ pub trait TextLineReader: Send { fn read_line(&mut self, ctx) -> BoxFuture<FileR
 pub trait DirReader: Send { fn next(&mut self, max_entries: usize, ctx) -> BoxFuture<FileResult<DirPage /* entries, done */>>; fn close(..); }
 ```
 
+Every reader's `close` consumes it, so use after close is a compile-time error rather than an
+`Invalid` result; dropping a local reader releases its file too. `BinaryReader` reads through
+`&self`, so it is `Sync` as well.
+
 - `open_binary_reader` opens one regular file: a directory fails `IsDirectory`, another
   non-regular file `Invalid`; with `no_follow`, a symbolic link as the final component
   fails `Invalid` (earlier components still resolve). Reads see the opened file after a
-  rename. A single `read` allocates at most 1 MiB at a time, whatever `length` says.
+  rename. A single `read` allocates at most 1 MiB at a time, whatever `length` says; an
+  `offset + length` past `u64` fails `Invalid` (negative or fractional values are
+  unrepresentable). The local reader checks the kind before opening, so a FIFO is never
+  opened (upstream's `O_NONBLOCK`), and implements `no_follow` without `O_NOFOLLOW` (the
+  crate has no libc binding): `lstat` refuses a link, and on Unix the opened file must have
+  the device and inode that `lstat` saw, so a path swapped for a link in between is refused.
+- Text: `read_text_file` decodes lossily and keeps a byte-order mark (as Node's `readFile`);
+  text line readers and command output drop a leading one. Line readers split at `\n` only,
+  keeping `\r`; an aborted `read_line` consumes nothing.
 - `scan_lines` makes one pass inside the environment: line `k` starts after the `k`-th
   newline byte; `[start_line, end_line)` (absent: to the end); a selection past the last
   line is empty at the end of the file; decoded sizes are those of decoding the whole
@@ -120,28 +138,31 @@ pub trait DirReader: Send { fn next(&mut self, max_entries: usize, ctx) -> BoxFu
 ```rust
 pub enum Command { Shell(String), Argv(Vec<String>) }
 
-pub struct ExecOptions {
+pub struct ExecOptions<'a> {
     pub cwd: Option<String>,                  // resolved against the environment's cwd
     pub env: BTreeMap<String, String>,
     pub inherit_env: bool,                    // default true
     pub timeout: Option<Duration>,
-    pub on_output: Option<Box<dyn FnMut(OutputChunk) + Send>>,
+    pub on_output: Option<Box<dyn FnMut(OutputChunk) + Send + 'a>>,   // may borrow the caller's buffers
     pub spill: Option<SpillOptions>,          // after_bytes, after_lines
-    pub window: Option<ShellOutputWindow>,    // max_bytes, max_lines, min_interval_ms, bytes_per_second
+    pub window: Option<ShellOutputWindow>,    // max_bytes, max_lines, min_interval: Duration, bytes_per_second; limits() -> OutputLimits
 }
-pub struct OutputChunk { pub text: String, pub stream: Stream /* Stdout | Stderr */, pub skipped: Option<OutputSkip> }
+pub struct OutputChunk { pub text: String, pub stream: OutputStream /* Stdout | Stderr */, pub skipped: Option<OutputSkip> }
 pub struct ExecResult { pub exit_code: i32, pub spill_path: Option<String> }
 ```
 
-- `Shell(s)` runs through the environment's shell: the configured path, else `bash` on
-  `PATH` (`which`/`where`), else `ShellUnavailable`; a legacy WSL `bash.exe` is skipped.
-  `Argv(v)` spawns `v[0]` with the rest as arguments, no parsing; an empty vector is
-  `SpawnError`. A missing working directory is `SpawnError` (`Working directory does not
+- `Shell(s)` runs `<shell> -c s`: the configured path (missing: `ShellUnavailable`), else
+  `/bin/bash` (Windows: Git Bash under `ProgramFiles`), else `bash` on `PATH` (searched
+  in-process, not through `which`/`where`; a legacy WSL `bash.exe` is skipped), else `sh` on
+  Unix and `ShellUnavailable` on Windows, as upstream. `Argv(v)` spawns `v[0]` with the rest
+  as arguments, no parsing; an empty vector is `SpawnError`. A missing working directory is `SpawnError` (`Working directory does not
   exist: <cwd>`).
 - Output: every decoded chunk of stdout and stderr, in arrival order, raw, unbounded,
   unthrottled, each stream decoded separately (a character split across chunks survives).
   Nothing reaches the callback after `exec` settled, even from a descendant holding the
-  pipes. A panic in the callback kills the command and fails `CallbackError`.
+  pipes: after the exit, pipes that stay quiet for 100 ms are dropped. A panic in the
+  callback (caught with `catch_unwind`, so it needs `panic = "unwind"`) kills the command and
+  fails `CallbackError` with the panic message.
 - `spill`: once the seen output exceeds `after_bytes` or `after_lines` (complete or
   partial lines), the complete raw output (the prefix kept so far and everything after)
   streams to a temp file `delta-output-*.log` created through `create_temp_file`; the
@@ -155,10 +176,17 @@ pub struct ExecResult { pub exit_code: i32, pub spill_path: Option<String> }
   no faster than the pace. The local environment never omits (it is in-process); the
   conformance case checks the contract for environments that do. A window and separate
   streams are exclusive: a windowed chunk's `stream` names its last stream.
-- Timeout and abort kill only this command's process tree (`setsid` + killing the group
-  on Unix, `taskkill /T` on Windows) and fail `Timeout` (`timeout:<secs>`) or `Aborted`
-  after the pipes drain, with `spill_path` when one exists. Timeouts above
-  2 147 483 647 ms are `Invalid`.
+- Timeout and abort kill only this command's process tree and fail `Timeout`
+  (`timeout:<secs>`) or `Aborted` after the pipes drain, with `spill_path` when one exists.
+  On Unix each command leads its own process group (`process_group(0)`, i.e. `setpgid`;
+  upstream's `detached` is `setsid`, which also drops the controlling terminal, not needed
+  with stdin closed). The crate forbids `unsafe` and has no libc binding, so the group is
+  killed by `/bin/sh -c 'kill -9 -<pgid>'` rather than `killpg(2)`, and the direct child
+  through tokio as well; a descendant that leaves the group (`setsid`) is out of reach, as
+  upstream. Windows uses `taskkill /F /T`. Dropping the `exec` future kills the tree too.
+- A zero timeout or one above 2 147 483 647 ms fails before spawning with `Timeout` and an
+  `Invalid timeout: …` message, as upstream (`ExecErrorCode` has no `Invalid`); the bound
+  also keeps `Instant + timeout` from overflowing.
 - Exit code: the process's; killed by a signal, `128 + signal`; unknown, `1`.
 - `cleanup` kills every child the environment still tracks.
 
@@ -167,7 +195,7 @@ pub struct ExecResult { pub exit_code: i32, pub spill_path: Option<String> }
 ```rust
 pub struct WatchTarget { pub path: String, pub recursive: bool, pub exclude: Exclude /* hidden, names */ }
 pub enum WatchChange { Paths(Vec<String>), Overflow, Error(FileError) }
-pub trait FileWatcher: Send { fn mode(&self) -> WatchMode /* Native | Polling */; fn next(&mut self) -> BoxFuture<Option<WatchChange>>; fn close(self: Box<Self>, ctx) -> BoxFuture<'static, ()>; }
+pub trait FileWatcher: Send { fn mode(&self) -> WatchMode /* Native | Polling */; fn next(&mut self) -> BoxFuture<Option<WatchChange>>; fn close(self: Box<Self>, ctx: &Context) -> BoxFuture<'_, ()>; }
 ```
 
 - A target may be missing; creating it is a change. A recursive target covers its subtree
@@ -181,43 +209,58 @@ pub trait FileWatcher: Send { fn mode(&self) -> WatchMode /* Native | Polling */
   whatever events arrive. `Polling` (default on Windows and on file systems that do not
   report remote changes) compares snapshots every 2 s and can miss a change undone in
   between; at most 10 000 directories per watcher, beyond which `Error`.
-- `create_temp_dir(prefix)` / `create_temp_file { prefix, suffix }` create under the
-  system temp directory with `0600`/`0700` permissions; `remove` with `recursive` and
-  `force` (missing is fine) is `rm -rf` semantics.
+- `create_temp_dir(prefix)` (default prefix `delta-`) / `create_temp_file { prefix, suffix }`
+  create `<prefix><random><suffix>` directly under the system temp directory with
+  `0700`/`0600` permissions (`create_new`, so a name is never reused; upstream makes a
+  directory per file). `remove` with `recursive` and `force` (missing is fine) is `rm -rf`
+  semantics; a directory without `recursive` fails `IsDirectory`.
 - An environment is trusted, not a confinement boundary: path checks are hygiene, not
   security.
 
 ## `LocalEnv`
 
 ```rust
-pub struct LocalEnv { /* cwd, shell_path, shell_env, watch options */ }
+pub struct LocalEnv { /* cwd, shell_path, shell_env, running children */ }
 impl LocalEnv {
-    pub fn new(cwd: impl Into<PathBuf>) -> Self;
+    pub fn new(cwd: impl Into<PathBuf>) -> Self;          // a relative cwd resolves against the process's
     pub fn with_shell(self, path: impl Into<PathBuf>) -> Self;
     pub fn with_shell_env(self, env: BTreeMap<String, String>) -> Self;
-    pub fn with_watch(self, options: WatchOptions /* mode, poll_interval, max_directories */) -> Self;
 }
-pub fn local_env(cwd: Option<&str>) -> Arc<dyn ExecutionEnv>;   // cached per directory, for HarnessOptions.env
 ```
 
 `id()` is `"local"`. The tool task builds `api.env` through `HarnessOptions.env`, an
 `Arc<dyn EnvBuilder>` ([harness.md](harness.md)) whose `build(EnvTarget { conversation_id,
 cwd, read }, &Context)` returns `Option<Arc<dyn ExecutionEnv>>`, never on the session line;
-`LocalEnvBuilder` (one cached `LocalEnv` per directory, `local_env(cwd)`) is the usual
-value. Text decoding is a streaming UTF-8 decoder (`utf8_chunks`), as
-`delta_chord::OutputBuffer`.
+`LocalEnvBuilder` (one cached `LocalEnv` per directory) is the usual value. The builder and
+its cache live with `EnvBuilder` in the harness surface, not in `env`: `EnvTarget` names the
+kernel's document reader, and a free `local_env(cwd)` with a process-wide cache would be the
+module-level state the architecture rules out. `with_watch` arrives with `watch`.
+
+Paths: `~` and `~/…` name the home directory, a `file://` URL its file path (a malformed one
+stays an ordinary path), and the result is normalized lexically as Node's `path.resolve`.
+Text decoding is a streaming UTF-8 decoder (`utf8_chunks`, crate-private `env::decode`), as
+`delta_chord::OutputBuffer`; `LineScanner` computes `LineScan`s from it in one pass.
+
+Layout: `env/mod.rs` (traits and shared types), `error.rs`, `exec.rs`, `decode.rs`,
+`line_scan.rs`, `watch.rs` and `list.rs` (types of the optional capabilities), and
+`env/local/` (`mod.rs`, `path.rs`, `fs.rs`, `readers.rs`, `shell.rs`, `process.rs`,
+`spill.rs`). `env` names only `delta_chord`, `tokio`, `futures`, `url` and `uuid`.
 
 ## Conformance suite
 
-`delta_harness::testing::env_conformance(options) -> Vec<EnvCase>` with `with_env` (a
-fresh, empty, writable `cwd` per case), `shell` (default `["sh", "-c"]`), `symlinks`
-(default true) and `list_files` (default false). Cases ported from upstream:
+`tests/env_conformance.rs`: each case is a `for<'a> fn(&'a Suite, &'a dyn ExecutionEnv) ->
+BoxFuture<'a, ()>` run in a fresh, empty, writable `cwd`; `Suite` holds `shell` (argv prefix,
+`["sh", "-c"]`), `symlinks` (default true on Unix), `watch` and `list_files` (whether the
+optional methods are implemented; when not, a case checks that they fail `not_supported`).
+The functions move to a public `delta_harness::testing` module when a second environment
+needs them. Cases ported from upstream:
 
 - binary reader: reads byte ranges of the opened file; scans lines like decoding the whole
   file; keeps reading the file it opened after a rename; refuses directories, missing
   files and aborted opens; follows symlinks unless `no_follow` refuses the final one.
-- directory reader: pages every entry exactly once; reports the end and refuses use after
-  close; refuses missing paths and files; skips entries removed during enumeration.
+- directory reader: pages every entry exactly once; reports the end and is closed after an
+  aborted call (use after `close` does not compile); refuses missing paths and files; skips
+  entries removed during enumeration.
 - watch (30 s timeout): reports a missing file's creation, changes, replacement and
   removal; a missing target whose ancestors are created; directories created together
   with their contents; a path whose parent is renamed and recreated; skips excluded
@@ -232,7 +275,9 @@ fresh, empty, writable `cwd` per case), `shell` (default `["sh", "-c"]`), `symli
   `.git` and excluded names; stops at its bounds and reports `truncated`; fails on missing
   directories, files and aborts; lists symbolic links without following them.
 
-The suite runs against `LocalEnv` in `tests/`, in temp directories, without the network.
+The suite runs against `LocalEnv` in `tests/`, in temp directories, without the network; the
+watch and `list_files` cases are ported with those methods. `tests/env_local.rs` covers the
+local behaviour beyond it (spills, process trees, environment variables, file operations).
 
 ## Phase 1 and later
 
@@ -248,7 +293,9 @@ The suite runs against `LocalEnv` in `tests/`, in temp directories, without the 
 - Two traits, `FileSystem` and `Shell`, with `ExecutionEnv` as their union; errors are
   `Result`s with `thiserror` types instead of `{ ok, value }` objects.
 - Path functions are synchronous; `cwd` is immutable per instance.
-- `on_output` is `FnMut(OutputChunk)`; a panic maps to `CallbackError`.
+- `on_output` is `FnMut(OutputChunk)` that may borrow (`ExecOptions<'a>`); a panic maps to
+  `CallbackError`. The stream enum is `OutputStream` (`Stream` is `futures`' trait).
+- `cleanup` only on `Shell`; a reader's `close` consumes it.
 - `FileWatcher` is pull-based (`next().await`) instead of a callback.
 - `id` is `"local"` (upstream `node:local`); it only keys the in-process mutation queue.
 - Reads are `Vec<u8>` / `String`; no `Uint8Array` or string duality on writes
@@ -259,10 +306,13 @@ The suite runs against `LocalEnv` in `tests/`, in temp directories, without the 
 
 - `watch` and `list_files` are optional methods returning `not_supported` until `notify` /
   `ignore` are dependencies.
+- `BoxFuture` methods (as `delta_agent`), no `trait_variant` dependency.
+- Process trees: a process group per command (`process_group(0)`), killed through
+  `/bin/sh`'s `kill`, since `unsafe` is forbidden and there is no `nix`/`rustix` dependency.
 
 ## Open (minor)
 
-- `BoxFuture` methods versus `async fn` in traits with `#[trait_variant::make]`; the
-  former matches `delta_agent`, the latter reads better but needs a dependency.
-- The process-group kill strategy on Unix (`setsid` per command, as upstream's
-  `detached`) and whether a tool may opt out of it.
+- Whether a tool may opt out of the per-command process group (a command that must receive
+  the terminal's signals).
+- `rustix` for `killpg(2)` instead of spawning `kill`, if the maintainer accepts the
+  dependency.
