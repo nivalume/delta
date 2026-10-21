@@ -46,7 +46,7 @@ and `PolicyDecision::Ask` gain `proposed_rule: Option<String>`, the rule a UI of
 
 ```rust
 pub enum PathAccess { Read, Write }
-pub enum PermissionSubject { Command(String), Path { path: String /* absolute */, access: PathAccess } }
+pub enum PermissionSubject { Command { command: String }, Path { path: String /* absolute */, access: PathAccess } }  // serde: tagged "type"
 
 trait HarnessTool {
     /// What rules match this call on; `None`: only rules naming the tool.
@@ -54,7 +54,7 @@ trait HarnessTool {
 }
 ```
 
-`bash` gives `Command(command)` (the model's command, before the command prefix and
+`bash` gives `Command { command }` (the model's command, before the command prefix and
 `BashPrepare`); `read` gives a read path, `write` and `edit` a write path, made absolute
 with the environment's `absolute_path` after the tools' path normalization. The tool task
 builds the environment for the policy (an environment failure is reported and the call is

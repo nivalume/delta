@@ -11,6 +11,7 @@
 mod document;
 mod pending;
 mod policy;
+pub mod rules;
 
 pub use document::{
     ApprovalGrant, ApprovalId, ApprovalRequest, ApprovalsDoc, ApprovalsState, Recorded, ReviewDecision,

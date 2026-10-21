@@ -53,6 +53,24 @@ pub enum ToolReplay {
     Unsafe,
 }
 
+/// How a call reaches a path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathAccess {
+    Read,
+    Write,
+}
+
+/// What permission rules match a call on (`docs/design/permissions.md`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PermissionSubject {
+    /// A shell command, as the model wrote it.
+    Command { command: String },
+    /// An absolute path the call reads or writes.
+    Path { path: String, access: PathAccess },
+}
+
 /// The output window a tool keeps when it declares none: the first 2000 lines, at most
 /// 50 KiB.
 pub const DEFAULT_OUTPUT_LIMITS: OutputLimits = OutputLimits {

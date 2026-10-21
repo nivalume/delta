@@ -31,7 +31,8 @@ use delta_chord::json::{self, Json};
 
 pub use api::{NestedCallOptions, RetainedOutput, ToolApi, ToolApiError};
 pub use definition::{
-    Callers, DEFAULT_OUTPUT_LIMITS, HarnessTool, ToolError, ToolExecutionMode, ToolReplay, canonical_json,
+    Callers, DEFAULT_OUTPUT_LIMITS, HarnessTool, PathAccess, PermissionSubject, ToolError, ToolExecutionMode,
+    ToolReplay, canonical_json,
 };
 pub use function::FnHarnessTool;
 #[cfg(feature = "schemars")]
