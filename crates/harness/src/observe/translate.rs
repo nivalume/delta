@@ -220,6 +220,7 @@ impl Translator {
                 if let Ok(message) = json::from_json::<AssistantMessage>(partial) {
                     out.push(AgentEvent::MessageStart {
                         message: Message::Assistant(message),
+                        task_id: after.live.run.as_ref().map(|run| run.task_id),
                     });
                 }
             }
@@ -324,7 +325,10 @@ impl Translator {
             match entry.model.as_deref() {
                 Some([first, ..]) => {
                     if !(entry.kind == ASSISTANT_ENTRY && streamed) {
-                        out.push(AgentEvent::MessageStart { message: first.clone() });
+                        out.push(AgentEvent::MessageStart {
+                            message: first.clone(),
+                            task_id: entry.by_task_id,
+                        });
                     }
                     out.push(AgentEvent::MessageEnd {
                         entry: (*entry).clone(),

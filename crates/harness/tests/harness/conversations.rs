@@ -214,6 +214,27 @@ async fn a_fork_copies_the_agent_as_of_its_entry(backend: Backend) {
     ));
     let requests = fixture.model.requests();
     assert_eq!(requests[1].messages.len(), 4);
+    // Records name the fork's parent; submissions are each conversation's own.
+    let record = fork.record(&ctx()).await.unwrap();
+    assert_eq!(
+        record.parent.map(|parent| (parent.conversation_id, parent.at)),
+        Some((conversation.id(), answer))
+    );
+    assert!(conversation.record(&ctx()).await.unwrap().parent.is_none());
+    let own = fork.submissions(10, None, &ctx()).await.unwrap();
+    assert_eq!(
+        own.items.iter().map(|record| record.id).collect::<Vec<_>>(),
+        [submission.id()]
+    );
+    let parent_submissions = conversation.submissions(10, None, &ctx()).await.unwrap();
+    assert_eq!(parent_submissions.items.len(), 1);
+    assert_ne!(parent_submissions.items[0].id, submission.id());
+    let listed = harness
+        .conversations(delta_harness::records::ConversationQuery::default(), 10, None, &ctx())
+        .await
+        .unwrap();
+    let ids: Vec<ConversationId> = listed.items.iter().map(|record| record.id).collect();
+    assert_eq!(ids, [conversation.id(), fork.id()]);
     harness.close(&ctx()).await.unwrap();
 }
 

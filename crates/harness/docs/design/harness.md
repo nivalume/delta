@@ -43,6 +43,7 @@ impl Harness {
     pub fn wake(&self) -> Wake;
     pub async fn root(&self, ctx: &Context, options: RootOptions) -> Result<Conversation, HarnessError>;
     pub async fn conversation(&self, id: ConversationId, ctx: &Context) -> Result<Option<Conversation>, HarnessError>;
+    pub async fn conversations(&self, query: ConversationQuery, limit: usize, cursor: Option<Cursor>, ctx: &Context) -> Result<Page<ConversationRecord>, HarnessError>;
     pub async fn create_conversation(&self, options: ConversationCreateOptions, ctx: &Context) -> Result<Conversation, HarnessError>;
     pub async fn get_task(&self, id: TaskId, ctx: &Context) -> Result<Option<TaskRecord>, HarnessError>;
     pub async fn inspect(&self, ctx: &Context) -> Result<HarnessInspection, HarnessError>;
@@ -110,6 +111,8 @@ impl Conversation {
     pub async fn commit<R>(&self, ctx: &Context, f: impl FnOnce(&mut Tx) -> Result<R, TxError> + Send) -> Result<R, HarnessError>;
     pub async fn context(&self, at: Option<EntryId>, ctx: &Context) -> Result<ContextView, HarnessError>;
     pub async fn entries(&self, query: EntryQuery, limit: usize, cursor: Option<Cursor>, ctx: &Context) -> Result<Page<EntryRecord>, HarnessError>;
+    pub async fn record(&self, ctx: &Context) -> Result<ConversationRecord, HarnessError>;   // parent and owner
+    pub async fn submissions(&self, limit: usize, cursor: Option<Cursor>, ctx: &Context) -> Result<Page<SubmissionRecord>, HarnessError>;   // its own, oldest first
     pub async fn fork(&self, at: EntryId, options: ConversationCreateOptions, ctx: &Context) -> Result<Conversation, HarnessError>;
     pub async fn compact(&self, instructions: Option<String>, ctx: &Context) -> Result<TaskId, HarnessError>;
     pub async fn reset(&self, handoff: Option<String>, ctx: &Context) -> Result<(), HarnessError>;

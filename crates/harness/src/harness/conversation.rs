@@ -17,7 +17,8 @@ use crate::context::{ContextView, read_context};
 use crate::documents::DocAddress;
 use crate::inbox::{QueueModes, RESET_ENTRY, SubmissionDraft, admit_submission};
 use crate::records::{
-    ConversationId, Cursor, EntryDraft, EntryId, EntryQuery, EntryRecord, Head, Page, ScanOrder, TaskId,
+    ConversationId, ConversationRecord, Cursor, EntryDraft, EntryId, EntryQuery, EntryRecord, Head, Page, ScanOrder,
+    SubmissionQuery, SubmissionRecord, TaskId,
 };
 use crate::session::{ReportInfo, TransactionScope, Tx, TxError};
 
@@ -181,6 +182,32 @@ impl Conversation {
                 Box::pin(async move { tx.scan_entries(query, limit, cursor).await })
             })
             .await?)
+    }
+
+    /// The conversation's record: its fork parent and owner.
+    pub async fn record(&self, ctx: &Context) -> Result<ConversationRecord, HarnessError> {
+        let id = self.id;
+        let record = self
+            .inner
+            .session
+            .commit(ctx, move |tx| Box::pin(async move { tx.conversation(id).await }))
+            .await?;
+        record.ok_or(HarnessError::UnknownConversation(id))
+    }
+
+    /// One page of the conversation's own submissions (not a fork parent's), oldest first.
+    pub async fn submissions(
+        &self,
+        limit: usize,
+        cursor: Option<Cursor>,
+        ctx: &Context,
+    ) -> Result<Page<SubmissionRecord>, HarnessError> {
+        let query = SubmissionQuery {
+            conversation_id: Some(self.id),
+            status: None,
+            order: Some(ScanOrder::Ascending),
+        };
+        Ok(self.inner.storage.scan_submissions(query, limit, cursor, ctx).await?)
     }
 
     /// A child conversation that sees this one's entries through `at`, with copies of its

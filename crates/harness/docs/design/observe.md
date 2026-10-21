@@ -94,7 +94,7 @@ pub enum AgentEvent {
     Snapshot(Snapshot),
     RunStart { inputs: Vec<SubmissionId> }, RunEnd { inputs: Vec<SubmissionId> },
     TurnStart, TurnEnd,
-    MessageStart { message: Message },
+    MessageStart { message: Message, task_id: Option<TaskId> },   // delta: the streaming or appending task
     MessageUpdate { usage: Usage, changes: Vec<MessageChange> },
     MessageEnd { entry: EntryRecord },
     ToolExecutionStart { #[serde(flatten)] call: ToolEventCall, args: JsonObject },
@@ -150,7 +150,7 @@ this conversation). `before`/`after` comparisons use the mounted values; ops dec
 | `delta.live.run` appears, or its first input differs from before | `run_end` of the old (if any), then `run_start` |
 | `run.task_id` changes to a `delta.generation` task created in this commit | `turn_start` |
 | a `delta.generation` record becomes `completing` (first time) or terminal without having held | `turn_end` (once per commit) |
-| `delta.live.generation.message` appears | `message_start` with the partial |
+| `delta.live.generation.message` appears | `message_start` with the partial and `task_id` the run's generation task (`run.task_id`) |
 | ops below `docs.delta.live.generation.message` on an existing partial | `message_update` with the partial's usage and the translated changes (below); only-`usage` changes send no event |
 | a `tools` or `nested_tools` slot becomes `running` | `tool_execution_start`; `args` from the task's intent checkpoint published in the same commit (nested: the slot's arguments) |
 | ops below a running slot's `output` | `tool_execution_update.output`: `t` ops sum into `trim_start`, `a` ops concatenate into `append`; any other op, or a changed output without `t`/`a`, is `Set(slot.output)` |
@@ -160,7 +160,7 @@ this conversation). `before`/`after` comparisons use the mounted values; ops dec
 | a slot becomes `done`, or is created `done` (a call not offered) | `tool_execution_end` with its result entry when the commit appended it |
 | an unfinished slot disappears (its run ended) | `tool_execution_end` with the result entry appended for its call id in the same commit, else none |
 | a nested slot ends or disappears unfinished | `tool_execution_end` with the `NestedCallDoc` result published in this commit, else none; children before parents (the lists hold parents first; walk backwards) |
-| entry appended with `model` | `message_start` (unless it is the streamed assistant answer whose partial already started) then `message_end`; a tool result's `tool_execution_end` directly precedes its `message_start` |
+| entry appended with `model` | `message_start` with `task_id` the entry's `by_task_id` (unless it is the streamed assistant answer whose partial already started) then `message_end`; a tool result's `tool_execution_end` directly precedes its `message_start` |
 | entry appended without `model` | `entry_appended` |
 | a status leaves `delta.live.compactions` | `compaction_end`, with `error` when `compaction_failure` names that task in the same commit |
 | a task record settles `faulted` / `orphaned` | `task_failed { task_id, kind, message }` |

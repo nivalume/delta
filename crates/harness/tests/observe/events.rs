@@ -87,7 +87,7 @@ async fn a_run_with_tools_yields_upstream_events(backend: Backend) {
             assert_eq!(kinds[index + 1], "message_start");
             assert!(matches!(
                 &events[index + 1],
-                AgentEvent::MessageStart { message: Message::ToolResult(result) } if result.tool_call_id == call.tool_call_id
+                AgentEvent::MessageStart { message: Message::ToolResult(result), .. } if result.tool_call_id == call.tool_call_id
             ));
             ended.push(call.tool_call_id.clone());
         }
@@ -141,7 +141,8 @@ async fn a_streamed_answer_starts_once_and_updates(backend: Backend) {
             matches!(
                 event,
                 AgentEvent::MessageStart {
-                    message: Message::Assistant(_)
+                    message: Message::Assistant(_),
+                    ..
                 }
             )
         })
@@ -166,15 +167,21 @@ async fn a_streamed_answer_starts_once_and_updates(backend: Backend) {
             matches!(
                 event,
                 AgentEvent::MessageStart {
-                    message: Message::Assistant(_)
+                    message: Message::Assistant(_),
+                    ..
                 }
             )
         })
         .count();
     assert_eq!(starts, 0, "{:?}", kinds(&events));
+    // The partial names the generation task that appends its entry.
+    let AgentEvent::MessageStart { task_id, .. } = &events[partial_start] else {
+        unreachable!()
+    };
+    assert!(task_id.is_some());
     assert!(events.iter().any(|event| matches!(
         event,
-        AgentEvent::MessageEnd { entry } if entry.kind == "delta.assistant"
+        AgentEvent::MessageEnd { entry } if entry.kind == "delta.assistant" && entry.by_task_id == *task_id
     )));
     harness.close(&ctx()).await.unwrap();
 }

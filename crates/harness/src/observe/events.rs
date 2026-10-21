@@ -153,6 +153,10 @@ pub enum AgentEvent {
     TurnEnd,
     MessageStart {
         message: Message,
+        /// delta: the task that streams or appended the message (the generation task of an
+        /// assistant message), so a UI can name the message before its entry exists.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<TaskId>,
     },
     MessageUpdate {
         usage: Usage,
