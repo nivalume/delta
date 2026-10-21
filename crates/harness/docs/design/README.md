@@ -84,7 +84,7 @@ crates/harness/
     tool/            # HarnessTool, FnHarnessTool, ToolApi, the delta.tool task: pipeline, execute, output, settle, nested
     approval/        # ApprovalPolicy, delta.approvals (requests, decisions, grants), PendingApprovals
     compaction/      # thresholds, range selection, the delta.compaction task, TaskCompactor
-    observe/         # the conversation view mount (events and the task graph follow)
+    observe/         # the conversation view mount and agent events (the task graph follows)
     env/             # trait, local
     tools/           # read, write, edit, bash
   tests/             # ported upstream tests; storage and env conformance

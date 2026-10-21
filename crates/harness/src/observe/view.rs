@@ -55,6 +55,20 @@ struct Core {
     docs: HashMap<String, (DocumentId, u32)>,
     /// The mounted entries: id and whether it is a head marker.
     entries: Vec<(EntryId, bool)>,
+    /// Who else follows the mount's revisions (the event streams).
+    listeners: Vec<Weak<dyn MountListener>>,
+}
+
+/// One revision of a mount, as a listener sees it.
+pub(crate) struct Revision<'a> {
+    pub(crate) before: &'a Json,
+    pub(crate) after: &'a Json,
+    pub(crate) publication: &'a CommitPublication,
+}
+
+/// Follows a mount's revisions on the commit line; it must not block.
+pub(crate) trait MountListener: Send + Sync {
+    fn advanced(&self, revision: &Revision<'_>);
 }
 
 impl Core {
@@ -151,13 +165,29 @@ impl Core {
         if ops.is_empty() {
             return;
         }
-        let before = self.state.value();
-        if delta_chord::delta::applied(&before, &ops).is_err() {
-            let mut value = before;
+        let before_value = self.state.value();
+        if delta_chord::delta::applied(&before_value, &ops).is_err() {
+            let mut value = before_value.clone();
             ops.retain(|op| delta_chord::delta::apply(&mut value, std::slice::from_ref(op)).is_ok());
         }
         // Applies: every op that did not was dropped above.
         let _ = self.state.apply(&publication.context, ops);
+        if self.listeners.is_empty() {
+            return;
+        }
+        let after = self.state.value();
+        let revision = Revision {
+            before: &before_value,
+            after: &after,
+            publication,
+        };
+        self.listeners.retain(|listener| match listener.upgrade() {
+            Some(listener) => {
+                listener.advanced(&revision);
+                true
+            }
+            None => false,
+        });
     }
 }
 
@@ -171,6 +201,7 @@ fn path(segments: &[&str]) -> delta_chord::json::Path {
 
 /// One live mount; dropping the last handle stops it following the commits.
 pub(crate) struct Mount {
+    core: Arc<Mutex<Core>>,
     state: State,
     _observer: ObserverGuard,
 }
@@ -178,6 +209,15 @@ pub(crate) struct Mount {
 impl Mount {
     pub(crate) fn state(&self) -> &State {
         &self.state
+    }
+
+    /// Adds a listener; call it on the line (inside a commit) so it misses no revision.
+    pub(crate) fn listen(&self, listener: Weak<dyn MountListener>) {
+        self.core
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .listeners
+            .push(listener);
     }
 }
 
@@ -289,13 +329,19 @@ impl ViewMounts {
                                 state: state.clone(),
                                 docs: read.docs,
                                 entries: read.entries,
+                                listeners: Vec::new(),
                             }));
+                            let following = core.clone();
                             let observer =
                                 registrar.observe_commits(Box::new(move |publication: &CommitPublication| {
-                                    core.lock().unwrap_or_else(PoisonError::into_inner).advance(publication);
+                                    following
+                                        .lock()
+                                        .unwrap_or_else(PoisonError::into_inner)
+                                        .advance(publication);
                                     Ok(())
                                 }));
                             Arc::new(Mount {
+                                core,
                                 state,
                                 _observer: observer,
                             })

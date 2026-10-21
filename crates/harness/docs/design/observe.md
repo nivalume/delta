@@ -272,9 +272,25 @@ impl Harness {
   - On-line observers run in registration order, so a waiter woken by an earlier one (a
     submission's) may read the view before the mount advanced for that commit.
 
+- Phase 6 (implementation, events):
+  - `Conversation::events(ctx) -> AgentEventStream` (instead of a free `watch_events`); the
+    stream is a listener of the conversation's view mount, attached inside a read-only
+    commit with the snapshot and the scan of `completing` generations, so no commit falls
+    between them. It ends when the Session closes.
+  - The derivation reads the view before and after each revision plus the publication's
+    records. Deltas are computed from the two values with chord's own tools instead of
+    from the view ops, whose array indices move within a batch: a partial's changes are
+    the `diff` of the two partials translated as the table says (inserted blocks start,
+    `a` on `text` / `thinking` / under `arguments` are deltas, other ops send the block or
+    the message), and a window's change is a trim and an append found with `overlap`, else
+    the whole window. The result is the same events.
+  - `MessageChange::TextStart` / `ThinkingStart` carry the block, like `ToolcallStart`: a
+    throttled commit can insert a block that already holds text.
+  - `ToolcallDelta.path` is a list of keys (strings) and indices (numbers).
+  - `Snapshot.generation.message` stays `Json` (the open item below is decided), and
+    `approvals` lists the requests waiting for a decision.
+  - Events also deserialize, so a protocol can read them back.
+
 ## Open (minor)
 
-- `Snapshot.generation.message` as `AssistantMessage` (typed) versus `Json`; typed costs a
-  deserialization per batch, `Json` keeps the mount's sharing.
-- Whether the events module lands in phase 1 or waits for the protocol crate; the view and
-  the task graph are needed by the TUI either way.
+None.

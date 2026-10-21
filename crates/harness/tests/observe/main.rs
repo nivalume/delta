@@ -1,4 +1,4 @@
-//! Observation: the conversation view mount.
+//! Observation: the conversation view mount and the agent events derived from it.
 //!
 //! The central check: a view advanced commit by commit equals the view rebuilt from
 //! storage afterwards. Every case runs against memory and SQLite in a temp file.
@@ -20,6 +20,7 @@ macro_rules! cases {
     };
 }
 
+mod events;
 mod view;
 
 pub(crate) use support::Backend;

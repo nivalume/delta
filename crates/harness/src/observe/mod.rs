@@ -1,12 +1,19 @@
 //! Observation (spec §9): the conversation view, a `delta_chord::State` per observed
-//! conversation advanced from the commit publications.
+//! conversation advanced from the commit publications, and the agent events derived from
+//! its revisions.
 //!
 //! Every observer sees committed state only and never blocks a writer: a mount is built on
 //! the commit line from the committed transcript and documents, and advanced on the line
-//! with the ops each commit wrote. Corresponds to upstream `src/harness/view.ts`. See
+//! with the ops each commit wrote. Corresponds to upstream `src/harness/view.ts` and `events.ts`. See
 //! `docs/design/observe.md`.
 
+mod events;
+mod stream;
+mod translate;
 mod view;
 
+pub use events::{AgentEvent, MessageChange, OutputChange, QueuedItem, QueuedMode, Snapshot, ToolEventCall};
+pub(crate) use stream::attach;
+pub use stream::{AgentEventStream, EVENT_BACKLOG};
 pub(crate) use view::ViewMounts;
 pub use view::{ConversationView, MOUNTED_DOCUMENTS, ViewState, ViewSubscription};
