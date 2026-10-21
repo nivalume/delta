@@ -1,0 +1,29 @@
+[package]
+name = "delta-protocol"
+description = "The UI protocol of delta-harness: a Codex app-server v2 compatible subset (types only)"
+readme = "README.md"
+keywords = ["llm", "agent", "protocol", "json-rpc"]
+categories = ["api-bindings"]
+include = ["src/**", "docs/**", "schema/**", "README.md", "LICENSE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+name = "delta_protocol"
+
+[dependencies]
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

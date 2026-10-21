@@ -16,6 +16,7 @@ delta-ai = { path = "crates/ai", version = "1.0.0" }
 delta-chord = { path = "crates/chord", version = "1.0.0" }
 delta-harness = { path = "crates/harness", version = "1.0.0" }
 delta-claude-hooks = { path = "crates/claude-hooks", version = "1.0.0" }
+delta-protocol = { path = "crates/protocol", version = "1.0.0" }
 
 aws-config = { version = "1.12", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client", "credentials-process", "sso"] }
 aws-sdk-bedrockruntime = { version = "1.148", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }

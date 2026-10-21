@@ -1,0 +1,2667 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "delta-protocol",
+  "roots": {
+    "ClientRequest": {
+      "$ref": "#/$defs/ClientRequest"
+    },
+    "ClientNotification": {
+      "$ref": "#/$defs/ClientNotification"
+    },
+    "ServerNotificationEnvelope": {
+      "$ref": "#/$defs/ServerNotificationEnvelope"
+    },
+    "ServerRequest": {
+      "$ref": "#/$defs/ServerRequest"
+    },
+    "JsonRpcResponse": {
+      "$ref": "#/$defs/JsonRpcResponse"
+    },
+    "JsonRpcError": {
+      "$ref": "#/$defs/JsonRpcError"
+    },
+    "InitializeResponse": {
+      "$ref": "#/$defs/InitializeResponse"
+    },
+    "ThreadSession": {
+      "$ref": "#/$defs/ThreadSession"
+    },
+    "ThreadListResponse": {
+      "$ref": "#/$defs/ThreadListResponse"
+    },
+    "ThreadReadResponse": {
+      "$ref": "#/$defs/ThreadReadResponse"
+    },
+    "TurnStartResponse": {
+      "$ref": "#/$defs/TurnStartResponse"
+    },
+    "TurnSteerResponse": {
+      "$ref": "#/$defs/TurnSteerResponse"
+    },
+    "TurnInterruptResponse": {
+      "$ref": "#/$defs/TurnInterruptResponse"
+    },
+    "CommandExecutionRequestApprovalResponse": {
+      "$ref": "#/$defs/CommandExecutionRequestApprovalResponse"
+    },
+    "FileChangeRequestApprovalResponse": {
+      "$ref": "#/$defs/FileChangeRequestApprovalResponse"
+    },
+    "PermissionsResponse": {
+      "$ref": "#/$defs/PermissionsResponse"
+    },
+    "PermissionRulesResponse": {
+      "$ref": "#/$defs/PermissionRulesResponse"
+    },
+    "ToolRequestApprovalResponse": {
+      "$ref": "#/$defs/ToolRequestApprovalResponse"
+    }
+  },
+  "$defs": {
+    "ClientRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "initialize"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/InitializeParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`v2::InitializeResponse`]; the first request of a connection."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "thread/start"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/ThreadStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`v2::ThreadStartResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "thread/resume"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/ThreadResumeParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`v2::ThreadResumeResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "thread/fork"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/ThreadForkParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`v2::ThreadForkResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "thread/list"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/ThreadListParams",
+              "default": {
+                "cursor": null,
+                "limit": null
+              }
+            }
+          },
+          "required": [
+            "method",
+            "id"
+          ],
+          "description": "[`v2::ThreadListResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "thread/read"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/ThreadReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`v2::ThreadReadResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "turn/start"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/TurnStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`v2::TurnStartResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "turn/steer"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/TurnSteerParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`v2::TurnSteerResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "turn/interrupt"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/TurnInterruptParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`v2::TurnInterruptResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "delta/permissions/read"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/PermissionsReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`delta::PermissionsResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "delta/permissions/update"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/PermissionsUpdateParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`delta::PermissionsResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "delta/permissionRules/read"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            }
+          },
+          "required": [
+            "method",
+            "id"
+          ],
+          "description": "[`delta::PermissionRulesResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "delta/permissionRules/remove"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/PermissionRulesRemoveParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`delta::PermissionRulesResponse`]."
+        }
+      ],
+      "description": "A request the client sends; the comment names the response type."
+    },
+    "RequestId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        }
+      ],
+      "description": "A request's id: a string or an integer, as the client chose."
+    },
+    "InitializeParams": {
+      "type": "object",
+      "properties": {
+        "clientInfo": {
+          "$ref": "#/$defs/ClientInfo"
+        },
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InitializeCapabilities"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "clientInfo"
+      ]
+    },
+    "ClientInfo": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ]
+    },
+    "InitializeCapabilities": {
+      "type": "object",
+      "properties": {
+        "experimentalApi": {
+          "type": "boolean",
+          "default": false
+        },
+        "optOutNotificationMethods": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Notification methods the client does not want.",
+          "default": null
+        }
+      }
+    },
+    "ThreadStartParams": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`<provider>/<model id>`, or a model id of the server's default provider.",
+          "default": null
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "approvalPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AskForApproval"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "baseInstructions": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "developerInstructions": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "AskForApproval": {
+      "type": "string",
+      "enum": [
+        "untrusted",
+        "on-request",
+        "never"
+      ],
+      "description": "Codex's approval policy; delta's own policy decides, so the server reports `on-request`."
+    },
+    "ThreadResumeParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "approvalPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AskForApproval"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "threadId"
+      ]
+    },
+    "ThreadForkParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "lastTurnId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The last turn the fork keeps; the thread's last turn when absent.",
+          "default": null
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "approvalPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AskForApproval"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "threadId"
+      ]
+    },
+    "ThreadListParams": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "default": null
+        }
+      }
+    },
+    "ThreadReadParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "includeTurns": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "threadId"
+      ]
+    },
+    "TurnStartParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "input": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UserInput"
+          }
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "approvalPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AskForApproval"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "threadId",
+        "input"
+      ]
+    },
+    "UserInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "text"
+            },
+            "text": {
+              "type": "string"
+            },
+            "text_elements": {
+              "type": "array",
+              "items": true,
+              "default": []
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "description": "`text_elements` is snake case on the wire, as Codex writes it."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "image"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ],
+          "description": "An image by URL (a `data:` URL carries its bytes)."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "localImage"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ]
+        }
+      ],
+      "description": "One part of a user's input."
+    },
+    "TurnSteerParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "input": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UserInput"
+          }
+        },
+        "expectedTurnId": {
+          "type": "string"
+        },
+        "clientUserMessageId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "threadId",
+        "input",
+        "expectedTurnId"
+      ]
+    },
+    "TurnInterruptParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId"
+      ]
+    },
+    "PermissionsReadParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "description": "`delta/permissions/read`."
+    },
+    "PermissionsUpdateParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sets the mode."
+        },
+        "clearMode": {
+          "type": "boolean",
+          "description": "Returns to the server's default mode; `mode` wins when both are given."
+        },
+        "add": {
+          "$ref": "#/$defs/PermissionRules",
+          "default": {
+            "allow": [],
+            "ask": [],
+            "deny": []
+          }
+        },
+        "remove": {
+          "$ref": "#/$defs/PermissionRules",
+          "default": {
+            "allow": [],
+            "ask": [],
+            "deny": []
+          }
+        },
+        "directories": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Replaces the extra directories."
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "description": "`delta/permissions/update`: removals apply before additions; rules are matched by text."
+    },
+    "PermissionMode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "default",
+          "description": "Reads inside the working directories run; anything else not allowed by a rule asks."
+        },
+        {
+          "type": "string",
+          "const": "acceptEdits",
+          "description": "Also writes inside the working directories run."
+        },
+        {
+          "type": "string",
+          "const": "plan",
+          "description": "Commands and writes are denied."
+        },
+        {
+          "type": "string",
+          "const": "dontAsk",
+          "description": "What would ask is denied."
+        },
+        {
+          "type": "string",
+          "const": "bypass",
+          "description": "Everything runs, except what a deny or ask rule names."
+        }
+      ],
+      "description": "How much a thread's tool calls may do without asking."
+    },
+    "PermissionRules": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "ask": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "description": "Rules in Claude Code's `Tool(specifier)` grammar, by what they decide."
+    },
+    "PermissionRulesRemoveParams": {
+      "type": "object",
+      "properties": {
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule"
+      ],
+      "description": "`delta/permissionRules/remove`; answers [`PermissionRulesResponse`]."
+    },
+    "ClientNotification": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "initialized"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "description": "Sent once the `initialize` response arrived."
+        }
+      ],
+      "description": "A notification the client sends."
+    },
+    "ServerNotificationEnvelope": {
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "error"
+            },
+            "params": {
+              "$ref": "#/$defs/ErrorNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "thread/started"
+            },
+            "params": {
+              "$ref": "#/$defs/ThreadStartedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "thread/status/changed"
+            },
+            "params": {
+              "$ref": "#/$defs/ThreadStatusChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "thread/tokenUsage/updated"
+            },
+            "params": {
+              "$ref": "#/$defs/ThreadTokenUsageUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "turn/started"
+            },
+            "params": {
+              "$ref": "#/$defs/TurnNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "turn/completed"
+            },
+            "params": {
+              "$ref": "#/$defs/TurnNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "item/started"
+            },
+            "params": {
+              "$ref": "#/$defs/ItemStartedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "item/completed"
+            },
+            "params": {
+              "$ref": "#/$defs/ItemCompletedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "item/agentMessage/delta"
+            },
+            "params": {
+              "$ref": "#/$defs/ItemDeltaNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "item/commandExecution/outputDelta"
+            },
+            "params": {
+              "$ref": "#/$defs/ItemDeltaNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "item/reasoning/textDelta"
+            },
+            "params": {
+              "$ref": "#/$defs/ReasoningTextDeltaNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "serverRequest/resolved"
+            },
+            "params": {
+              "$ref": "#/$defs/ServerRequestResolvedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "delta/snapshot"
+            },
+            "params": {
+              "$ref": "#/$defs/SnapshotNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        }
+      ],
+      "description": "A server notification as written: `{\"method\", \"params\", \"emittedAtMs\"}`.",
+      "properties": {
+        "emittedAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Unix milliseconds."
+        }
+      }
+    },
+    "ErrorNotification": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/TurnError"
+        },
+        "willRetry": {
+          "type": "boolean"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error",
+        "willRetry",
+        "threadId",
+        "turnId"
+      ]
+    },
+    "TurnError": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "codexErrorInfo": {
+          "description": "Codex's error classification (`\"contextWindowExceeded\"`, ...); `\"other\"` from delta.",
+          "default": null
+        },
+        "additionalDetails": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "message"
+      ]
+    },
+    "ThreadStartedNotification": {
+      "type": "object",
+      "properties": {
+        "thread": {
+          "$ref": "#/$defs/Thread"
+        }
+      },
+      "required": [
+        "thread"
+      ]
+    },
+    "Thread": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "forkedFromId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "parentThreadId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "preview": {
+          "type": "string",
+          "description": "The first user message, shortened."
+        },
+        "ephemeral": {
+          "type": "boolean"
+        },
+        "modelProvider": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "createdAt": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Unix seconds."
+        },
+        "updatedAt": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "status": {
+          "$ref": "#/$defs/ThreadStatus"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "cliVersion": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SessionSource"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Turn"
+          },
+          "description": "Filled by `thread/read` with `includeTurns` and by `thread/resume`."
+        }
+      },
+      "required": [
+        "id",
+        "sessionId",
+        "preview",
+        "ephemeral",
+        "modelProvider",
+        "createdAt",
+        "updatedAt",
+        "status",
+        "cwd",
+        "cliVersion",
+        "source",
+        "turns"
+      ]
+    },
+    "ThreadStatus": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "notLoaded"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "idle"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "systemError"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "active"
+            },
+            "activeFlags": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ThreadActiveFlag"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "activeFlags"
+          ]
+        }
+      ]
+    },
+    "ThreadActiveFlag": {
+      "type": "string",
+      "enum": [
+        "waitingOnApproval",
+        "waitingOnUserInput"
+      ]
+    },
+    "SessionSource": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "appServer",
+            "unknown"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "subAgent": true
+          },
+          "required": [
+            "subAgent"
+          ],
+          "additionalProperties": false,
+          "description": "A conversation a task owns."
+        }
+      ],
+      "description": "Where a thread came from."
+    },
+    "Turn": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ThreadItem"
+          }
+        },
+        "status": {
+          "$ref": "#/$defs/TurnStatus"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "startedAt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "completedAt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "durationMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "items",
+        "status"
+      ]
+    },
+    "ThreadItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "userMessage"
+            },
+            "id": {
+              "type": "string"
+            },
+            "clientId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UserInput"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "agentMessage"
+            },
+            "id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "reasoning"
+            },
+            "id": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "content": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "commandExecution"
+            },
+            "id": {
+              "type": "string"
+            },
+            "command": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "processId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "status": {
+              "$ref": "#/$defs/CommandExecutionStatus"
+            },
+            "commandActions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CommandAction"
+              }
+            },
+            "aggregatedOutput": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "exitCode": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "default": null
+            },
+            "durationMs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "default": null
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "command",
+            "cwd",
+            "status",
+            "commandActions"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "fileChange"
+            },
+            "id": {
+              "type": "string"
+            },
+            "changes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FileUpdateChange"
+              }
+            },
+            "status": {
+              "$ref": "#/$defs/PatchApplyStatus"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "changes",
+            "status"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "dynamicToolCall"
+            },
+            "id": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "tool": {
+              "type": "string"
+            },
+            "arguments": true,
+            "status": {
+              "$ref": "#/$defs/DynamicToolCallStatus"
+            },
+            "contentItems": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/DynamicToolCallOutputContentItem"
+              },
+              "default": null
+            },
+            "success": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "default": null
+            },
+            "durationMs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "default": null
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "tool",
+            "arguments",
+            "status"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "contextCompaction"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ]
+        }
+      ],
+      "description": "One unit of a turn's work."
+    },
+    "CommandExecutionStatus": {
+      "type": "string",
+      "enum": [
+        "inProgress",
+        "completed",
+        "failed",
+        "declined"
+      ]
+    },
+    "CommandAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "unknown"
+            },
+            "command": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "command"
+          ]
+        }
+      ]
+    },
+    "FileUpdateChange": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PatchChangeKind"
+        },
+        "diff": {
+          "type": "string",
+          "description": "A unified diff."
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "diff"
+      ]
+    },
+    "PatchChangeKind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "add"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "delete"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "update"
+            },
+            "move_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ],
+      "description": "`move_path` is snake case on the wire, as Codex writes it."
+    },
+    "PatchApplyStatus": {
+      "type": "string",
+      "enum": [
+        "inProgress",
+        "completed",
+        "failed",
+        "declined"
+      ]
+    },
+    "DynamicToolCallStatus": {
+      "type": "string",
+      "enum": [
+        "inProgress",
+        "completed",
+        "failed"
+      ]
+    },
+    "DynamicToolCallOutputContentItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "inputText"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "inputImage"
+            },
+            "imageUrl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "imageUrl"
+          ]
+        }
+      ]
+    },
+    "TurnStatus": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "interrupted",
+        "failed",
+        "inProgress"
+      ]
+    },
+    "ThreadStatusChangedNotification": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ThreadStatus"
+        }
+      },
+      "required": [
+        "threadId",
+        "status"
+      ]
+    },
+    "ThreadTokenUsageUpdatedNotification": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "tokenUsage": {
+          "$ref": "#/$defs/ThreadTokenUsage"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId",
+        "tokenUsage"
+      ]
+    },
+    "ThreadTokenUsage": {
+      "type": "object",
+      "properties": {
+        "total": {
+          "$ref": "#/$defs/TokenUsageBreakdown"
+        },
+        "last": {
+          "$ref": "#/$defs/TokenUsageBreakdown"
+        },
+        "modelContextWindow": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        }
+      },
+      "required": [
+        "total",
+        "last"
+      ]
+    },
+    "TokenUsageBreakdown": {
+      "type": "object",
+      "properties": {
+        "totalTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "inputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "cachedInputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "cacheWriteInputTokens": {
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "reasoningOutputTokens": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "totalTokens",
+        "inputTokens",
+        "cachedInputTokens",
+        "outputTokens",
+        "reasoningOutputTokens"
+      ]
+    },
+    "TurnNotification": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turn": {
+          "$ref": "#/$defs/Turn"
+        }
+      },
+      "required": [
+        "threadId",
+        "turn"
+      ]
+    },
+    "ItemStartedNotification": {
+      "type": "object",
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/ThreadItem"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "startedAtMs": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "item",
+        "threadId",
+        "turnId",
+        "startedAtMs"
+      ]
+    },
+    "ItemCompletedNotification": {
+      "type": "object",
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/ThreadItem"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "completedAtMs": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "item",
+        "threadId",
+        "turnId",
+        "completedAtMs"
+      ]
+    },
+    "ItemDeltaNotification": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "delta": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId",
+        "itemId",
+        "delta"
+      ],
+      "description": "`item/agentMessage/delta` and `item/commandExecution/outputDelta`."
+    },
+    "ReasoningTextDeltaNotification": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "delta": {
+          "type": "string"
+        },
+        "contentIndex": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId",
+        "itemId",
+        "delta",
+        "contentIndex"
+      ]
+    },
+    "ServerRequestResolvedNotification": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "requestId": {
+          "$ref": "#/$defs/RequestId"
+        }
+      },
+      "required": [
+        "threadId",
+        "requestId"
+      ]
+    },
+    "SnapshotNotification": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "snapshot": {
+          "description": "The harness's `Snapshot` as JSON."
+        }
+      },
+      "required": [
+        "threadId",
+        "snapshot"
+      ],
+      "description": "`delta/snapshot`: the thread's whole state, sent when the client fell behind its events.\nItems in flight continue with their deltas; anything before is in the snapshot."
+    },
+    "ServerRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "item/commandExecution/requestApproval"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/CommandExecutionRequestApprovalParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`v2::CommandExecutionRequestApprovalResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "item/fileChange/requestApproval"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/FileChangeRequestApprovalParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`v2::FileChangeRequestApprovalResponse`]."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "delta/tool/requestApproval"
+            },
+            "id": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "params": {
+              "$ref": "#/$defs/ToolRequestApprovalParams"
+            }
+          },
+          "required": [
+            "method",
+            "id",
+            "params"
+          ],
+          "description": "[`delta::ToolRequestApprovalResponse`]."
+        }
+      ],
+      "description": "A request the server sends; the comment names the response type."
+    },
+    "CommandExecutionRequestApprovalParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "startedAtMs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "approvalId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposedExecpolicyAmendment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecPolicyAmendment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId",
+        "itemId",
+        "startedAtMs"
+      ]
+    },
+    "ExecPolicyAmendment": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "A command prefix; JSON `[\"git\", \"status\"]`."
+    },
+    "FileChangeRequestApprovalParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "startedAtMs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "grantRoot": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId",
+        "itemId",
+        "startedAtMs"
+      ]
+    },
+    "ToolRequestApprovalParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "startedAtMs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "arguments": true,
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposedRule": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The rule `acceptWithRule` would add when the client names none."
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId",
+        "itemId",
+        "startedAtMs",
+        "tool",
+        "arguments"
+      ],
+      "description": "`delta/tool/requestApproval`: a call of a tool that is neither a command nor a file change."
+    },
+    "JsonRpcResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "result": true
+      },
+      "required": [
+        "id",
+        "result"
+      ],
+      "description": "A successful response."
+    },
+    "JsonRpcError": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "error": {
+          "$ref": "#/$defs/JsonRpcErrorBody"
+        }
+      },
+      "required": [
+        "id",
+        "error"
+      ],
+      "description": "A failed response."
+    },
+    "JsonRpcErrorBody": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "message": {
+          "type": "string"
+        },
+        "data": true
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "description": "A failed request's error."
+    },
+    "InitializeResponse": {
+      "type": "object",
+      "properties": {
+        "userAgent": {
+          "type": "string"
+        },
+        "codexHome": {
+          "type": "string"
+        },
+        "platformFamily": {
+          "type": "string"
+        },
+        "platformOs": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "userAgent",
+        "codexHome",
+        "platformFamily",
+        "platformOs"
+      ]
+    },
+    "ThreadSession": {
+      "type": "object",
+      "properties": {
+        "thread": {
+          "$ref": "#/$defs/Thread"
+        },
+        "model": {
+          "type": "string"
+        },
+        "modelProvider": {
+          "type": "string"
+        },
+        "serviceTier": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "approvalPolicy": {
+          "$ref": "#/$defs/AskForApproval"
+        },
+        "approvalsReviewer": {
+          "$ref": "#/$defs/ApprovalsReviewer"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/SandboxPolicy"
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "thread",
+        "model",
+        "modelProvider",
+        "cwd",
+        "approvalPolicy",
+        "approvalsReviewer",
+        "sandbox"
+      ],
+      "description": "What `thread/start`, `thread/resume` and `thread/fork` answer."
+    },
+    "ApprovalsReviewer": {
+      "type": "string",
+      "enum": [
+        "user",
+        "auto_review"
+      ]
+    },
+    "SandboxPolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "dangerFullAccess"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "readOnly"
+            },
+            "networkAccess": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ],
+      "description": "Codex's sandbox; delta runs commands in the conversation's environment unconfined, so\nthe server reports `dangerFullAccess`."
+    },
+    "ThreadListResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Thread"
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "backwardsCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "data"
+      ]
+    },
+    "ThreadReadResponse": {
+      "type": "object",
+      "properties": {
+        "thread": {
+          "$ref": "#/$defs/Thread"
+        }
+      },
+      "required": [
+        "thread"
+      ]
+    },
+    "TurnStartResponse": {
+      "type": "object",
+      "properties": {
+        "turn": {
+          "$ref": "#/$defs/Turn"
+        }
+      },
+      "required": [
+        "turn"
+      ]
+    },
+    "TurnSteerResponse": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "turnId"
+      ]
+    },
+    "TurnInterruptResponse": {
+      "type": "object"
+    },
+    "CommandExecutionRequestApprovalResponse": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/CommandExecutionApprovalDecision"
+        }
+      },
+      "required": [
+        "decision"
+      ]
+    },
+    "CommandExecutionApprovalDecision": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "accept",
+            "acceptForSession",
+            "decline",
+            "cancel"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "acceptWithExecpolicyAmendment": {
+              "type": "object",
+              "properties": {
+                "execpolicy_amendment": {
+                  "$ref": "#/$defs/ExecPolicyAmendment"
+                }
+              },
+              "required": [
+                "execpolicy_amendment"
+              ]
+            }
+          },
+          "required": [
+            "acceptWithExecpolicyAmendment"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Field names of struct variants stay snake case on the wire, as Codex writes them."
+    },
+    "FileChangeRequestApprovalResponse": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/FileChangeApprovalDecision"
+        }
+      },
+      "required": [
+        "decision"
+      ]
+    },
+    "FileChangeApprovalDecision": {
+      "type": "string",
+      "enum": [
+        "accept",
+        "acceptForSession",
+        "decline",
+        "cancel"
+      ]
+    },
+    "PermissionsResponse": {
+      "type": "object",
+      "properties": {
+        "permissions": {
+          "$ref": "#/$defs/Permissions"
+        }
+      },
+      "required": [
+        "permissions"
+      ],
+      "description": "What `delta/permissions/read` and `delta/permissions/update` answer."
+    },
+    "Permissions": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The mode the thread set; `None`: the server's default.",
+          "default": null
+        },
+        "effectiveMode": {
+          "$ref": "#/$defs/PermissionMode",
+          "description": "The mode in effect."
+        },
+        "rules": {
+          "$ref": "#/$defs/PermissionRules"
+        },
+        "directories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "More directories reads (and `acceptEdits` writes) reach.",
+          "default": []
+        }
+      },
+      "required": [
+        "effectiveMode",
+        "rules"
+      ],
+      "description": "A thread's permissions."
+    },
+    "PermissionRulesResponse": {
+      "type": "object",
+      "properties": {
+        "rules": {
+          "$ref": "#/$defs/PermissionRules"
+        }
+      },
+      "required": [
+        "rules"
+      ],
+      "description": "`delta/permissionRules/read` takes no params; the allow rules approvals added for every\nthread."
+    },
+    "ToolRequestApprovalResponse": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/ToolApprovalDecision"
+        }
+      },
+      "required": [
+        "decision"
+      ]
+    },
+    "ToolApprovalDecision": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "accept",
+            "acceptForSession",
+            "decline",
+            "cancel"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "acceptWithRule": {
+              "type": "object",
+              "properties": {
+                "rule": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "rule"
+              ]
+            }
+          },
+          "required": [
+            "acceptWithRule"
+          ],
+          "additionalProperties": false,
+          "description": "Accepts and adds an allow rule for every thread."
+        }
+      ],
+      "description": "The answer to an approval request of any kind."
+    }
+  }
+}
