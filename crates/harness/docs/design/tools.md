@@ -272,7 +272,8 @@ tools itself passes them a shared one. Two queues do not see each other's mutati
   `ToolControl.add_tools` written to `model_tools` by the generation's `tools` phase
   ([generation.md](generation.md)); the BM25 ranking extension is later.
 - `powershell`: not ported in phase 1.
-- Code mode and a remote environment: later, as [README.md](README.md) lists.
+- A remote environment: later, as [README.md](README.md) lists. Code mode is the
+  `codemode` feature ([codemode.md](codemode.md)).
 
 ## Differences from upstream
 

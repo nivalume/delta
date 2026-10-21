@@ -16,6 +16,7 @@ delta-ai = { path = "crates/ai", version = "1.0.0" }
 delta-chord = { path = "crates/chord", version = "1.0.0" }
 delta-harness = { path = "crates/harness", version = "1.0.0" }
 delta-claude-hooks = { path = "crates/claude-hooks", version = "1.0.0" }
+delta-codemode = { path = "crates/codemode", version = "1.0.0" }
 delta-protocol = { path = "crates/protocol", version = "1.0.0" }
 delta-app-server = { path = "crates/app-server", version = "1.0.0" }
 
@@ -37,6 +38,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 indexmap = { version = "2.14", features = ["serde"] }
 jsonschema = { version = "0.59", default-features = false }
 schemars = "1.2"
+# QuickJS for delta-codemode: no loader, no futures; the VM thread drives jobs itself.
+rquickjs = "0.14"
 rusqlite = { version = "0.40", features = ["bundled"] }
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 regex = "1.13"

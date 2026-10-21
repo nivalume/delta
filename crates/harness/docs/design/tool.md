@@ -278,8 +278,9 @@ diagnostics and add `truncated` when the slot dropped output.
 - `NestedToolExecutionResult { task_id, structured_output, is_error, details, diagnostics,
   usage, duration_ms }`: no `output`, no `control`.
 
-Nothing in phase 1 calls `execute_tool` except tests; code mode and an MCP bridge are the
-later callers (the seam is `callers` plus this method).
+The `codemode` tool ([codemode.md](codemode.md)) is the first caller: each script call is a
+nested call with key `c<VM call id>`. An MCP bridge would be the next (the seam is `callers`
+plus this method).
 
 ## Hooks
 

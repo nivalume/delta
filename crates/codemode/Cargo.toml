@@ -1,0 +1,34 @@
+[package]
+name = "delta-codemode"
+description = "Model-written JavaScript in a QuickJS sandbox that can only call injected tools"
+readme = "README.md"
+keywords = ["llm", "agent", "javascript", "sandbox", "quickjs"]
+categories = ["asynchronous"]
+include = ["src/**", "docs/**", "README.md", "LICENSE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+name = "delta_codemode"
+
+[dependencies]
+futures.workspace = true
+rquickjs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

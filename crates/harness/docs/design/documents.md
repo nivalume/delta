@@ -256,7 +256,9 @@ place; each is specified in its own note.
 | `delta.permissions` | `approval::PermissionsDoc` | conversation | rewindable | as of | always | permissions.md |
 | `delta.permission_rules` | `approval::PermissionRulesDoc` | session | — | — | always | permissions.md |
 | `delta.tool.nested-call` | `tool::NestedCallDoc` | task, family (seed `()`) | — | — | never | tool.md |
-| `delta.codemode.run` | — | task | — | — | — | deferred with code mode |
+| `delta.codemode.run` | `codemode::CodemodeRunDoc` (feature `codemode`) | task | — | — | never | codemode.md |
+| `delta.codemode.journal` | `codemode::CodemodeJournalDoc` (feature `codemode`) | task | — | — | never | codemode.md |
+| `delta.codemode.store` | `codemode::CodemodeStoreDoc` (feature `codemode`) | conversation | rewindable | as of | 64 deltas since the base | codemode.md |
 
 All are version 1; the definitions carry a `Doc` suffix so they do not shadow the record
 and message types of the same names (`Agent`, `Usage`). `delta.live` is the one high-churn document: its rule keeps every base
