@@ -26,7 +26,8 @@ use crate::session::{FaultReason, ReportInfo, ReportTask, SessionError};
 
 /// Why a live task cannot be reserved. Derived from the catalog, the settings and the
 /// record's restart count; never stored.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BlockedReason {
     /// No definition of the task's kind is installed.
     MissingTask,

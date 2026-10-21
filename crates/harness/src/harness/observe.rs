@@ -1,9 +1,11 @@
-//! Observation on the surface: the conversation view.
+//! Observation on the surface: the conversation view, agent events and the task graph.
+
+use std::sync::Arc;
 
 use delta_chord::context::Context;
 
-use super::{Conversation, HarnessError};
-use crate::observe::{AgentEventStream, ViewState, ViewSubscription, attach};
+use super::{Conversation, Harness, HarnessError};
+use crate::observe::{AgentEventStream, TaskGraphSubscription, TaskGraphView, ViewState, ViewSubscription, attach};
 
 impl Conversation {
     /// The conversation's view: its record, active transcript and mounted documents, as a
@@ -38,5 +40,36 @@ impl Conversation {
             })
             .await?;
         Ok(attached.into_stream(close, mount))
+    }
+}
+
+impl Harness {
+    /// The Session's task graph: every live task with what it waits for and the
+    /// conversations it owns, as a read-only state that follows every commit. One mount is
+    /// shared by every observer; it recomputes `blocked` when the scheduler signals a
+    /// change without a commit (a registry publication).
+    pub async fn task_graph(&self, ctx: &Context) -> Result<TaskGraphView, HarnessError> {
+        let probe = self.inner.scheduler.blocked_probe();
+        let (mount, built) = self.inner.graph.mount(&self.inner.session, probe, ctx).await?;
+        if built {
+            let mut blocked = self.inner.scheduler.subscribe_blocked();
+            let mounted = Arc::downgrade(&mount);
+            let harness = Arc::downgrade(&self.inner);
+            tokio::spawn(async move {
+                while blocked.changed().await.is_ok() {
+                    let (Some(mount), Some(inner)) = (mounted.upgrade(), harness.upgrade()) else {
+                        break;
+                    };
+                    // A closing Session ends the refresh; nothing else can fail it.
+                    let _ = mount.refresh_blocked(&inner.session, &Context::background()).await;
+                }
+            });
+        }
+        Ok(TaskGraphView::new(mount))
+    }
+
+    /// The task graph's revisions: a hydration, then one update per commit that changed it.
+    pub async fn watch_task_graph(&self, ctx: &Context) -> Result<TaskGraphSubscription, HarnessError> {
+        Ok(self.task_graph(ctx).await?.subscribe())
     }
 }

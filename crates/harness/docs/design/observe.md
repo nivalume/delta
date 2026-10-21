@@ -197,7 +197,7 @@ turn already ended by a held outcome does not end again when the task goes termi
 pub enum TaskGraphState {
     Pending { phase: String }, Running { phase: String },
     Waiting { phase: String, on: Vec<TaskId>, policy: JoinPolicy },
-    Sleeping { phase: String, until: u64 },
+    Sleeping { phase: String, until: i64 },
     Completing { outcome: OutcomeStatus },
 }
 pub struct TaskGraphNode {
@@ -210,8 +210,8 @@ pub struct TaskGraphNode {
 pub struct TaskGraph { pub tasks: BTreeMap<String, TaskGraphNode> }   // keyed by decimal id
 
 impl Harness {
-    pub async fn task_graph(&self, ctx: &Context) -> Result<State, HarnessError>;
-    pub async fn watch_task_graph(&self, ctx: &Context) -> Result<Subscription, HarnessError>;
+    pub async fn task_graph(&self, ctx: &Context) -> Result<TaskGraphView, HarnessError>;
+    pub async fn watch_task_graph(&self, ctx: &Context) -> Result<TaskGraphSubscription, HarnessError>;
 }
 ```
 
@@ -290,6 +290,15 @@ impl Harness {
   - `Snapshot.generation.message` stays `Json` (the open item below is decided), and
     `approvals` lists the requests waiting for a decision.
   - Events also deserialize, so a protocol can read them back.
+
+- Phase 6 (implementation, task graph):
+  - `task_graph` returns `TaskGraphView` (the read-only wrapper; `TaskGraphState` is the
+    per-task state enum) and `watch_task_graph` a `TaskGraphSubscription`.
+  - The scheduler already had `blocked_reason(record)` and `subscribe_blocked()` from
+    phase 3; the mount's observer uses a `BlockedProbe` (a weak handle on the scheduler)
+    so it does not keep the Session alive, and a task spawned with the mount recomputes
+    every node's `blocked` in a commit whenever `subscribe_blocked` changes.
+  - `BlockedReason` serializes as its snake_case name.
 
 ## Open (minor)
 

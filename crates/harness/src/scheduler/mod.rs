@@ -54,7 +54,7 @@ pub use catalog::{CatalogSnapshot, MemoryCatalog, TaskCatalog};
 pub use definition::{Checkpoint, RunningTask, TaskDefinition};
 pub use erased::AnyTask;
 pub use error::{RuntimeError, SchedulerError, StateError, TaskError};
-pub use inspect::{InspectState, Inspection, Scheduling, TaskInspection};
+pub use inspect::{BlockedProbe, InspectState, Inspection, Scheduling, TaskInspection};
 pub use next::{Next, NextOf, NextState, Outcome};
 pub use ownership::IndexSizes;
 pub use reserve::BlockedReason;
@@ -387,10 +387,13 @@ impl Scheduler {
     /// Why a live task cannot run with the current definitions, if it cannot (the task
     /// graph shows it).
     pub fn blocked_reason(&self, record: &TaskRecord) -> Option<BlockedReason> {
-        let inner = self.inner();
-        let snapshot = inner.catalog.snapshot();
-        let limit = inner.settings().restart_limit;
-        inner.shared.lock().blocked_reason(record, &*snapshot, limit)
+        inspect::blocked(self.inner(), record)
+    }
+
+    /// A handle answering [`blocked_reason`](Self::blocked_reason) that does not keep the
+    /// scheduler alive, for an observer on the commit line.
+    pub fn blocked_probe(&self) -> BlockedProbe {
+        BlockedProbe(Arc::downgrade(self.inner()))
     }
 
     /// Changes when blocked reasons may have changed without a commit.

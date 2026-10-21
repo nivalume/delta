@@ -38,7 +38,7 @@ use crate::compaction::{Compactor, TaskCompactor};
 use crate::documents::DocAddress;
 use crate::generation::{AgentSchedulerHooks, builtin_tasks};
 use crate::model::ModelClient;
-use crate::observe::ViewMounts;
+use crate::observe::{GraphMounts, ViewMounts};
 use crate::records::{
     ConversationId, ConversationQuery, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionStatus, TaskId,
     TaskRecord,
@@ -113,6 +113,7 @@ pub(crate) struct HarnessInner {
     services: Arc<AgentServices>,
     approvals: Arc<PendingApprovals>,
     views: ViewMounts,
+    graph: GraphMounts,
     waits: Arc<SubmissionWaits>,
     on_report: Option<Reporter>,
     _observer: ObserverGuard,
@@ -238,6 +239,7 @@ impl Harness {
             services,
             approvals,
             views: ViewMounts::default(),
+            graph: GraphMounts::default(),
             waits,
             on_report,
             _observer: observer,

@@ -2,7 +2,8 @@
 //! scheduling, no task code: a pending migration shows as `Ready { migrates }`, and only a
 //! migration already tried, or one that cannot exist, as blocked.
 
-use std::sync::Arc;
+use std::fmt;
+use std::sync::{Arc, Weak};
 
 use delta_chord::context::Context;
 
@@ -158,4 +159,30 @@ pub(super) async fn inspect(inner: &Arc<Inner>, ctx: &Context) -> Result<Inspect
         })
         .await?;
     Ok(inspection)
+}
+
+/// Why the live task `record` cannot run with the installed definitions and the settings,
+/// if it cannot; reads the scheduler's memory only, so it may run on the line.
+pub(super) fn blocked(inner: &Inner, record: &TaskRecord) -> Option<BlockedReason> {
+    let snapshot = inner.catalog.snapshot();
+    let limit = inner.settings().restart_limit;
+    inner.shared.lock().blocked_reason(record, &*snapshot, limit)
+}
+
+/// Answers [`Scheduler::blocked_reason`](super::Scheduler::blocked_reason) without keeping the scheduler
+/// alive: an observer of the commit line holds one.
+#[derive(Clone)]
+pub struct BlockedProbe(pub(super) Weak<Inner>);
+
+impl BlockedProbe {
+    /// Why `record` cannot run, if it cannot; `None` once the scheduler is gone.
+    pub fn blocked(&self, record: &TaskRecord) -> Option<BlockedReason> {
+        self.0.upgrade().and_then(|inner| blocked(&inner, record))
+    }
+}
+
+impl fmt::Debug for BlockedProbe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BlockedProbe").finish_non_exhaustive()
+    }
 }
