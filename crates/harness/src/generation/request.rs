@@ -60,6 +60,7 @@ pub(super) async fn run(rt: &Rt, ctx: &Context, pinned: Pinned) -> Result<Next<G
         thinking_level: pinned.thinking_level,
         options: &pinned.stream_options,
         session_id: Some(&session_id),
+        max_tokens: None,
     };
     let interval = services.settings().progress.partial_interval;
     let message = stream_response(rt, &*models, request, attempt, interval, ctx).await?;

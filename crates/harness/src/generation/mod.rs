@@ -34,9 +34,11 @@ pub use live::{
     create_generation, edit_live, end_run, live_state, start_run,
 };
 pub use provider::ProviderDoc;
+pub(crate) use provider::ensure_session_id;
 pub use slots::{NestedToolSlot, NestedToolSummary, SlotProgress, SlotStatus, ToolSlot};
 
 use crate::agent::HookRuntime;
+use crate::compaction::CompactionTask;
 use crate::records::EntryId;
 use crate::registry::{GenerationHooks, TaskHooks};
 use crate::scheduler::{AnyTask, Next, TaskDefinition, TaskError, TaskRuntime};
@@ -49,7 +51,7 @@ pub const ASSISTANT_ENTRY: &str = "delta.assistant";
 
 /// The built-in task definitions every registry holds.
 pub fn builtin_tasks() -> Vec<Arc<dyn AnyTask>> {
-    vec![Arc::new(GenerationTask), Arc::new(ToolTask)]
+    vec![Arc::new(GenerationTask), Arc::new(ToolTask), Arc::new(CompactionTask)]
 }
 
 /// The input of a generation: `{}`. The run's inputs are in `delta.live.run`.

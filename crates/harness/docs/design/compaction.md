@@ -37,7 +37,7 @@ pub struct SummaryRequest {
 pub enum CompactionCheckpoint {
     Select,
     Summarize { #[serde(flatten)] request: SummaryRequest },
-    Retry     { #[serde(flatten)] request: SummaryRequest, until: u64 },
+    Retry     { #[serde(flatten)] request: SummaryRequest, until: i64 },
 }
 
 /// `entry_id` for a blocking compaction's summary, `submission_id` for a conversation-owned one's write; both absent when nothing was compacted.
@@ -48,8 +48,8 @@ pub struct CompactionResult { pub entry_id: Option<EntryId>, pub submission_id: 
 form (`{"phase":"retry","attempt":2,...,"until":...}`).
 
 ```rust
-pub fn create_compaction(tx: &mut Tx, conversation: ConversationId, input: CompactionInput, owner: Option<TaskId>)
-    -> Result<TaskId, HarnessError>;
+pub async fn create_compaction(tx: &mut Tx<'_>, conversation: ConversationId, input: CompactionInput, owner: Option<TaskId>)
+    -> Result<TaskId, TxError>;
 ```
 
 creates the task (owned by `owner`, the generation, or by the conversation; `background`
@@ -248,7 +248,25 @@ writes a complete system baseline ([context.md](context.md)).
   `CompactionPolicy`, the per-model overrides, `estimate_context` and the threshold check
   are implemented (`agent::settings`, `compaction`).
 
+- Phase 5 (implementation):
+  - `TaskCompactor` (`select_cut` + `create_compaction`) is the default
+    `HarnessOptions.compactor`; `NoCompaction` stays public and disables compaction.
+  - `until` is `i64`, the Session clock's type; `compaction_policy` is
+    `ResolvedCompaction::policy_for` (phase 4).
+  - `before_compact` receives `BeforeCompact` with owned clones of the entries and messages
+    (simpler hook signatures; the range is small next to a model request), which settles
+    the open item below.
+  - The summarizer request goes through `ModelClient::stream(..).result()`; its token limit
+    travels as the new `ModelRequest::max_tokens` (`None` for generation requests).
+    The provider session id comes from the same `delta.provider` helper the generation
+    uses, now generic over the task.
+  - `delta.live.compactions` and `compaction_failure` are typed (`CompactionStatus`,
+    `CompactionFailure`) with `LiveState` helpers (`add_compaction`, `compaction_mut`,
+    `remove_compaction`, `fail_compaction`); a failure's `detail` is `{ reason }`
+    (`model_error` or `no_model`).
+  - A queued conversation-owned summary is placed by whichever commit reaches the next
+    boundary, so its entry's `by_task_id` names that commit's task.
+
 ## Open (minor)
 
-- Whether `before_compact` receives `&[EntryRecord]` and `&[Message]` borrowed from the
-  phase (cheap) or owned clones (simpler hook signatures).
+None.

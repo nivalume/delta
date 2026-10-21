@@ -12,10 +12,13 @@ use super::creation::{ConversationCreateOptions, Target, create};
 use super::submission::Submission;
 use super::{HarnessError, HarnessInner};
 use crate::agent::{Agent, AgentChange, AgentDoc, AgentState, configure, resolve_agent};
+use crate::compaction::{CompactionInput, CompactionReason};
 use crate::context::{ContextView, read_context};
 use crate::documents::DocAddress;
 use crate::inbox::{QueueModes, RESET_ENTRY, SubmissionDraft, admit_submission};
-use crate::records::{ConversationId, Cursor, EntryDraft, EntryId, EntryQuery, EntryRecord, Head, Page, ScanOrder};
+use crate::records::{
+    ConversationId, Cursor, EntryDraft, EntryId, EntryQuery, EntryRecord, Head, Page, ScanOrder, TaskId,
+};
 use crate::session::{ReportInfo, TransactionScope, Tx, TxError};
 
 /// The entries of a conversation a page reads: an inclusive id range and an order (default
@@ -132,6 +135,24 @@ impl Conversation {
             task_id: None,
         };
         Ok(self.inner.session.commit_scoped(ctx, scope, f).await?)
+    }
+
+    /// Starts a manual compaction (ordinary, conversation-owned work that `abort` stops) in
+    /// its own commit; the summary is placed as a write submission. Asks for progress.
+    pub async fn compact(&self, instructions: Option<String>, ctx: &Context) -> Result<TaskId, HarnessError> {
+        self.inner.scheduler.resume()?;
+        let compactor = self.inner.services.compactor().clone();
+        let conversation = self.id;
+        self.commit(ctx, move |tx| {
+            Box::pin(async move {
+                let input = CompactionInput {
+                    reason: CompactionReason::Manual,
+                    instructions,
+                };
+                compactor.create(tx, conversation, input, None).await
+            })
+        })
+        .await
     }
 
     /// The committed model context, or as of the visible entry `at`.

@@ -6,7 +6,7 @@ use std::time::Duration;
 use delta_chord::context::Context;
 use delta_chord::json;
 use delta_harness::agent::{AgentChange, Change, HarnessSettings, SettingsSource};
-use delta_harness::compaction::{Compactor, NoCompaction};
+use delta_harness::compaction::{Compactor, TaskCompactor};
 use delta_harness::documents::DocAddress;
 use delta_harness::generation::{LiveDoc, LiveState};
 use delta_harness::harness::{Conversation, EntryRange, Harness, HarnessOptions, RootOptions, Submission};
@@ -61,7 +61,7 @@ impl Fixture {
             registry: Registry::new(),
             settings: Arc::new(Mutex::new(settings)),
             reports: Reports::default(),
-            compactor: Arc::new(NoCompaction),
+            compactor: Arc::new(TaskCompactor),
             start: tokio::time::Instant::now(),
             _dir: fixture.dir,
         }

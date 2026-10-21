@@ -1,10 +1,13 @@
-//! The hook traits of the built-in tasks besides the generation's: [`ToolHooks`].
+//! The hook traits of the built-in tasks besides the generation's: [`ToolHooks`] and
+//! [`CompactionHooks`].
 
-use delta_ai::types::JsonObject;
+use delta_ai::types::{JsonObject, Message};
 use delta_chord::context::Context;
 use futures::future::BoxFuture;
 
 use super::hooks::{HookApi, HookResult};
+use crate::compaction::CompactionReason;
+use crate::records::{EntryId, EntryRecord};
 use crate::tool::{ToolExecutionResult, ToolHookCall};
 
 /// What a `before_tool` hook asks: other arguments, or a block.
@@ -47,6 +50,42 @@ pub trait ToolHooks: Send + Sync {
         ctx: &'a Context,
     ) -> BoxFuture<'a, HookResult<ToolExecutionResult>> {
         let _ = (call, result, api, ctx);
+        Box::pin(async { Ok(None) })
+    }
+}
+
+/// The range a compaction is about to summarize, as `before_compact` sees it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeforeCompact {
+    pub reason: CompactionReason,
+    /// The summarized entries: the head marker, if any, then the entries before the cut.
+    pub entries: Vec<EntryRecord>,
+    /// Their model messages, as the summarizer would read them.
+    pub messages: Vec<Message>,
+    /// The first entry kept verbatim; the summary's `head`.
+    pub first_kept: EntryId,
+    pub instructions: Option<String>,
+}
+
+/// What a `before_compact` hook decides instead of the built-in summarizer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompactDecision {
+    /// Compact nothing; the task completes without a summary.
+    Decline,
+    /// Place this summary.
+    Summary(String),
+}
+
+/// Hooks of `delta.compaction`. The first decision wins; an ordinary error is reported and
+/// the next hook runs.
+pub trait CompactionHooks: Send + Sync {
+    fn before_compact<'a>(
+        &'a self,
+        compaction: &'a BeforeCompact,
+        api: &'a HookApi<'a>,
+        ctx: &'a Context,
+    ) -> BoxFuture<'a, HookResult<CompactDecision>> {
+        let _ = (compaction, api, ctx);
         Box::pin(async { Ok(None) })
     }
 }

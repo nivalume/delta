@@ -284,8 +284,9 @@ a scripted `fetch_deferred`.
   `generation::slots` with `ToolSlot`); both slots carry the running progress as a flattened
   `SlotProgress`, so the stored JSON keeps its flat shape, and `LiveState` has the slot
   helpers the tool task and the cleanup hooks share (`tool_slot_mut`, `nested_slot_mut`,
-  `slot_progress_mut`, `remove_nested_below`). `builtin_tasks()` returns the generation and
-  `delta.tool`.
+  `slot_progress_mut`, `remove_nested_below`); `compactions` and `compaction_failure` are
+  typed by the compaction module. `builtin_tasks()` returns the generation, `delta.tool`
+  and `delta.compaction`. Generation requests send `ModelRequest::max_tokens: None`.
   - The scheduler cleanup hooks are `generation::AgentSchedulerHooks`: a run generation's
     partial, inputs and run marker, a tool task's slot (and nested slots); compaction status
     joins in phase 5. Its `withdraw_inputs` also removes the inputs from `delta.inbox`.

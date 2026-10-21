@@ -25,7 +25,7 @@ pub struct HarnessOptions {
     pub settings: SettingsSource,                   // HarnessSettings, or a closure; read at each resolution
     pub env: Option<Arc<dyn EnvBuilder>>,           // builds a conversation's ExecutionEnv (env.md); never on the line
     pub approval: Arc<dyn ApprovalPolicy>,          // approval.md; default AllowAll
-    pub compactor: Arc<dyn Compactor>,              // compaction.md; default NoCompaction until the task lands
+    pub compactor: Arc<dyn Compactor>,              // compaction.md; default TaskCompactor
     pub conversation_created: Option<Arc<dyn ConversationHook>>,   // the session's async creation hook
     pub clock: Clock,                               // Arc<dyn Fn() -> i64>, epoch ms; default system time
     pub on_wake: Option<WakeListener>,

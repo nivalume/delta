@@ -33,7 +33,7 @@ use submission::{SubmissionObserver, SubmissionWaits, abort_submission};
 
 use crate::agent::{AgentServices, EnvBuilder, SettingsSource};
 use crate::approval::{AllowAll, ApprovalPolicy, PendingApprovals};
-use crate::compaction::{Compactor, NoCompaction};
+use crate::compaction::{Compactor, TaskCompactor};
 use crate::documents::DocAddress;
 use crate::generation::{AgentSchedulerHooks, builtin_tasks};
 use crate::model::ModelClient;
@@ -63,7 +63,7 @@ pub struct HarnessOptions {
     pub env: Option<Arc<dyn EnvBuilder>>,
     /// Decides tool calls' approval; default [`AllowAll`].
     pub approval: Arc<dyn ApprovalPolicy>,
-    /// Selects cuts and starts compactions; default [`NoCompaction`].
+    /// Selects cuts and starts compactions; default [`TaskCompactor`].
     pub compactor: Arc<dyn Compactor>,
     /// Runs in every commit that creates or forks a conversation, after the built-in hook.
     pub conversation_created: Option<Arc<dyn ConversationHook>>,
@@ -83,7 +83,7 @@ impl HarnessOptions {
             settings: SettingsSource::default(),
             env: None,
             approval: Arc::new(AllowAll),
-            compactor: Arc::new(NoCompaction),
+            compactor: Arc::new(TaskCompactor),
             conversation_created: None,
             clock: SessionOptions::default().now,
             on_wake: None,

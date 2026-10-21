@@ -7,6 +7,7 @@ use futures::future::BoxFuture;
 use super::GENERATION_TASK;
 use super::live::{convert_partial, edit_live, end_run, live_state};
 use super::slots::{SlotProgress, SlotStatus};
+use crate::compaction::COMPACTION_TASK;
 use crate::inbox::withdraw_inputs;
 use crate::records::{
     ConversationId, SubmissionRecord, SubmissionSettlement, TaskId, TaskOutcome, TaskRecord, TaskState,
@@ -25,6 +26,9 @@ use crate::tool::TOOL_TASK;
 ///   the missing result; a nested caller reads the missing result as `faulted` or
 ///   `orphaned`) and the nested slots below it are removed.
 ///
+/// - a compaction: its status is removed and recorded as `delta.live.compaction_failure`
+///   with the fault's message or the orphaning reason.
+///
 /// Queued inputs the scheduler withdraws also leave `delta.inbox`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AgentSchedulerHooks;
@@ -39,6 +43,7 @@ impl SchedulerHooks for AgentSchedulerHooks {
             match record.kind.as_str() {
                 GENERATION_TASK => settle_generation(tx, record).await,
                 TOOL_TASK => settle_tool(tx, record.conversation_id, record.id).await,
+                COMPACTION_TASK => settle_compaction(tx, record).await,
                 _ => Ok(()),
             }
         })
@@ -94,4 +99,18 @@ async fn settle_tool(tx: &mut Tx<'_>, conversation: ConversationId, task: TaskId
         live.remove_nested_below(task);
     })
     .await
+}
+
+async fn settle_compaction(tx: &mut Tx<'_>, record: &TaskRecord) -> Result<(), TxError> {
+    let error = match &record.state {
+        TaskState::Terminal {
+            outcome: TaskOutcome::Faulted { error },
+        } => error.message.clone(),
+        TaskState::Terminal {
+            outcome: TaskOutcome::Orphaned { reason },
+        } => reason.clone(),
+        _ => return Ok(()),
+    };
+    let task = record.id;
+    edit_live(tx, record.conversation_id, |live| live.fail_compaction(task, error)).await
 }

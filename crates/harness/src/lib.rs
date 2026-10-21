@@ -11,8 +11,8 @@
 //! - agent: [`registry`] (extensions and hooks), [`agent`] (`delta.agent`, resolution,
 //!   settings, the runtime of agent-layer tasks), [`inbox`], [`context`], [`prompt`],
 //!   [`generation`], [`usage`], [`model`] (the [`ModelClient`](model::ModelClient) seam),
-//!   [`tool`] (tools and the `delta.tool` task), [`approval`] (the policy seam), and the
-//!   generation's side of [`compaction`].
+//!   [`tool`] (tools and the `delta.tool` task), [`approval`] (the policy, requests and
+//!   decisions), and [`compaction`] (thresholds and the `delta.compaction` task).
 //! - kernel: [`records`], [`documents`], [`storage`], [`session`], [`scheduler`].
 //! - side: [`env`](mod@env), the execution environment and its local implementation.
 

@@ -131,6 +131,8 @@ pub struct ModelRequest<'a> {
     pub options: &'a ConversationStreamOptions,
     /// `delta.provider.session_id`, for providers' prompt caches.
     pub session_id: Option<&'a str>,
+    /// The output token limit; `None`: the provider's default.
+    pub max_tokens: Option<u64>,
 }
 
 /// A failure of a model call that has no message to carry it (cancelling a deferred
@@ -258,6 +260,7 @@ impl ModelClient for ModelsClient {
             cache_retention: options.cache_retention,
             session_id: request.session_id.map(str::to_owned),
             metadata: options.metadata.clone(),
+            max_tokens: request.max_tokens,
             ..StreamOptions::default()
         };
         let mut simple = SimpleStreamOptions::from(base);

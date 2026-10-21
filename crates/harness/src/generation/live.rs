@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::slots::{NestedToolSlot, ToolSlot};
 use super::{ASSISTANT_ENTRY, GenerationInput, GenerationTask};
+use crate::compaction::{CompactionFailure, CompactionStatus};
 use crate::documents::{CheckpointInfo, ConversationScope, DocAddress, DocDefinition, ForkInitial, Latest};
 use crate::records::{ConversationId, EntryDraft, EntryRecord, SubmissionId, SubmissionSettlement, TaskId};
 use crate::session::{TaskOptions, Tx, TxError};
@@ -86,8 +87,7 @@ impl LiveGeneration {
     }
 }
 
-/// The value of a `delta.live` document. The compaction fields are carried as JSON; the
-/// compaction task types them.
+/// The value of a `delta.live` document.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LiveState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,9 +99,9 @@ pub struct LiveState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nested_tools: Option<Vec<NestedToolSlot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compactions: Option<Vec<Json>>,
+    pub compactions: Option<Vec<CompactionStatus>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_failure: Option<Json>,
+    pub compaction_failure: Option<CompactionFailure>,
 }
 
 /// The `delta.live` of `conversation`, as of this transaction.

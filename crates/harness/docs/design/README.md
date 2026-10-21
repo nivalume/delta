@@ -83,7 +83,7 @@ crates/harness/
     usage.rs         # delta.usage
     tool/            # HarnessTool, FnHarnessTool, ToolApi, the delta.tool task: pipeline, execute, output, settle, nested
     approval/        # ApprovalPolicy, delta.approvals (requests, decisions, grants), PendingApprovals
-    compaction.rs    # thresholds and the Compactor seam (phase 5: the task)
+    compaction/      # thresholds, range selection, the delta.compaction task, TaskCompactor
     observe/         # view, events, task_graph
     env/             # trait, local
     tools/           # read, write, edit, bash
@@ -137,7 +137,7 @@ New features plug in through these traits; none needs a kernel change:
 | `ApprovalPolicy` | Rules engine and permission modes later |
 | `GenerationHooks`, `ToolHooks`, `CompactionHooks` | Extension behaviour; a command-hook bridge later |
 | `ModelClient` | Model access; `ModelsClient` wraps `delta_ai::Models`, tests inject a fake |
-| `Compactor` | Range selection and starting a `delta.compaction` task; the generation's thresholds and overflow path call it (`NoCompaction` until the compaction task lands) |
+| `Compactor` | Range selection and starting a `delta.compaction` task; the generation's thresholds and overflow path call it (default `TaskCompactor`; `NoCompaction` disables compaction) |
 | `EnvBuilder` | A conversation's `ExecutionEnv`, built at each use |
 | `ExecutionEnv` | Remote environments later |
 

@@ -162,11 +162,14 @@ pub struct Recorded {
     pub thinking_level: ModelThinkingLevel,
     pub session_id: Option<String>,
     pub options: ConversationStreamOptions,
+    pub max_tokens: Option<u64>,
 }
 
 #[derive(Default)]
 struct State {
     script: VecDeque<Reply>,
+    /// Answers to summarization requests (those with `max_tokens`).
+    summaries: VecDeque<Reply>,
     polls: VecDeque<Reply>,
     requests: Vec<Recorded>,
     cancelled: Vec<String>,
@@ -203,6 +206,12 @@ impl FakeModel {
         self.state.lock().unwrap().script.extend(replies);
     }
 
+    /// Queues answers to the next summarization requests, which a compaction sends with
+    /// `max_tokens`; other requests take the main script.
+    pub fn push_summaries(&self, replies: impl IntoIterator<Item = Reply>) {
+        self.state.lock().unwrap().summaries.extend(replies);
+    }
+
     /// Queues the results of the next deferred polls.
     pub fn push_polls(&self, replies: impl IntoIterator<Item = Reply>) {
         self.state.lock().unwrap().polls.extend(replies);
@@ -225,9 +234,14 @@ impl FakeModel {
 
     fn reply(&self, request: Recorded) -> Reply {
         let mut state = self.state.lock().unwrap();
+        let summary = request.max_tokens.is_some();
         state.requests.push(request);
-        state
-            .script
+        let queue = if summary {
+            &mut state.summaries
+        } else {
+            &mut state.script
+        };
+        queue
             .pop_front()
             .unwrap_or_else(|| Reply::error("the fake model has no scripted response"))
     }
@@ -299,6 +313,7 @@ impl ModelClient for FakeModel {
             thinking_level: request.thinking_level,
             session_id: request.session_id.map(str::to_owned),
             options: request.options.clone(),
+            max_tokens: request.max_tokens,
         };
         let reply = self.reply(recorded);
         play(reply, request.model, ctx.clone())

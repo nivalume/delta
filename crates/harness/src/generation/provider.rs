@@ -5,9 +5,8 @@ use delta_chord::context::Context;
 use delta_chord::delta::Op;
 use delta_chord::json::Json;
 
-use super::GenerationTask;
 use crate::documents::{CheckpointInfo, ConversationScope, DocAddress, DocDefinition, ForkInitial, Latest};
-use crate::scheduler::{RuntimeError, TaskRuntime};
+use crate::scheduler::{RuntimeError, TaskDefinition, TaskRuntime};
 use crate::session::TxError;
 
 /// The `delta.provider` document: conversation scope, `latest`, a fork starts with a fresh
@@ -36,7 +35,10 @@ fn session_id(value: &Json) -> Option<String> {
 
 /// The conversation's persisted provider session id, without writing in the normal path; a
 /// conversation without `delta.provider` gets one in a commit before the request starts.
-pub(super) async fn ensure_session_id(rt: &TaskRuntime<GenerationTask>, ctx: &Context) -> Result<String, RuntimeError> {
+pub(crate) async fn ensure_session_id<T: TaskDefinition>(
+    rt: &TaskRuntime<T>,
+    ctx: &Context,
+) -> Result<String, RuntimeError> {
     let address = DocAddress::<ProviderDoc>::new(rt.conversation_id());
     if let Some(id) = rt.snapshot(address.clone(), ctx).await?.as_ref().and_then(session_id) {
         return Ok(id);
