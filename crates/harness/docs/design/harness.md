@@ -368,7 +368,11 @@ pub trait CompactionHooks: Send + Sync {
 }
 pub type HookResult<T> = Result<Option<T>, HookError>;
 
-pub struct HookApi<'a> { pub task_id: TaskId, pub conversation_id: ConversationId, /* models(), memo(), memo_or_insert() */ }
+pub struct HookApi<'a> {
+    pub task_id: TaskId,
+    pub conversation_id: ConversationId,
+    /* models(), memo(), memo_or_insert(), snapshot(doc), agent(), env(), cwd() */
+}
 pub struct HookRunner<H: ?Sized> { /* the phase's resolved hooks, extension order */ }
 impl<H: ?Sized> HookRunner<H> {
     /// The handlers with their extension's name. The caller composes them (a replacement
@@ -380,20 +384,30 @@ impl<H: ?Sized> HookRunner<H> {
 
 | Hook | Composition | Ordinary error | Claude Code hook | Codex hook |
 | --- | --- | --- | --- | --- |
-| `before_request` | Replacement chain on the messages, this request only | Report, continue | `UserPromptSubmit` (first attempt of a run; later attempts have no equivalent) | `UserPromptSubmit` |
+| `before_request` | Replacement chain on the messages, this request only (every attempt of every generation) | Report, continue | — | — |
+| `on_input` | First block wins; every context; once per run, in its first generation's `prepare` | Report, continue | `UserPromptSubmit` (block → the run ends `unanswered` `blocked`; `additionalContext` → a `delta.context` entry) | `UserPromptSubmit` |
 | `after_response` | All observers | Report, continue | — (observer only) | — |
-| `on_yield` | First continuation wins | Report, continue | `Stop` (a block with reason continues the run) | `Stop` |
-| `after_tools` | All observers | Report, continue | — | — |
-| `before_tool` | Argument replacement chain; first block wins | Block the tool with the error text | `PreToolUse` (`deny` → block, `updatedInput` → arguments) | `PreToolUse` |
+| `on_yield` | First continuation wins; at most `max_continuations` (8) per run, counted in `RunControl.continuations` and passed in `Yielded` | Report, continue | `Stop` / `SubagentStop` (a block with reason continues the run; `stop_hook_active` is `continuations > 0`) | `Stop` |
+| `after_tools` | All observers | Report, continue | `PostToolBatch` (observer) | — |
+| `before_tool` | Argument replacement chain; first block wins; the most restrictive `permission` (`Ask` over `Allow`); every `context` | Block the tool with the error text | `PreToolUse` (`deny` → block, `updatedInput` → arguments, `ask` / `allow` → `permission`, `additionalContext` → `context`) | `PreToolUse` |
 | `after_tool` | Result replacement chain | Report, continue | `PostToolUse` / `PostToolUseFailure` | `PostToolUse` |
 | `before_compact` | First decision wins | Report, continue | `PreCompact` | — |
 
 Dispatch matches the task's *name*, so hooks survive a reload of their task; keeping
 signatures compatible across versions is the task author's job. Hooks run in extension
 order off the line; a crash before the consuming commit may rerun them; they use memos
-(prefixed by hook authors) for first-writer-wins decisions. A command / HTTP hook bridge
-later maps the column names onto these methods mechanically; it is out of phase 1
-([README.md](README.md#later)).
+(prefixed by hook authors) for first-writer-wins decisions. The `delta-claude-hooks` crate
+maps Claude Code's command and HTTP hooks onto these methods.
+
+`before_tool`'s `permission` reaches the policy as `ApprovalCall.hook`: the tool task asks
+whenever it is `Ask` (an allowed call asks with the reason as its prompt); `Allow` is the
+policy's to honor (`RulesPolicy` lets it skip what its mode would ask, never a deny or ask
+rule, never plan mode). The hooks' `context` is memoized in the task and appended to the
+result as its last text item, after `after_tool`.
+
+`on_input` sees the entries a run's inputs placed, before the first request; it runs again
+only if the generation restarts before the commit that records its context and marks
+`RunControl.input_checked`. Inputs steered into a running run do not reach it.
 
 ## Environment
 

@@ -16,7 +16,8 @@ use delta_chord::context::{Cancelled, Context};
 
 use super::failure::model_error;
 use super::live::{
-    LiveDeferred, LiveGeneration, LiveRetry, append_assistant, create_generation, edit_live, end_run, start_run,
+    LiveDeferred, LiveGeneration, LiveRetry, append_assistant, create_generation, edit_live, end_run, live_snapshot,
+    start_run,
 };
 use super::{GenerationCheckpoint, GenerationResult, GenerationTask, Rt, hook_failed, round};
 use crate::agent::{AgentRuntime, HookRuntime};
@@ -24,7 +25,8 @@ use crate::compaction::{CompactionInput, CompactionReason};
 use crate::inbox::{At, QueueModes, USER_ENTRY, apply_boundary, prepare_boundary};
 use crate::model::ModelRef;
 use crate::records::{EntryDraft, EntryId, JoinPolicy, SubmissionSettlement, TaskId};
-use crate::scheduler::{Next, NextState, Outcome, TaskError};
+use crate::registry::Yielded;
+use crate::scheduler::{Next, NextState, Outcome, ReportFrom, TaskError};
 
 /// How long a deferred response waits before its first poll when the provider gives no hint.
 const DEFAULT_POLL_AFTER_MS: i64 = 5_000;
@@ -200,16 +202,35 @@ async fn after_response(rt: &Rt, message: &AssistantMessage, ctx: &Context) -> R
     Ok(())
 }
 
-/// The first `on_yield` continuation.
+/// The first `on_yield` continuation, unless the run took `max_continuations` already
+/// (then it is reported and ignored).
 async fn on_yield(rt: &Rt, message: &AssistantMessage, ctx: &Context) -> Result<Option<UserContent>, TaskError> {
     let hooks = rt.hooks(ctx).await?;
     if hooks.is_empty() {
         return Ok(None);
     }
+    let continuations = live_snapshot(rt, ctx)
+        .await?
+        .run
+        .filter(|run| run.task_id == rt.task_id())
+        .map_or(0, |run| run.continuations);
+    let yielded = Yielded {
+        message: message.clone(),
+        continuations,
+    };
     let api = rt.hook_api()?;
     for (extension, hook) in hooks.iter() {
-        match hook.on_yield(message, &api, ctx).await {
-            Ok(Some(continuation)) => return Ok(Some(continuation)),
+        match hook.on_yield(&yielded, &api, ctx).await {
+            Ok(Some(continuation)) => {
+                let limit = rt.agent_services()?.settings().max_continuations;
+                if continuations >= limit {
+                    let error =
+                        std::io::Error::other(format!("The run took {limit} continuations; the next one is ignored"));
+                    rt.report(&error, Some(ReportFrom::Extension(Some(extension.to_owned()))));
+                    return Ok(None);
+                }
+                return Ok(Some(continuation));
+            }
             Ok(None) => {}
             Err(error) => hook_failed(rt, &*error, extension, ctx)?,
         }
@@ -240,6 +261,7 @@ async fn answer(rt: &Rt, message: AssistantMessage, ctx: &Context) -> Result<Nex
                     });
                     let draft = EntryDraft {
                         model: Some(vec![user]),
+                        data: Some(delta_chord::json!({ "continuation": true })),
                         ..EntryDraft::new(USER_ENTRY)
                     };
                     tx.append_entry(conversation, draft).await?;
@@ -248,6 +270,7 @@ async fn answer(rt: &Rt, message: AssistantMessage, ctx: &Context) -> Result<Nex
                         live.generation = None;
                         if let Some(run) = live.run.as_mut().filter(|run| run.task_id == task) {
                             run.task_id = successor;
+                            run.continuations += 1;
                         }
                     })
                     .await?;

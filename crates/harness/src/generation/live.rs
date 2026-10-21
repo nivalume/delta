@@ -48,6 +48,17 @@ impl DocDefinition for LiveDoc {
 pub struct RunControl {
     pub task_id: TaskId,
     pub inputs: Vec<SubmissionId>,
+    /// `on_yield` continuations the run took.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub continuations: u32,
+    /// The `on_input` hooks saw the run's inputs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input_checked: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` passes a reference.
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// A durable backoff before the next attempt.
@@ -105,6 +116,18 @@ pub struct LiveState {
 }
 
 /// The `delta.live` of `conversation`, as of this transaction.
+/// The committed `delta.live` of the task's conversation, read outside a commit.
+pub(super) async fn live_snapshot(
+    rt: &super::Rt,
+    ctx: &delta_chord::context::Context,
+) -> Result<LiveState, crate::scheduler::TaskError> {
+    let address = DocAddress::<LiveDoc>::new(rt.conversation_id());
+    Ok(match rt.snapshot(address, ctx).await? {
+        Some(value) => json::from_json(&value)?,
+        None => LiveState::default(),
+    })
+}
+
 pub async fn live_state(tx: &mut Tx<'_>, conversation: ConversationId) -> Result<LiveState, TxError> {
     let doc = tx.doc(DocAddress::<LiveDoc>::new(conversation)).await?;
     json::from_json(doc.value()).map_err(TxError::callback)
@@ -139,7 +162,13 @@ pub async fn start_run(
     inputs: Vec<SubmissionId>,
 ) -> Result<TaskId, TxError> {
     let task_id = create_generation(tx, conversation).await?;
-    edit_live(tx, conversation, |live| live.run = Some(RunControl { task_id, inputs })).await?;
+    let run = RunControl {
+        task_id,
+        inputs,
+        continuations: 0,
+        input_checked: false,
+    };
+    edit_live(tx, conversation, |live| live.run = Some(run)).await?;
     Ok(task_id)
 }
 

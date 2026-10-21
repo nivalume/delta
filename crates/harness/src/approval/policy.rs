@@ -8,7 +8,7 @@ use delta_chord::context::Context;
 use futures::future::BoxFuture;
 
 use crate::records::{ConversationId, TaskId};
-use crate::registry::HookApi;
+use crate::registry::{HookApi, HookPermission};
 use crate::tool::{HarnessTool, PermissionSubject, ToolHookCall};
 
 /// A policy failure; the call is denied with its text (fail closed).
@@ -25,6 +25,9 @@ pub struct ApprovalCall<'a> {
     pub subject: Option<PermissionSubject>,
     /// The call's working directory: its environment's, else the agent's.
     pub cwd: Option<&'a str>,
+    /// What the `before_tool` hooks said about approval. The tool task asks when they said
+    /// `Ask` whatever the policy decides; `Allow` is the policy's to honor.
+    pub hook: Option<HookPermission>,
 }
 
 impl fmt::Debug for ApprovalCall<'_> {
@@ -35,6 +38,7 @@ impl fmt::Debug for ApprovalCall<'_> {
             .field("call", &self.call)
             .field("subject", &self.subject)
             .field("cwd", &self.cwd)
+            .field("hook", &self.hook)
             .finish_non_exhaustive()
     }
 }

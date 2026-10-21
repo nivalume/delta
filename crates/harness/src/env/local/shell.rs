@@ -14,7 +14,7 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use delta_chord::context::Context;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command as ProcessCommand};
 use tokio::time::{Instant, sleep_until};
 
@@ -80,7 +80,11 @@ pub(super) async fn exec(
     process
         .args(&args)
         .current_dir(&cwd)
-        .stdin(Stdio::null())
+        .stdin(if options.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -108,6 +112,13 @@ pub(super) async fn exec(
             "The command exited before it was tracked",
         ));
     };
+    if let (Some(input), Some(mut pipe)) = (options.stdin, child.stdin.take()) {
+        // Written beside the run, so a command that never reads its input cannot stall it;
+        // dropping the pipe closes the input.
+        tokio::spawn(async move {
+            let _ = pipe.write_all(&input).await;
+        });
+    }
     let tracked = config.children.track(ProcessTree::new(pid));
     let mut run = Run {
         tree: tracked.tree(),

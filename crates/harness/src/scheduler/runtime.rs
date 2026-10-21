@@ -26,7 +26,10 @@ use super::next::{Next, NextOf};
 use super::transition::commit_state;
 use super::waits::{self, SettledTask};
 use crate::documents::{ConversationDoc, DocAddress, DocDefinition, Rewindable};
-use crate::records::{ConversationId, EntryId, EntryRecord, TaskId, TaskOutcome, TaskRecord, TaskState, TaskStatus};
+use crate::records::{
+    ConversationId, EntryId, EntryRecord, SubmissionId, SubmissionRecord, TaskId, TaskOutcome, TaskRecord, TaskState,
+    TaskStatus,
+};
 use crate::session::{HostCallback, ReportInfo, ReportTask, Services, Session, TransactionScope, Tx, TxError};
 
 /// What every runtime of one phase shares: the scheduler, the invocation, the phase's
@@ -381,6 +384,13 @@ impl<T: TaskDefinition> TaskRuntime<T> {
     pub fn checked_session(&self) -> Result<&Session, RuntimeError> {
         self.core.check()?;
         Ok(&self.core.inner.session)
+    }
+
+    /// A committed submission by id.
+    pub async fn submission(&self, id: SubmissionId, ctx: &Context) -> Result<Option<SubmissionRecord>, RuntimeError> {
+        self.core
+            .read(ctx, move |tx| Box::pin(async move { tx.submission(id).await }))
+            .await
     }
 
     /// The current value of a committed document.

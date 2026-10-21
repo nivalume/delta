@@ -23,8 +23,11 @@ use indexmap::IndexMap;
 use tokio::sync::watch;
 
 pub use extension::{Extension, HookRegistration, SectionWrapper, ToolWrapper, Wrap, WrapError};
-pub use hooks::{GenerationHooks, HookApi, HookError, HookHost, HookResult, HookRunner, RequestMessages, TaskHooks};
-pub use task_hooks::{BeforeCompact, BeforeTool, CompactDecision, CompactionHooks, ToolHooks};
+pub use hooks::{
+    GenerationHooks, HookApi, HookError, HookHost, HookResult, HookRunner, InputDecision, RequestMessages, RunInput,
+    TaskHooks, Yielded,
+};
+pub use task_hooks::{BeforeCompact, BeforeTool, CompactDecision, CompactionHooks, HookPermission, ToolHooks};
 
 use crate::prompt::PromptSection;
 use crate::scheduler::{AnyTask, CatalogSnapshot, TaskCatalog};

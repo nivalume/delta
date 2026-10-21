@@ -44,7 +44,7 @@ stored JSON. The run's inputs live in `delta.live.run`, not in the task input.
 
 ```rust
 pub struct LiveState {
-    pub run: Option<RunControl>,                 // { task_id, inputs }: present exactly while busy
+    pub run: Option<RunControl>,                 // { task_id, inputs, continuations, input_checked }: present exactly while busy
     pub generation: Option<LiveGeneration>,      // { attempt, message?: Json, retry?: { at, error }, deferred?: { poll_at } }
     pub nested_tools: Option<Vec<NestedToolSlot>>, // tool.md
     pub tools: Option<Vec<ToolSlot>>,            // the current round in call order

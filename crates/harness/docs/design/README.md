@@ -137,7 +137,7 @@ New features plug in through these traits; none needs a kernel change:
 | `DocDefinition` | New durable state |
 | `HarnessTool` | New tools; the built-in tools are ordinary implementations |
 | `ApprovalPolicy` | Rules engine and permission modes later |
-| `GenerationHooks`, `ToolHooks`, `CompactionHooks` | Extension behaviour; a command-hook bridge later |
+| `GenerationHooks`, `ToolHooks`, `CompactionHooks` | Extension behaviour; `delta-claude-hooks` bridges Claude Code's command and HTTP hooks |
 | `ModelClient` | Model access; `ModelsClient` wraps `delta_ai::Models`, tests inject a fake |
 | `Compactor` | Range selection and starting a `delta.compaction` task; the generation's thresholds and overflow path call it (default `TaskCompactor`; `NoCompaction` disables compaction) |
 | `EnvBuilder` | A conversation's `ExecutionEnv`, built at each use |
@@ -164,7 +164,7 @@ Rules:
 | --- | --- |
 | Kernel | pi-durable's model (storage-first commits, task state machines, documents, inbox, ownership tree), not pi-coding-agent's in-memory loop |
 | Compatibility with pi | None for the harness's own records and storage: kinds, record JSON and the SQLite schema are delta's. Messages inside entries are `delta_ai` types, which keep upstream's shape |
-| Namespace | Built-in entry, document and task kinds start with `delta.` (`delta.user`, `delta.assistant`, `delta.tool-result`, `delta.system`, `delta.reset`, `delta.compaction`, `delta.approval`; documents `delta.agent`, `delta.provider`, `delta.live`, `delta.inbox`, `delta.usage`, `delta.approvals`, `delta.permissions`, `delta.permission_rules`; tasks `delta.generation`, `delta.tool`, `delta.compaction`, each at version 1) |
+| Namespace | Built-in entry, document and task kinds start with `delta.` (`delta.user`, `delta.assistant`, `delta.tool-result`, `delta.system`, `delta.reset`, `delta.compaction`, `delta.approval`, `delta.context`; documents `delta.agent`, `delta.provider`, `delta.live`, `delta.inbox`, `delta.usage`, `delta.approvals`, `delta.permissions`, `delta.permission_rules`; tasks `delta.generation`, `delta.tool`, `delta.compaction`, each at version 1) |
 | Phase 1 scope | Kernel, built-in tools and a local execution env. Deferred: code mode, remote env, JSONL storage, telemetry, Durable Object hosting |
 | The session line | One tokio task owns the session state. `commit` sends a closure that receives `&mut Tx`; a document that is not loaded is read through `tx`, so a read inside a commit cannot hang |
 | Documents | `tx.doc::<D>()` borrows the `Tx` and returns a draft over `delta_chord::delta::Change` (one document edited at a time); prepared ops become `base` or `delta` writes under `checkpoint_when`; observers get a read-only `DocumentState` over a `delta_chord::State` |
@@ -173,7 +173,7 @@ Rules:
 | `close()` | Cancel every invocation, join them, abort stragglers after `close_grace` (30 s), write them back as `pending` |
 | Approval | codex-rs's flow made durable ([approval.md](approval.md)): the request is committed, the tool phase awaits an in-memory waiter keyed by approval id, `Conversation::decide` commits the decision and notifies the waiter; a rerun reads a committed decision first; `ReviewDecision { Approved, ApprovedForSession, Denied, TimedOut, Abort }`; session grants skip later prompts with the same approval key |
 | Approval visibility | A `delta.approvals` conversation document in the view, an `approval_update` agent event, denials reported as `blocked` |
-| Hooks | Per-task traits with default methods, as `delta_agent::AgentHooks`: `GenerationHooks` (`before_request`, `after_response`, `on_yield`, `after_tools`), `ToolHooks` (`before_tool`, `after_tool`), `CompactionHooks` (`before_compact`); [harness.md](harness.md) maps them to the Claude Code / Codex names |
+| Hooks | Per-task traits with default methods, as `delta_agent::AgentHooks`: `GenerationHooks` (`before_request`, `on_input`, `after_response`, `on_yield`, `after_tools`), `ToolHooks` (`before_tool`, `after_tool`), `CompactionHooks` (`before_compact`); [harness.md](harness.md) maps them to the Claude Code / Codex names |
 | Ids | Newtypes over `u64` |
 | `delta_ai` additions | `is_context_overflow`, `is_retryable_assistant_error`, `retry_delay`, `to_tool_declaration`, as upstream has them in pi-ai |
 | SQLite types | `delta_chord::sqlite` re-exports `rusqlite` |
@@ -188,7 +188,6 @@ Rules:
 
 Seams kept visible for work after phase 1, in the order the survey suggests:
 
-- A command / HTTP hook bridge speaking the Claude Code hook protocol.
 - A protocol crate for UIs (thread / turn / item lifecycle, approval requests) derived from
   agent events and submissions.
 - Code mode on an embedded JavaScript VM with the journal and replay rules.

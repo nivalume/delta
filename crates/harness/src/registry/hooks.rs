@@ -14,9 +14,11 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::agent::{Agent, AgentError, AgentRuntime};
 use crate::documents::{DocAddress, DocDefinition};
+use crate::env::ExecutionEnv;
 use crate::model::ModelClient;
-use crate::records::{ConversationId, EntryId, TaskId};
+use crate::records::{ConversationId, EntryId, EntryRecord, TaskId};
 use crate::scheduler::{RuntimeError, TaskDefinition, TaskRuntime};
 use crate::session::Session;
 
@@ -82,6 +84,12 @@ pub trait HookHost: Send + Sync {
 
     /// The Session, for committed document reads; refused once the invocation ended.
     fn session(&self) -> Result<&Session, RuntimeError>;
+
+    /// The conversation's agent as the phase resolved it.
+    fn agent<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<Arc<Agent>, AgentError>>;
+
+    /// The conversation's environment, built for this use; `None` without a builder.
+    fn env<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<Option<Arc<dyn ExecutionEnv>>, AgentError>>;
 }
 
 impl<T: TaskDefinition> HookHost for TaskRuntime<T> {
@@ -100,6 +108,14 @@ impl<T: TaskDefinition> HookHost for TaskRuntime<T> {
 
     fn session(&self) -> Result<&Session, RuntimeError> {
         self.checked_session()
+    }
+
+    fn agent<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<Arc<Agent>, AgentError>> {
+        Box::pin(AgentRuntime::agent(self, ctx))
+    }
+
+    fn env<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<Option<Arc<dyn ExecutionEnv>>, AgentError>> {
+        Box::pin(AgentRuntime::env(self, ctx))
     }
 }
 
@@ -142,6 +158,25 @@ impl<'a> HookApi<'a> {
             .map_err(RuntimeError::Codec)
     }
 
+    /// The conversation's agent as the phase resolved it.
+    pub async fn agent(&self, ctx: &Context) -> Result<Arc<Agent>, AgentError> {
+        self.host.agent(ctx).await
+    }
+
+    /// The conversation's environment, built for this use; `None` without an environment
+    /// builder. Commands a hook runs go through it.
+    pub async fn env(&self, ctx: &Context) -> Result<Option<Arc<dyn ExecutionEnv>>, AgentError> {
+        self.host.env(ctx).await
+    }
+
+    /// The conversation's working directory: its environment's, else the agent's.
+    pub async fn cwd(&self, ctx: &Context) -> Result<Option<String>, AgentError> {
+        if let Some(env) = self.env(ctx).await? {
+            return Ok(Some(env.cwd().to_owned()));
+        }
+        Ok(self.agent(ctx).await?.cwd.clone())
+    }
+
     /// The current value of a committed document.
     pub async fn snapshot<D: DocDefinition>(
         &self,
@@ -173,6 +208,30 @@ impl fmt::Debug for HookApi<'_> {
     }
 }
 
+/// A final answer, as `on_yield` sees it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Yielded {
+    pub message: AssistantMessage,
+    /// `on_yield` continuations the run took so far (Claude Code's `stop_hook_active`).
+    pub continuations: u32,
+}
+
+/// The user input a run starts with, as `on_input` sees it: the entries its inputs placed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunInput {
+    pub entries: Vec<EntryRecord>,
+}
+
+/// What an `on_input` hook decides about a run's input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputDecision {
+    /// The run ends `unanswered` with reason `blocked` and this detail before any request;
+    /// the input stays in the transcript.
+    Block { reason: String },
+    /// Context for the model, appended as a `delta.context` entry before the first request.
+    Context(String),
+}
+
 /// The messages of one request, as `before_request` sees them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestMessages {
@@ -187,6 +246,7 @@ pub struct RequestMessages {
 /// | --- | --- | --- |
 /// | `before_request` | replacement chain on the messages, this request only | reported, chain continues |
 /// | `after_response` | every observer, each terminal message | reported |
+/// | `on_input` | the first block wins; every context, once per run | reported |
 /// | `on_yield` | the first continuation wins | reported |
 /// | `after_tools` | every observer, once per tool round | reported |
 pub trait GenerationHooks: Send + Sync {
@@ -212,16 +272,29 @@ pub trait GenerationHooks: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
-    /// Continues a run that would end with `answer`: the continuation is appended as a user
-    /// message and a successor generation runs, unless the final boundary placed user input
-    /// or a reset.
+    /// Sees the input a run starts with, once per run before its first request; may block
+    /// the run or add context. The first block wins; every context is appended.
+    fn on_input<'a>(
+        &'a self,
+        input: &'a RunInput,
+        api: &'a HookApi<'a>,
+        ctx: &'a Context,
+    ) -> BoxFuture<'a, HookResult<InputDecision>> {
+        let _ = (input, api, ctx);
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Continues a run that would end with `yielded.message`: the continuation is appended
+    /// as a user message (its entry's data `{ "continuation": true }`) and a successor
+    /// generation runs, unless the final boundary placed user input or a reset, or the run
+    /// took `max_continuations` already.
     fn on_yield<'a>(
         &'a self,
-        answer: &'a AssistantMessage,
+        yielded: &'a Yielded,
         api: &'a HookApi<'a>,
         ctx: &'a Context,
     ) -> BoxFuture<'a, HookResult<UserContent>> {
-        let _ = (answer, api, ctx);
+        let _ = (yielded, api, ctx);
         Box::pin(async { Ok(None) })
     }
 

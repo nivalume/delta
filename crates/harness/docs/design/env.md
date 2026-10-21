@@ -146,6 +146,7 @@ pub struct ExecOptions<'a> {
     pub on_output: Option<Box<dyn FnMut(OutputChunk) + Send + 'a>>,   // may borrow the caller's buffers
     pub spill: Option<SpillOptions>,          // after_bytes, after_lines
     pub window: Option<ShellOutputWindow>,    // max_bytes, max_lines, min_interval: Duration, bytes_per_second; limits() -> OutputLimits
+    pub stdin: Option<Vec<u8>>,               // written to the command's input, which is then closed; none: an empty input
 }
 pub struct OutputChunk { pub text: String, pub stream: OutputStream /* Stdout | Stderr */, pub skipped: Option<OutputSkip> }
 pub struct ExecResult { pub exit_code: i32, pub spill_path: Option<String> }

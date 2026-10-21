@@ -48,6 +48,8 @@ use crate::tool::ToolTask;
 pub const GENERATION_TASK: &str = "delta.generation";
 /// The entry kind of a model response.
 pub const ASSISTANT_ENTRY: &str = "delta.assistant";
+/// The entry kind of context an `on_input` hook adds: one system message.
+pub const CONTEXT_ENTRY: &str = "delta.context";
 
 /// The built-in task definitions every registry holds.
 pub fn builtin_tasks() -> Vec<Arc<dyn AnyTask>> {

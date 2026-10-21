@@ -10,7 +10,28 @@ use crate::compaction::CompactionReason;
 use crate::records::{EntryId, EntryRecord};
 use crate::tool::{ToolExecutionResult, ToolHookCall};
 
-/// What a `before_tool` hook asks: other arguments, or a block.
+/// What a `before_tool` hook says about the call's approval.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HookPermission {
+    /// Skip what the policy would ask by its mode; deny and ask rules still apply.
+    Allow,
+    /// Ask for approval even when the policy would allow, with `reason` as the prompt.
+    Ask { reason: Option<String> },
+}
+
+impl HookPermission {
+    /// The more restrictive of two: `Ask` over `Allow`, the first `Ask`'s reason.
+    #[must_use]
+    pub fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Allow, other) => other,
+            (ask @ Self::Ask { .. }, _) => ask,
+        }
+    }
+}
+
+/// What a `before_tool` hook asks: other arguments, a block, an approval wish, or context
+/// for the result.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BeforeTool {
     /// Replaces the call's arguments; later hooks see the replacement, and they are
@@ -18,6 +39,10 @@ pub struct BeforeTool {
     pub arguments: Option<JsonObject>,
     /// Blocks the call with this text; the first block wins and ends the chain.
     pub block: Option<String>,
+    /// The hook's word on approval; the most restrictive of the chain reaches the policy.
+    pub permission: Option<HookPermission>,
+    /// Text for the model, appended to the call's result as a final text item.
+    pub context: Option<String>,
 }
 
 /// Hooks of `delta.tool`. Every method defaults to doing nothing. They run off the session
@@ -26,7 +51,7 @@ pub struct BeforeTool {
 ///
 /// | Hook | Composition | Ordinary error |
 /// | --- | --- | --- |
-/// | `before_tool` | argument replacement chain; the first block wins | blocks the call with its text |
+/// | `before_tool` | argument replacement chain; the first block wins; the most restrictive permission; every context | blocks the call with its text |
 /// | `after_tool` | result replacement chain | reported, chain continues |
 pub trait ToolHooks: Send + Sync {
     /// Sees the call before the approval policy; may replace its arguments or block it.

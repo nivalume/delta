@@ -15,7 +15,7 @@ use crate::documents::{
     CheckpointInfo, ConversationScope, DocAddress, DocDefinition, ForkAsOf, Rewindable, SessionScope,
 };
 use crate::records::ConversationRecord;
-use crate::registry::HookApi;
+use crate::registry::{HookApi, HookPermission};
 use crate::session::{Tx, TxError};
 use crate::tool::{PathAccess, PermissionSubject};
 
@@ -384,7 +384,9 @@ impl RulesPolicy {
             }
             _ => {}
         }
-        if allowed_by(sources.iter().flat_map(|rules| &rules.allow), &rule_call) {
+        if call.hook == Some(HookPermission::Allow)
+            || allowed_by(sources.iter().flat_map(|rules| &rules.allow), &rule_call)
+        {
             return Memoized::Allow;
         }
         if let Some(PermissionSubject::Path { path, access }) = subject {

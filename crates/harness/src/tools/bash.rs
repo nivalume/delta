@@ -184,6 +184,7 @@ impl HarnessTool for BashTool {
                 }),
                 // The environment may then omit output outside the retained tail.
                 window: api.output_window(),
+                stdin: None,
             };
             let result = env.exec(Command::Shell(execution.command), options, ctx).await;
             let spill_path = match &result {

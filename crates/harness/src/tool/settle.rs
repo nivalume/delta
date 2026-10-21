@@ -281,7 +281,7 @@ pub(super) async fn final_result(
             count(window.dropped_bytes),
         ));
     }
-    let output = if window_kept {
+    let mut output = if window_kept {
         output
     } else {
         let (bounded, dropped) = bound_text(output, &tool.output_limits());
@@ -292,6 +292,10 @@ pub(super) async fn final_result(
         }
         bounded
     };
+    // The `before_tool` hooks' context, after the hooks that may rewrite the output.
+    if let Some(context) = rt.memo::<Vec<String>>(super::pipeline::HOOK_CONTEXT)? {
+        output.push(UserBlock::text(context.join("\n\n")));
+    }
     let nested = call.parent.is_some();
     structured_contract(rt, tool, nested, &mut result, &output);
     result.output = Some(output);

@@ -153,6 +153,9 @@ pub const DEFAULT_RETRY_POLICY: RetryPolicy = RetryPolicy {
 /// The default restart limit.
 pub const DEFAULT_RESTART_LIMIT: u32 = 5;
 
+/// How many `on_yield` continuations one run takes by default.
+pub const DEFAULT_MAX_CONTINUATIONS: u32 = 8;
+
 /// What a host passes. Every field is optional; settings are read live at each use and
 /// never stored, and a change makes no commit.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -177,6 +180,9 @@ pub struct HarnessSettings {
     /// How long a tool call waits for an approval decision when the policy names no
     /// timeout.
     pub approval_timeout: Option<Duration>,
+    /// How many `on_yield` continuations one run takes; later ones are reported and
+    /// ignored.
+    pub max_continuations: Option<u32>,
 }
 
 /// The resolved settings.
@@ -196,6 +202,7 @@ pub struct Settings {
     pub restart_limit: Option<u32>,
     pub close_grace: Duration,
     pub approval_timeout: Duration,
+    pub max_continuations: u32,
 }
 
 impl Default for Settings {
@@ -237,6 +244,7 @@ impl HarnessSettings {
             restart_limit: self.restart_limit.unwrap_or(Some(DEFAULT_RESTART_LIMIT)),
             close_grace: self.close_grace.unwrap_or(Duration::from_secs(30)),
             approval_timeout: self.approval_timeout.unwrap_or(DEFAULT_APPROVAL_TIMEOUT),
+            max_continuations: self.max_continuations.unwrap_or(DEFAULT_MAX_CONTINUATIONS),
         }
     }
 }

@@ -56,6 +56,9 @@ pub struct ExecOptions<'a> {
     pub spill: Option<SpillOptions>,
     /// The tail of the output the caller keeps; see [`ShellOutputWindow`].
     pub window: Option<ShellOutputWindow>,
+    /// Bytes written to the command's standard input, which is then closed; without them
+    /// the command reads an empty input.
+    pub stdin: Option<Vec<u8>>,
 }
 
 impl Default for ExecOptions<'_> {
@@ -68,6 +71,7 @@ impl Default for ExecOptions<'_> {
             on_output: None,
             spill: None,
             window: None,
+            stdin: None,
         }
     }
 }
@@ -82,6 +86,7 @@ impl fmt::Debug for ExecOptions<'_> {
             .field("on_output", &self.on_output.is_some())
             .field("spill", &self.spill)
             .field("window", &self.window)
+            .field("stdin", &self.stdin.as_ref().map(Vec::len))
             .finish()
     }
 }
@@ -120,6 +125,12 @@ impl<'a> ExecOptions<'a> {
     #[must_use]
     pub fn with_window(mut self, window: ShellOutputWindow) -> Self {
         self.window = Some(window);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stdin(mut self, input: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(input.into());
         self
     }
 

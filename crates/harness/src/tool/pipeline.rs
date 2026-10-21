@@ -17,7 +17,7 @@ use super::{approval, execute};
 use crate::agent::{Agent, AgentError, AgentRuntime, HookRuntime, report_host};
 use crate::approval::{ApprovalCall, ApprovalId, PolicyDecision, remove_request};
 use crate::generation::{SlotStatus, edit_live};
-use crate::registry::BeforeTool;
+use crate::registry::{BeforeTool, HookPermission};
 use crate::scheduler::{Next, NextState, TaskError};
 use crate::session::HostCallback;
 
@@ -106,21 +106,24 @@ pub(super) async fn call(rt: &Rt, ctx: &Context) -> Result<Next<ToolTask>, TaskE
         Ok(arguments) => call.call.arguments = arguments,
         Err(message) => return invalid(message),
     }
-    let rewritten = match before_tool(rt, &call, ctx).await? {
+    let passed = match before_tool(rt, &call, ctx).await? {
         Chain::Blocked(text) => {
             let message = format!("Tool call blocked: {text}");
             return settle(rt, Settlement::early(rt, stored, "blocked", message));
         }
-        Chain::Arguments(arguments) => arguments,
+        Chain::Passed(passed) => passed,
     };
-    if let Some(arguments) = rewritten {
+    if !passed.context.is_empty() {
+        rt.memo_or_insert(HOOK_CONTEXT, passed.context, ctx).await?;
+    }
+    if let Some(arguments) = passed.arguments {
         call.call.arguments = arguments;
         match validate::arguments(&*tool, &call.call) {
             Ok(arguments) => call.call.arguments = arguments,
             Err(message) => return invalid(message),
         }
     }
-    match policy(rt, &agent, &*tool, &call, ctx).await? {
+    match policy(rt, &agent, &*tool, &call, passed.permission, ctx).await? {
         Verdict::Allow => {}
         Verdict::Block(reason) => {
             let message = format!("Tool call blocked: {reason}");
@@ -139,32 +142,57 @@ pub(super) async fn call(rt: &Rt, ctx: &Context) -> Result<Next<ToolTask>, TaskE
     execute::run(rt, ctx, &*tool, &call, arguments, replay).await
 }
 
+/// The memo holding the `before_tool` hooks' context for the result; it outlives the
+/// approval wait and recovery.
+pub(super) const HOOK_CONTEXT: &str = "delta.tool:context";
+
+/// What the `before_tool` chain let through.
+#[derive(Default)]
+struct Passed {
+    /// The replacement arguments, if any hook replaced them.
+    arguments: Option<JsonObject>,
+    permission: Option<HookPermission>,
+    context: Vec<String>,
+}
+
 /// How the `before_tool` chain ended.
 enum Chain {
     Blocked(String),
-    /// The replacement arguments, if any hook replaced them.
-    Arguments(Option<JsonObject>),
+    Passed(Passed),
 }
 
 /// The `before_tool` chain: each hook sees the arguments as the hooks before it left them;
-/// the first block wins; an ordinary error blocks with its text.
+/// the first block wins; the most restrictive permission and every context are kept; an
+/// ordinary error blocks with its text.
 async fn before_tool(rt: &Rt, call: &ToolHookCall, ctx: &Context) -> Result<Chain, TaskError> {
     let hooks = rt.hooks(ctx).await?;
+    let mut passed = Passed::default();
     if hooks.is_empty() {
-        return Ok(Chain::Arguments(None));
+        return Ok(Chain::Passed(passed));
     }
     let api = rt.hook_api()?;
     let mut current = call.clone();
-    let mut replaced = None;
     for (extension, hook) in hooks.iter() {
         match hook.before_tool(&current, &api, ctx).await {
             Ok(None) => {}
             Ok(Some(BeforeTool { block: Some(text), .. })) => return Ok(Chain::Blocked(text)),
-            Ok(Some(BeforeTool { arguments, block: None })) => {
+            Ok(Some(BeforeTool {
+                arguments,
+                block: None,
+                permission,
+                context,
+            })) => {
                 if let Some(arguments) = arguments {
                     current.call.arguments.clone_from(&arguments);
-                    replaced = Some(arguments);
+                    passed.arguments = Some(arguments);
                 }
+                if let Some(permission) = permission {
+                    passed.permission = Some(match passed.permission.take() {
+                        Some(before) => before.and(permission),
+                        None => permission,
+                    });
+                }
+                passed.context.extend(context);
             }
             Err(error) => {
                 hook_failed(rt, &*error, extension, ctx)?;
@@ -172,7 +200,7 @@ async fn before_tool(rt: &Rt, call: &ToolHookCall, ctx: &Context) -> Result<Chai
             }
         }
     }
-    Ok(Chain::Arguments(replaced))
+    Ok(Chain::Passed(passed))
 }
 
 /// What the approval policy decided.
@@ -183,14 +211,20 @@ enum Verdict {
     Ask(approval::Ask),
 }
 
-/// The approval policy on the final arguments. A policy failure denies (fail closed).
+/// The approval policy on the final arguments. A policy failure denies (fail closed). A
+/// hook's `Ask` makes an allowed call ask.
 async fn policy(
     rt: &Rt,
     agent: &Agent,
     tool: &dyn HarnessTool,
     call: &ToolHookCall,
+    hook: Option<HookPermission>,
     ctx: &Context,
 ) -> Result<Verdict, TaskError> {
+    let hook_reason = match &hook {
+        Some(HookPermission::Ask { reason }) => Some(reason.clone()),
+        _ => None,
+    };
     let policy = rt.agent_services()?.approval().clone();
     let api = rt.hook_api()?;
     // The environment makes the subject's paths absolute; without one the policy decides on
@@ -213,9 +247,17 @@ async fn policy(
             Some(env) => Some(env.cwd()),
             None => agent.cwd.as_deref(),
         },
+        hook,
     };
     match policy.decide(&request, &api, ctx).await {
-        Ok(PolicyDecision::Allow) => Ok(Verdict::Allow),
+        Ok(PolicyDecision::Allow) => Ok(match hook_reason {
+            Some(prompt) => Verdict::Ask(approval::Ask {
+                timeout: None,
+                prompt,
+                proposed_rule: None,
+            }),
+            None => Verdict::Allow,
+        }),
         Ok(PolicyDecision::Deny { reason }) => Ok(Verdict::Block(format!("approval denied: {reason}"))),
         Ok(PolicyDecision::Ask {
             timeout,
@@ -223,7 +265,7 @@ async fn policy(
             proposed_rule,
         }) => Ok(Verdict::Ask(approval::Ask {
             timeout,
-            prompt,
+            prompt: prompt.or(hook_reason.flatten()),
             proposed_rule,
         })),
         Err(error) => {

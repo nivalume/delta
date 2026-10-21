@@ -416,6 +416,27 @@ mod cases {
         })
     }
 
+    pub(super) fn exec_feeds_stdin_and_closes_it<'a>(suite: &'a Suite, env: &'a dyn ExecutionEnv) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            for command in [
+                suite.script("cat; printf done", &[]),
+                Command::shell("cat; printf done"),
+            ] {
+                let mut stdout = String::new();
+                let options = ExecOptions::default()
+                    .with_stdin("{\"a\":1}\n")
+                    .on_output(|chunk| stdout.push_str(&chunk.text));
+                let result = env.exec(command, options, &ctx()).await;
+                assert_eq!(result.unwrap().exit_code, 0);
+                assert_eq!(stdout, "{\"a\":1}\ndone");
+            }
+            // Without input, a reader sees the end at once.
+            let (result, stdout, _) = exec_collect(env, Command::shell("cat; printf end"), None).await;
+            assert_eq!(result.unwrap().exit_code, 0);
+            assert_eq!(stdout, "end");
+        })
+    }
+
     pub(super) fn argv_exec_honors_cwd_and_exit_codes<'a>(
         suite: &'a Suite,
         env: &'a dyn ExecutionEnv,
@@ -583,6 +604,7 @@ local_conformance!(
     dir_reader_skips_entries_removed_during_enumeration,
     argv_exec_passes_arguments_without_shell_parsing,
     exec_reports_the_stream_of_every_chunk_in_both_forms,
+    exec_feeds_stdin_and_closes_it,
     argv_exec_honors_cwd_and_exit_codes,
     argv_exec_reports_missing_programs_and_empty_argv_as_spawn_errors,
     windowed_exec_keeps_the_exact_tail_and_counts_what_it_skips,

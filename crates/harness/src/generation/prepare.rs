@@ -1,17 +1,19 @@
 //! The `prepare` phase: resolve the agent once, render the prompt, plan the positional
 //! `delta.system` entries, check the compaction thresholds, then pin the request.
 
-use delta_ai::types::{Message, Tool};
+use delta_ai::types::{Message, SystemMessage, Tool};
 use delta_chord::context::Context;
+use delta_chord::json::Json;
 
-use super::failure::{model_error, no_model};
-use super::live::live_state;
-use super::{GenerationCheckpoint, GenerationTask, Rt};
-use crate::agent::AgentRuntime;
+use super::failure::{fail_run, model_error, no_model};
+use super::live::{edit_live, live_snapshot, live_state};
+use super::{CONTEXT_ENTRY, GenerationCheckpoint, GenerationTask, Rt, hook_failed};
 use crate::agent::report_host;
+use crate::agent::{AgentRuntime, HookRuntime};
 use crate::compaction::{CompactionInput, CompactionReason, Threshold, threshold};
 use crate::prompt::{PromptInput, plan_system_entries, render_sections, replay_sections};
-use crate::records::{EntryQuery, JoinPolicy, ScanOrder, TaskId, TaskOutcome};
+use crate::records::{EntryDraft, EntryQuery, JoinPolicy, ScanOrder, SubmissionState, TaskId, TaskOutcome};
+use crate::registry::{InputDecision, RunInput};
 use crate::scheduler::{Next, NextState, ReportFrom, TaskError};
 use crate::session::{HostCallback, TxError};
 
@@ -35,6 +37,77 @@ fn summarized(outcome: &TaskOutcome) -> bool {
     }
 }
 
+/// The `on_input` hooks, once per run in its first generation: the first block fails the
+/// run `blocked`; contexts become `delta.context` entries in the commit that marks the
+/// input checked. Without hooks nothing is committed.
+async fn on_input(rt: &Rt, ctx: &Context) -> Result<Option<Next<GenerationTask>>, TaskError> {
+    let task = rt.task_id();
+    let Some(run) = live_snapshot(rt, ctx)
+        .await?
+        .run
+        .filter(|run| run.task_id == task && !run.input_checked)
+    else {
+        return Ok(None);
+    };
+    let hooks = rt.hooks(ctx).await?;
+    if hooks.is_empty() {
+        return Ok(None);
+    }
+    let mut entries = Vec::new();
+    for id in &run.inputs {
+        let placed = match rt.submission(*id, ctx).await?.map(|record| record.state) {
+            Some(SubmissionState::Placed { entry } | SubmissionState::Done { entry, .. }) => Some(entry),
+            _ => None,
+        };
+        if let Some(entry) = placed
+            && let Some(record) = rt.entry(entry, ctx).await?
+        {
+            entries.push(record);
+        }
+    }
+    let input = RunInput { entries };
+    let api = rt.hook_api()?;
+    let mut contexts = Vec::new();
+    for (extension, hook) in hooks.iter() {
+        match hook.on_input(&input, &api, ctx).await {
+            Ok(Some(InputDecision::Block { reason })) => {
+                let detail = Some(Json::from(reason.clone()));
+                return fail_run(rt, "blocked", reason, detail, None).map(Some);
+            }
+            Ok(Some(InputDecision::Context(text))) => contexts.push(text),
+            Ok(None) => {}
+            Err(error) => hook_failed(rt, &*error, extension, ctx)?,
+        }
+    }
+    let conversation = rt.conversation_id();
+    let now = rt.now();
+    rt.commit(ctx, move |tx, _| {
+        Box::pin(async move {
+            for text in contexts {
+                let message = SystemMessage {
+                    content: text.into(),
+                    timestamp: now,
+                    ..SystemMessage::default()
+                };
+                let draft = EntryDraft {
+                    model: Some(vec![Message::System(message)]),
+                    ..EntryDraft::new(CONTEXT_ENTRY)
+                };
+                tx.append_entry(conversation, draft).await?;
+            }
+            edit_live(tx, conversation, |live| {
+                if let Some(run) = live.run.as_mut().filter(|run| run.task_id == task) {
+                    run.input_checked = true;
+                }
+            })
+            .await?;
+            Ok(((), None))
+        })
+    })
+    .await?;
+    Ok(None)
+}
+
 pub(super) async fn run(
     rt: &Rt,
     ctx: &Context,
@@ -54,6 +127,9 @@ pub(super) async fn run(
     let Some(model) = services.models().model(&model_ref) else {
         return no_model(rt, Some(&model_ref));
     };
+    if let Some(blocked) = on_input(rt, ctx).await? {
+        return Ok(blocked);
+    }
     if let Some(compaction) = compacted {
         let outcome = rt.outcomes(&[compaction], ctx).await?.into_iter().next();
         if let Some(text) = overflow
