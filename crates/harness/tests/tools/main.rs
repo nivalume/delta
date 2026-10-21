@@ -24,6 +24,7 @@ macro_rules! cases {
 mod approval;
 mod bash;
 mod edit;
+mod image;
 mod mutation;
 mod read;
 mod write;
@@ -39,7 +40,7 @@ use delta_harness::approval::ApprovalPolicy;
 use delta_harness::harness::{Conversation, Harness};
 use delta_harness::inbox::SubmissionDraft;
 use delta_harness::tool::ToolDiagnostic;
-use delta_harness::tools::{BashOptions, coding_tools};
+use delta_harness::tools::{BashOptions, CodingToolsOptions, coding_tools};
 pub(crate) use support::Backend;
 
 use crate::support::TempDir;
@@ -112,11 +113,15 @@ impl Workspace {
     }
 
     /// With `approval` as the Harness's policy instead of allowing every call.
-    async fn open(backend: Backend, bash: BashOptions, approval: Option<Arc<dyn ApprovalPolicy>>) -> Self {
+    async fn open(
+        backend: Backend,
+        tools: impl Into<CodingToolsOptions>,
+        approval: Option<Arc<dyn ApprovalPolicy>>,
+    ) -> Self {
         let dir = TempDir::new();
         let mut fixture = Fixture::new(backend).await;
         fixture.env = Some(Arc::new(LocalEnvBuilder::new(dir.path())));
-        fixture.registry.install(coding_tools(bash)).unwrap();
+        fixture.registry.install(coding_tools(tools)).unwrap();
         let mut options = fixture.options();
         if let Some(approval) = approval {
             options.approval = approval;

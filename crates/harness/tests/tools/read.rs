@@ -13,7 +13,6 @@ cases!(
     offset_and_limit_select_lines,
     long_files_are_truncated_with_a_continuation,
     a_line_over_the_limit_shows_its_start,
-    images_are_refused,
     paths_are_normalized_and_marks_dropped,
     a_missing_file_or_environment_fails,
 );
@@ -119,19 +118,6 @@ async fn a_line_over_the_limit_shows_its_start(backend: Backend) {
     assert_eq!(truncation["output_bytes"], DEFAULT_MAX_BYTES - 1);
     assert_eq!(truncation["output_lines"], 1);
     assert_eq!(truncation["first_line_exceeds_limit"], true);
-    workspace.close().await;
-}
-
-async fn images_are_refused(backend: Backend) {
-    let workspace = Workspace::new(backend).await;
-    workspace.write("shot.png", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR");
-    let called = workspace.call("read", serde_json::json!({ "path": "shot.png" })).await;
-    assert!(called.message.is_error);
-    assert!(called.output().is_empty());
-    assert_eq!(
-        called.diagnostic("unsupported_image").message,
-        "shot.png is an image (image/png); image input is not supported in this build"
-    );
     workspace.close().await;
 }
 

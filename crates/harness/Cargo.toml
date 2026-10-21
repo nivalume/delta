@@ -23,6 +23,8 @@ default = ["schemars"]
 schemars = ["dep:schemars"]
 
 [dependencies]
+# The base64 of images `read` sends.
+base64.workspace = true
 delta-ai.workspace = true
 delta-chord = { workspace = true, features = ["sqlite"] }
 futures.workspace = true

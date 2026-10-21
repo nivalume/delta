@@ -12,6 +12,7 @@
 mod bash;
 mod edit;
 mod edit_diff;
+mod image;
 mod mutation;
 mod paths;
 mod read;
@@ -26,9 +27,13 @@ use serde::de::DeserializeOwned;
 
 pub use bash::{BashExecution, BashOptions, BashPrepare, BashTool};
 pub use edit::EditTool;
+pub use image::{
+    DEFAULT_IMAGE_LIMITS, Dimensions, INLINE_IMAGE_TYPES, ImageLimits, ImageProcessor, PreparedImage, base64_len,
+    detect_image_type, image_dimensions, is_inline,
+};
 pub use mutation::FileMutationQueue;
 pub use paths::{normalize_tool_path, resolve_read_path, resolve_tool_path};
-pub use read::ReadTool;
+pub use read::{ReadOptions, ReadTool};
 pub use truncate::{
     DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Limit, Totals, Truncation, format_size, truncate_head, truncate_head_of,
 };
@@ -41,12 +46,28 @@ use crate::tool::{ToolApi, ToolError};
 /// The name of the [`coding_tools`] extension.
 pub const CODING_TOOLS: &str = "coding-tools";
 
-/// `read`, `write`, `edit` and `bash` (run with `bash`), with one mutation queue for `write`
-/// and `edit`.
-pub fn coding_tools(bash: BashOptions) -> Extension {
+/// How [`coding_tools`] builds its tools.
+#[derive(Clone, Debug, Default)]
+pub struct CodingToolsOptions {
+    pub bash: BashOptions,
+    pub read: ReadOptions,
+}
+
+impl From<BashOptions> for CodingToolsOptions {
+    fn from(bash: BashOptions) -> Self {
+        Self {
+            bash,
+            read: ReadOptions::default(),
+        }
+    }
+}
+
+/// `read`, `write`, `edit` and `bash`, with one mutation queue for `write` and `edit`.
+pub fn coding_tools(options: impl Into<CodingToolsOptions>) -> Extension {
+    let CodingToolsOptions { bash, read } = options.into();
     let queue = FileMutationQueue::new();
     Extension::new(CODING_TOOLS)
-        .with_tool(Arc::new(ReadTool::new()))
+        .with_tool(Arc::new(ReadTool::with_options(read)))
         .with_tool(Arc::new(WriteTool::new(queue.clone())))
         .with_tool(Arc::new(EditTool::new(queue)))
         .with_tool(Arc::new(BashTool::new(bash)))

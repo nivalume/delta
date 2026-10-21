@@ -1,15 +1,21 @@
 //! `read`: a text file's lines, bounded, with how to continue as diagnostics.
 
-use delta_ai::types::{JsonObject, Tool, UserBlock};
+use std::sync::Arc;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use delta_ai::model::Model;
+use delta_ai::types::{ImageContent, JsonObject, Tool, UserBlock};
 use delta_chord::context::Context;
 use delta_chord::output::{OutputLimits, Retain, char_end};
 use futures::future::BoxFuture;
 use serde::Deserialize;
 
+use super::image::{ImageLimits, ImageProcessor, base64_len, detect as detect_image, image_dimensions, is_inline};
 use super::paths::resolve_read_path;
 use super::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Limit, Totals, format_size, truncate_head_of};
 use super::{js_number, parse, require_env};
-use crate::env::{BinaryReader, FileResult, LineScan, OpenOptions, Utf8Decoder};
+use crate::env::{BinaryReader, FileInfo, FileResult, LineScan, OpenOptions, Utf8Decoder};
 use crate::tool::{HarnessTool, Severity, ToolApi, ToolDiagnostic, ToolError, ToolExecutionResult};
 
 /// Bytes read per call while reading the head of the selection.
@@ -24,11 +30,20 @@ const LIMITS: OutputLimits = OutputLimits {
     retain: Retain::Head,
 };
 
-/// The `read` tool. Details: `{ truncation? }`, the [`Truncation`](super::Truncation) of the
-/// shown text.
+/// How [`ReadTool`] reads images.
+#[derive(Clone, Debug, Default)]
+pub struct ReadOptions {
+    /// Resizes and converts images; without one, inline images within the model's limits
+    /// pass through as they are.
+    pub image_processor: Option<Arc<dyn ImageProcessor>>,
+}
+
+/// The `read` tool: text files' lines, or one image. Details of a text read:
+/// `{ truncation? }`, the [`Truncation`](super::Truncation) of the shown text.
 #[derive(Debug)]
 pub struct ReadTool {
     definition: Tool,
+    images: Option<Arc<dyn ImageProcessor>>,
 }
 
 impl Default for ReadTool {
@@ -39,8 +54,17 @@ impl Default for ReadTool {
 
 impl ReadTool {
     pub fn new() -> Self {
+        Self::with_options(ReadOptions::default())
+    }
+
+    pub fn with_options(options: ReadOptions) -> Self {
+        let formats = if options.image_processor.is_some() {
+            "jpg, png, gif, webp, bmp"
+        } else {
+            "jpg, png, gif, webp"
+        };
         let description = format!(
-            "Read the contents of a text file. Output is truncated to {DEFAULT_MAX_LINES} lines or {}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+            "Read the contents of a file. Supports text files and images ({formats}). Images are sent as attachments. For text files, output is truncated to {DEFAULT_MAX_LINES} lines or {}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
             DEFAULT_MAX_BYTES / 1024
         );
         let parameters = serde_json::json!({
@@ -54,6 +78,7 @@ impl ReadTool {
         });
         Self {
             definition: Tool::new("read", description, parameters),
+            images: options.image_processor,
         }
     }
 }
@@ -83,7 +108,7 @@ impl HarnessTool for ReadTool {
             let env = require_env(api)?;
             let absolute = resolve_read_path(env, &arguments.path, ctx).await?;
             let reader = env.open_binary_reader(&absolute, OpenOptions::default(), ctx).await?;
-            let result = read_opened(&*reader, &arguments, ctx).await;
+            let result = read_opened(&*reader, &arguments, api, self.images.as_deref(), ctx).await;
             reader.close(ctx).await;
             result
         })
@@ -91,18 +116,23 @@ impl HarnessTool for ReadTool {
 }
 
 /// A concurrent writer can change the file between the scan and the reads. Appending (a
-/// growing log) leaves the scanned text as it was; otherwise the file is read again once.
+/// growing log) leaves the scanned text as it was; an image must be whole. Otherwise the file
+/// is read again once.
 async fn read_opened(
     reader: &dyn BinaryReader,
     arguments: &ReadArguments,
+    api: &ToolApi<'_>,
+    processor: Option<&dyn ImageProcessor>,
     ctx: &Context,
 ) -> Result<ToolExecutionResult, ToolError> {
     for _ in 0..2 {
         let before = reader.info(ctx).await?;
-        let header = reader.read(0, 16, ctx).await?;
-        let image = image_type(&header, before.size);
+        let image = detect_image(reader, before.size, ctx).await?;
         let result = match image {
-            Some(mime) => unsupported_image(&arguments.path, mime),
+            Some(mime) => {
+                let model = ImageModel::of(api);
+                read_image(reader, &before, &arguments.path, mime, processor, &model, ctx).await?
+            }
             None => read_text(reader, arguments, ctx).await?,
         };
         let after = reader.info(ctx).await?;
@@ -114,36 +144,116 @@ async fn read_opened(
     Err(format!("{} changed while it was read", arguments.path).into())
 }
 
-/// The image format a file's first bytes announce. A BMP header must also give the file's
-/// size, so text that starts with `BM` stays text.
-fn image_type(header: &[u8], size: u64) -> Option<&'static str> {
-    if header.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if header.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("image/jpeg")
-    } else if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if header.len() >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else if header.len() >= 14
-        && header.starts_with(b"BM")
-        && u64::from(u32::from_le_bytes([header[2], header[3], header[4], header[5]])) == size
-        && header[6..10] == [0; 4]
-    {
-        Some("image/bmp")
-    } else {
-        None
+/// What the conversation's model takes: whether images, and within which limits. A model
+/// that does not resolve counts as one that takes images within the defaults.
+struct ImageModel {
+    vision: bool,
+    limits: ImageLimits,
+}
+
+impl ImageModel {
+    fn of(api: &ToolApi<'_>) -> Self {
+        let model = api
+            .agent()
+            .model
+            .as_ref()
+            .and_then(|reference| api.models().ok()?.model(reference));
+        Self {
+            vision: model.as_ref().is_none_or(Model::supports_images),
+            limits: ImageLimits::for_model(model.as_ref()),
+        }
     }
 }
 
-fn unsupported_image(path: &str, mime: &str) -> ToolExecutionResult {
+/// One image item, prepared by `processor` or, without one, as it is when its format is
+/// inline and it fits the limits (its size checked before reading it, its dimensions from
+/// its header); otherwise an error result saying why.
+async fn read_image(
+    reader: &dyn BinaryReader,
+    info: &FileInfo,
+    path: &str,
+    mime: &str,
+    processor: Option<&dyn ImageProcessor>,
+    model: &ImageModel,
+    ctx: &Context,
+) -> Result<ToolExecutionResult, ToolError> {
+    let limits = model.limits;
+    let mut notes = Vec::new();
+    let (data, prepared_mime) = if let Some(processor) = processor {
+        let bytes = read_whole(reader, info.size, ctx).await?;
+        let Some(prepared) = processor.prepare(&bytes, mime, limits, ctx).await else {
+            return Ok(image_error(format!(
+                "{path} is an image ({mime}) that cannot be prepared for the model"
+            )));
+        };
+        if let Some(from) = &prepared.converted_from {
+            notes.push(format!("Converted from {from} to {}.", prepared.mime));
+        }
+        if let Some((from, to)) = prepared.resized {
+            let scale = f64::from(from.width) / f64::from(to.width);
+            notes.push(format!(
+                "Resized from {}x{} to {}x{}. Multiply coordinates by {scale:.2} to map them to the original.",
+                from.width, from.height, to.width, to.height
+            ));
+        }
+        (prepared.data, prepared.mime)
+    } else {
+        if !is_inline(mime) {
+            return Ok(image_error(format!(
+                "{path} is an image ({mime}) that needs converting, and no image processor is configured"
+            )));
+        }
+        let unshrinkable = "and no image processor is configured to shrink it";
+        if base64_len(info.size) > limits.max_bytes {
+            return Ok(image_error(format!(
+                "{path} is an image ({mime}) of {}, too large to send, {unshrinkable}",
+                format_size(info.size)
+            )));
+        }
+        let bytes = read_whole(reader, info.size, ctx).await?;
+        let Some(size) = image_dimensions(&bytes, mime) else {
+            return Ok(image_error(format!(
+                "{path} is an image ({mime}) whose size cannot be read"
+            )));
+        };
+        if size.width > limits.max_width || size.height > limits.max_height {
+            return Ok(image_error(format!(
+                "{path} is an image ({mime}) of {}x{}, larger than {}x{}, {unshrinkable}",
+                size.width, size.height, limits.max_width, limits.max_height
+            )));
+        }
+        (bytes, mime.to_owned())
+    };
+    if !model.vision {
+        notes.push("The current model does not support images; it sees a placeholder instead.".to_owned());
+    }
+    let mut message = format!("Read image file [{prepared_mime}].");
+    for note in notes {
+        message.push(' ');
+        message.push_str(&note);
+    }
+    let image = ImageContent {
+        data: STANDARD.encode(data),
+        mime_type: prepared_mime,
+    };
+    Ok(ToolExecutionResult {
+        output: Some(vec![UserBlock::Image(image)]),
+        diagnostics: vec![ToolDiagnostic::new(Severity::Info, message).with_code("image")],
+        ..ToolExecutionResult::default()
+    })
+}
+
+/// The whole opened file.
+async fn read_whole(reader: &dyn BinaryReader, size: u64, ctx: &Context) -> Result<Vec<u8>, ToolError> {
+    let length = usize::try_from(size)?;
+    Ok(reader.read(0, length, ctx).await?)
+}
+
+fn image_error(message: String) -> ToolExecutionResult {
     ToolExecutionResult {
         output: Some(Vec::new()),
         is_error: true,
-        diagnostics: vec![ToolDiagnostic::error(
-            "unsupported_image",
-            format!("{path} is an image ({mime}); image input is not supported in this build"),
-        )],
+        diagnostics: vec![ToolDiagnostic::error("unsupported_image", message)],
         ..ToolExecutionResult::default()
     }
 }
@@ -339,22 +449,4 @@ async fn read_head(reader: &dyn BinaryReader, scan: &LineScan, bom: bool, ctx: &
     }
     text.push_str(&decoder.finish_to_string());
     Ok(text)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::image_type;
-
-    #[test]
-    fn images_are_told_by_their_signature() {
-        assert_eq!(image_type(b"\x89PNG\r\n\x1a\n....", 100), Some("image/png"));
-        assert_eq!(image_type(b"RIFF\0\0\0\0WEBPVP8 ", 100), Some("image/webp"));
-        let mut bmp = b"BM".to_vec();
-        bmp.extend_from_slice(&30u32.to_le_bytes());
-        bmp.extend_from_slice(&[0; 10]);
-        assert_eq!(image_type(&bmp, 30), Some("image/bmp"));
-        assert_eq!(image_type(&bmp, 31), None);
-        assert_eq!(image_type(b"BMW is a car maker", 18), None);
-        assert_eq!(image_type(b"plain text", 10), None);
-    }
 }

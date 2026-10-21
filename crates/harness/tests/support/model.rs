@@ -175,6 +175,8 @@ struct State {
     cancelled: Vec<String>,
     /// Model ids it knows, with their context window.
     models: Vec<(String, u64)>,
+    /// Fields that replace a known model's (`input`, `inputLimits`, ...).
+    patches: Vec<(String, serde_json::Value)>,
 }
 
 /// The scripted model client. Clones share the script.
@@ -225,6 +227,12 @@ impl FakeModel {
     /// Ids of the deferred responses cancelled so far.
     pub fn cancelled(&self) -> Vec<String> {
         self.state.lock().unwrap().cancelled.clone()
+    }
+
+    /// Replaces fields of the model `model_id` as `Model` serializes them, e.g.
+    /// `{ "input": ["text", "image"] }`.
+    pub fn patch_model(&self, model_id: &str, fields: serde_json::Value) {
+        self.state.lock().unwrap().patches.push((model_id.to_owned(), fields));
     }
 
     /// Forgets `model_id`, so requests for it fail `no_model`.
@@ -298,11 +306,16 @@ impl ModelClient for FakeModel {
         }
         let state = self.state.lock().unwrap();
         let (id, window) = state.models.iter().find(|(id, _)| *id == reference.model_id)?;
-        let model = serde_json::json!({
+        let mut model = serde_json::json!({
             "id": id, "name": id, "api": "fake", "provider": PROVIDER, "baseUrl": "",
             "input": ["text"], "cost": { "input": 1.0, "output": 2.0, "cacheRead": 0.0, "cacheWrite": 0.0 },
             "contextWindow": window, "maxTokens": 1000
         });
+        for (_, fields) in state.patches.iter().filter(|(patched, _)| patched == id) {
+            for (key, value) in fields.as_object().into_iter().flatten() {
+                model[key] = value.clone();
+            }
+        }
         Some(serde_json::from_value(model).unwrap())
     }
 
