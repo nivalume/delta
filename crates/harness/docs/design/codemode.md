@@ -112,7 +112,10 @@ what does not fit is said so and found with `searchTools()`.
 
 Scripts find tools with `ALL_TOOLS`, `searchTools(query, { limit?, namespace? })` (BM25 over
 name, description and namespace, default limit 8), `describeTool(name)` and
-`describeNamespace(name)`, answered from the start data and journaled like other globals.
+`describeNamespace(name)`, answered from the start data and journaled like other globals. The
+ranking is upstream's `search.ts` (camelCase and punctuation split, stop words, a naive
+singular, Okapi BM25 with k1 1.2 and b 0.75), kept in `codemode::search` until another module
+needs it.
 
 ## Models
 

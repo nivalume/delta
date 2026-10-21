@@ -18,9 +18,11 @@
 //! Port of upstream `@earendil-works/pi-durable/codemode` (spec §7.6); see
 //! `docs/design/codemode.md`.
 
+mod describe;
 mod documents;
 mod output;
 mod run;
+mod search;
 mod tool;
 
 use std::fmt;
@@ -31,6 +33,7 @@ use delta_codemode::Sandbox;
 use futures::future::BoxFuture;
 use serde_json::Value;
 
+pub use describe::{DEFAULT_CODEMODE_INLINE_BUDGET, codemode_section};
 pub use documents::{
     CallStatus, CodemodeJournalDoc, CodemodeNestedCall, CodemodeRunDoc, CodemodeStart, CodemodeStoreDoc,
     CodemodeToolDetails, JournalEntry, JournalState, JournaledGlobal, RunState, StartNamespace, StartTool, StoreState,
@@ -45,6 +48,10 @@ use crate::tool::{ToolApi, ToolError};
 /// result mapping, globals, start data. Bumped when that changes, so a call started before an
 /// upgrade is not replayed by different code.
 pub const CODEMODE_MODULE_VERSION: u32 = 1;
+
+/// Reserved name prefix of code mode's internal tools; they are never listed to scripts or the
+/// model.
+pub const CODEMODE_INTERNAL_PREFIX: &str = "delta.codemode.";
 
 /// A group of tools named by a common prefix, such as an MCP server's `mcp__github__`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,6 +136,9 @@ pub struct CodemodeOptions {
     pub namespaces: Vec<CodemodeNamespace>,
     /// Host functions scripts call as globals.
     pub globals: Vec<Arc<dyn CodemodeGlobal>>,
+    /// Estimated tokens the tool declarations in the `codemode` section may use. Default
+    /// [`DEFAULT_CODEMODE_INLINE_BUDGET`].
+    pub inline_budget: usize,
 }
 
 impl CodemodeOptions {
@@ -137,7 +147,14 @@ impl CodemodeOptions {
             sandbox,
             namespaces: Vec::new(),
             globals: Vec::new(),
+            inline_budget: DEFAULT_CODEMODE_INLINE_BUDGET,
         }
+    }
+
+    #[must_use]
+    pub fn with_inline_budget(mut self, budget: usize) -> Self {
+        self.inline_budget = budget;
+        self
     }
 
     #[must_use]

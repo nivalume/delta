@@ -30,8 +30,8 @@ use delta_codemode::{Sandbox, SandboxOptions};
 use delta_harness::agent::LocalEnvBuilder;
 use delta_harness::approval::{ApprovalCall, ApprovalPolicy, PolicyDecision, PolicyError};
 use delta_harness::codemode::{
-    CODEMODE_MODULE_VERSION, CodemodeGlobal, CodemodeJournalDoc, CodemodeOptions, CodemodeRunDoc, CodemodeStoreDoc,
-    CodemodeToolDetails, JournalState, RunState, StoreState, StoredResult, codemode_extension,
+    CODEMODE_MODULE_VERSION, CodemodeGlobal, CodemodeJournalDoc, CodemodeNamespace, CodemodeOptions, CodemodeRunDoc,
+    CodemodeStoreDoc, CodemodeToolDetails, JournalState, RunState, StoreState, StoredResult, codemode_extension,
 };
 use delta_harness::documents::DocAddress;
 use delta_harness::harness::{AbortOptions, Conversation, Harness};
@@ -62,6 +62,7 @@ cases!(
     a_rerun_that_diverges_ends_with_an_error,
     a_held_call_whose_key_made_another_call_diverges,
     long_output_and_images_go_to_files,
+    the_section_lists_tools_and_scripts_find_the_rest,
 );
 
 /// Counts how often each test tool and global ran.
@@ -191,7 +192,9 @@ impl CodemodeGlobal for Stamp {
 /// Installs code mode with the test tools and `host.stamp`.
 fn install(fixture: &Fixture, runs: &Runs, stuck_runs: usize) {
     let sandbox = Arc::new(Sandbox::new(SandboxOptions::default()));
-    let options = CodemodeOptions::new(sandbox).with_global(Arc::new(Stamp(runs.clone())));
+    let options = CodemodeOptions::new(sandbox)
+        .with_global(Arc::new(Stamp(runs.clone())))
+        .with_namespace(CodemodeNamespace::new("probes", "probe").with_description("Probing tools."));
     fixture
         .registry
         .install(codemode_extension(options).with_tool(lookup(runs)))
@@ -859,5 +862,70 @@ async fn long_output_and_images_go_to_files(backend: Backend) {
     );
     assert!(result.content.iter().any(|block| matches!(block, UserBlock::Image(_))));
     std::fs::remove_dir_all(std::path::Path::new(&full).parent().unwrap()).unwrap();
+    harness.close(&ctx()).await.unwrap();
+}
+
+async fn the_section_lists_tools_and_scripts_find_the_rest(backend: Backend) {
+    let fixture = Fixture::new(backend).await;
+    let runs = Runs::default();
+    install(&fixture, &runs, 0);
+    let harness = fixture.open().await;
+    let result = script(
+        &fixture,
+        &harness,
+        r#"
+const names = (found) => found.map((tool) => tool.name).join(",");
+text(names(await searchTools("word")));
+text(names(await searchTools("probes", { namespace: "probes" })));
+text(JSON.stringify(await describeNamespace("probes")));
+text((await describeTool("count")).split("\n")[0]);
+text(String(await describeTool("nothing")));
+try { await searchTools(3); } catch (error) { text(error.message); }
+try { await searchTools("x", { limit: 0 }); } catch (error) { text(error.message); }
+"#,
+    )
+    .await;
+    let texts: Vec<String> = body(&result)
+        .split("\n==> ")
+        .map(|item| item.split_once("<==\n").unwrap().1.to_owned())
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "lookup",
+            "probe",
+            r#"{"name":"probes","description":"Probing tools.","tools":["probe"]}"#,
+            "Counts",
+            "undefined",
+            "searchTools() expects a query string",
+            "searchTools() limit must be a positive integer",
+        ]
+    );
+    // The system prompt lists the callable tools by namespace; `codemode` itself is not one.
+    let conversation = chat(&harness).await;
+    let section = entries(&conversation)
+        .await
+        .into_iter()
+        .find_map(|entry| match entry.model.as_deref() {
+            Some([Message::System(system)]) => system
+                .sections
+                .iter()
+                .flatten()
+                .find(|(key, _)| key.as_str() == "codemode")
+                .and_then(|(_, text)| text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        section.starts_with(
+            "<codemode>\nTools scripts can call (`await tools.<name>(args)`):\n\n### `lookup`\nLooks a word up"
+        ),
+        "{section}"
+    );
+    assert!(
+        section.contains("\n\n## probes\nProbing tools.\n\n### `probe`\nProbes"),
+        "{section}"
+    );
+    assert!(!section.contains("### `codemode`"), "{section}");
     harness.close(&ctx()).await.unwrap();
 }

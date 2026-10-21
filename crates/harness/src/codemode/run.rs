@@ -16,27 +16,33 @@ use delta_chord::context::Context;
 use delta_chord::delta::Draft;
 use delta_chord::json::{self, Json};
 use delta_codemode::{
-    CallTarget, CodemodeResult, DeclaredTool, HostCall, Outcome, Run, RunEvent, RunHandle, RunOptions, ToolDeclaration,
-    parse_codemode_source, render_tool_sample, to_codemode_identifier,
+    CallTarget, CodemodeResult, DeclaredGlobal, DeclaredTool, HostCall, Outcome, Run, RunEvent, RunHandle, RunOptions,
+    parse_codemode_source, to_codemode_identifier,
 };
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Map, Value};
 
+use super::describe::sample_of;
 use super::documents::{
     CallStatus, CodemodeJournalDoc, CodemodeNestedCall, CodemodeRunDoc, CodemodeStart, CodemodeStoreDoc,
     CodemodeToolDetails, JournalEntry, JournalState, JournaledGlobal, RunState, StartNamespace, StartTool, StoreState,
     StoredResult,
 };
 use super::output::{self, CallSummary, FormatOptions, Limits, OutputFile};
-use super::{CODEMODE_MODULE_VERSION, CodemodeOptions, namespace_of};
+use super::search::{SearchDocument, rank_documents};
+use super::{CODEMODE_INTERNAL_PREFIX, CODEMODE_MODULE_VERSION, CodemodeOptions, namespace_of};
 use crate::documents::DocAddress;
 use crate::session::TxError;
 use crate::tool::{
-    HarnessTool, NestedCallDoc, NestedCallOptions, NestedCallState, NestedToolExecutionResult, Severity, ToolApi,
-    ToolApiError, ToolError, ToolExecutionResult,
+    NestedCallDoc, NestedCallOptions, NestedCallState, NestedToolExecutionResult, Severity, ToolApi, ToolApiError,
+    ToolError, ToolExecutionResult,
 };
+
+/// Globals for finding tools, answered from the start data.
+const DISCOVERY_GLOBALS: [&str; 3] = ["searchTools", "describeTool", "describeNamespace"];
+const DEFAULT_SEARCH_LIMIT: usize = 8;
 
 /// Characters of a call's arguments and error kept for `details`.
 const ARGS_PREVIEW_CHARS: usize = 200;
@@ -47,11 +53,6 @@ pub(super) const LIMITS: Limits = Limits {
     max_bytes: 4 * 1024 * 1024,
     max_lines: 100_000,
 };
-
-/// What a schema-less tool declares it resolves with: its text.
-fn text_output_schema() -> Value {
-    serde_json::json!({ "type": "string" })
-}
 
 /// `text` cut to `max` characters, ending in `...` when cut.
 fn cut(text: &str, max: usize) -> String {
@@ -157,21 +158,6 @@ fn random_seed() -> u32 {
     seed
 }
 
-/// What a script sees of a tool: its description and declaration.
-fn sample_of(tool: &dyn HarnessTool) -> String {
-    let definition = tool.definition();
-    let text = text_output_schema();
-    render_tool_sample(
-        &ToolDeclaration {
-            name: &definition.name,
-            description: &definition.description,
-            input_schema: Some(&definition.parameters),
-            output_schema: Some(tool.structured_output_schema().unwrap_or(&text)),
-        },
-        None,
-    )
-}
-
 /// Ends the run when the call's future is dropped, so a cancelled call stops its VM.
 struct AbortOnDrop(RunHandle);
 
@@ -209,11 +195,15 @@ pub(super) async fn execute(
             js_name: to_codemode_identifier(tool.name()),
             description: sample_of(&**tool),
             structured: tool.structured_output_schema().is_some(),
-            hidden: false,
+            hidden: tool.name().starts_with(CODEMODE_INTERNAL_PREFIX),
         })
         .collect();
     let mut namespaces: Vec<StartNamespace> = Vec::new();
-    for tool in &agent.callable {
+    for tool in agent
+        .callable
+        .iter()
+        .filter(|tool| !tool.name().starts_with(CODEMODE_INTERNAL_PREFIX))
+    {
         let Some(namespace) = namespace_of(tool.name(), &options.namespaces) else {
             continue;
         };
@@ -231,13 +221,16 @@ pub(super) async fn execute(
         };
         namespaces[index].tools.push(tool.name().to_owned());
     }
-    let globals = options
-        .globals
+    let globals = DISCOVERY_GLOBALS
         .iter()
-        .map(|global| delta_codemode::DeclaredGlobal {
+        .map(|name| DeclaredGlobal {
+            name: (*name).to_owned(),
+            spread: true,
+        })
+        .chain(options.globals.iter().map(|global| DeclaredGlobal {
             name: global.name().to_owned(),
             spread: global.spread(),
-        })
+        }))
         .collect();
     let now = api.now();
     let timeout = parsed.options.timeout_ms;
@@ -911,6 +904,17 @@ impl<'a> Call<'a> {
         }
         match call.target {
             CallTarget::Tool => self.launch_tool(call, true),
+            CallTarget::Global if DISCOVERY_GLOBALS.contains(&call.name.as_str()) => {
+                let outcome = match discover(&self.start, &call) {
+                    Ok(value) => Outcome::ok(value),
+                    Err(message) => Outcome::err(message),
+                };
+                self.running.push(Box::pin(std::future::ready(Landed {
+                    call,
+                    live: true,
+                    result: CallResult::Global(Ok(outcome)),
+                })));
+            }
             CallTarget::Global => {
                 let (api, ctx, options) = (self.api, self.ctx, self.options);
                 self.running.push(Box::pin(async move {
@@ -1158,6 +1162,108 @@ impl<'a> Call<'a> {
             self.deliver(self.journal_length, item.at, item.id, item.outcome);
         }
         self.launch_covered();
+    }
+}
+
+/// `searchTools()`, `describeTool()`, `describeNamespace()`: answered from the start data, so a
+/// replay sees what the first run saw.
+fn discover(start: &CodemodeStart, call: &HostCall) -> Result<Option<Value>, String> {
+    let args: &[Value] = call.args.as_ref().and_then(Value::as_array).map_or(&[], Vec::as_slice);
+    let tools: Vec<&StartTool> = start.tools.iter().filter(|tool| !tool.hidden).collect();
+    let namespace_of_tool = |name: &str| {
+        start
+            .namespaces
+            .iter()
+            .find(|namespace| namespace.tools.iter().any(|tool| tool == name))
+    };
+    let matches_namespace = |namespace: &StartNamespace, query: &str| {
+        namespace.name == query || to_codemode_identifier(&namespace.name) == to_codemode_identifier(query)
+    };
+    match call.name.as_str() {
+        "describeTool" => {
+            let Some(name) = args.first().and_then(Value::as_str) else {
+                return Err("describeTool() expects a tool name".to_owned());
+            };
+            Ok(tools
+                .iter()
+                .find(|tool| tool.name == name || tool.js_name == name)
+                .map(|tool| Value::String(tool.description.clone())))
+        }
+        "describeNamespace" => {
+            let Some(name) = args.first().and_then(Value::as_str) else {
+                return Err("describeNamespace() expects a namespace name".to_owned());
+            };
+            let Some(namespace) = start
+                .namespaces
+                .iter()
+                .find(|namespace| matches_namespace(namespace, name))
+            else {
+                return Ok(None);
+            };
+            let mut described = Map::new();
+            described.insert("name".to_owned(), Value::String(namespace.name.clone()));
+            if let Some(description) = &namespace.description {
+                described.insert("description".to_owned(), Value::String(description.clone()));
+            }
+            if let Some(instructions) = &namespace.instructions {
+                described.insert("instructions".to_owned(), Value::String(instructions.clone()));
+            }
+            let members = namespace
+                .tools
+                .iter()
+                .map(|tool| Value::String(to_codemode_identifier(tool)))
+                .collect();
+            described.insert("tools".to_owned(), Value::Array(members));
+            Ok(Some(Value::Object(described)))
+        }
+        _ => {
+            let Some(query) = args.first().and_then(Value::as_str) else {
+                return Err("searchTools() expects a query string".to_owned());
+            };
+            let options = args.get(1).filter(|options| !options.is_null());
+            let limit = match options.and_then(|options| options.get("limit")) {
+                None | Some(Value::Null) => DEFAULT_SEARCH_LIMIT,
+                Some(limit) => limit
+                    .as_u64()
+                    .filter(|limit| *limit > 0)
+                    .and_then(|limit| usize::try_from(limit).ok())
+                    .ok_or("searchTools() limit must be a positive integer")?,
+            };
+            let namespace = match options.and_then(|options| options.get("namespace")) {
+                None | Some(Value::Null) => None,
+                Some(Value::String(namespace)) => Some(namespace.as_str()),
+                Some(_) => return Err("searchTools() namespace must be a string".to_owned()),
+            };
+            let documents: Vec<SearchDocument> = tools
+                .iter()
+                .filter_map(|tool| {
+                    let own = namespace_of_tool(&tool.name);
+                    if let Some(namespace) = namespace
+                        && !own.is_some_and(|own| matches_namespace(own, namespace))
+                    {
+                        return None;
+                    }
+                    let text = [
+                        tool.name.as_str(),
+                        &tool.name.replace('_', " "),
+                        &tool.description,
+                        own.map_or("", |own| own.name.as_str()),
+                        own.and_then(|own| own.description.as_deref()).unwrap_or(""),
+                    ]
+                    .join(" ");
+                    Some(SearchDocument {
+                        name: tool.name.clone(),
+                        text,
+                    })
+                })
+                .collect();
+            let found = rank_documents(query, &documents, limit)
+                .into_iter()
+                .filter_map(|name| tools.iter().find(|tool| tool.name == name))
+                .map(|tool| serde_json::json!({ "name": tool.js_name, "description": tool.description }))
+                .collect();
+            Ok(Some(Value::Array(found)))
+        }
     }
 }
 

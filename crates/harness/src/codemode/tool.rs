@@ -8,6 +8,7 @@ use delta_chord::output::{OutputLimits, Retain};
 use futures::future::BoxFuture;
 
 use super::CodemodeOptions;
+use super::describe::CodemodeSection;
 use super::run::{self, LIMITS};
 use crate::registry::Extension;
 use crate::tool::{Callers, HarnessTool, ToolApi, ToolError, ToolExecutionResult, ToolReplay};
@@ -26,9 +27,15 @@ pub fn codemode_description() -> String {
         "Globals:",
         "- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.",
         "- `store(key, value)` and `load(key)` keep JSON values across codemode calls.",
-        "- `ALL_TOOLS` lists `{ name, description }` for every tool scripts can call.",
+        "- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find tools the `codemode` section does not list.",
     ];
-    [DESCRIPTION_INTRO.to_owned(), globals.join("\n")].join("\n\n")
+    [
+        DESCRIPTION_INTRO.to_owned(),
+        globals.join("\n"),
+        "The `codemode` section of the system prompt lists the tools scripts can call, by namespace, as far as space allows."
+            .to_owned(),
+    ]
+    .join("\n\n")
 }
 
 /// The `codemode` tool: scripts call the conversation's callable tools as
@@ -89,7 +96,14 @@ pub fn codemode_tool(options: CodemodeOptions) -> Arc<dyn HarnessTool> {
     })
 }
 
-/// The `codemode` extension: the `codemode` tool.
+/// The `codemode` extension: the `codemode` tool, and the `codemode` prompt section listing
+/// the tools scripts can call.
 pub fn codemode_extension(options: CodemodeOptions) -> Extension {
-    Extension::new("codemode").with_tool(codemode_tool(options))
+    let section = CodemodeSection {
+        namespaces: options.namespaces.clone(),
+        budget: options.inline_budget,
+    };
+    Extension::new("codemode")
+        .with_tool(codemode_tool(options))
+        .with_section(Arc::new(section))
 }
