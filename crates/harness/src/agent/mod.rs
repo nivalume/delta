@@ -19,7 +19,7 @@ use delta_chord::delta::Op;
 use delta_chord::json::Json;
 use serde::{Deserialize, Serialize};
 
-pub use env::{EnvBuildError, EnvBuilder, EnvTarget};
+pub use env::{EnvBuildError, EnvBuilder, EnvTarget, LocalEnvBuilder};
 pub use error::AgentError;
 pub use resolve::{Agent, resolve_agent};
 pub(crate) use runtime::report_host;

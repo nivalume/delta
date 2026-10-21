@@ -27,6 +27,7 @@ use futures::future::BoxFuture;
 
 use delta_chord::context::Context;
 
+pub(crate) use decode::Utf8Decoder;
 pub use error::{ExecError, ExecErrorCode, FileError, FileErrorCode, FileResult};
 pub use exec::{
     Command, ExecOptions, ExecResult, MAX_TIMEOUT, OutputCallback, OutputChunk, OutputStream, ShellOutputWindow,

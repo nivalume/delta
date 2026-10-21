@@ -1,7 +1,8 @@
 //! Each layer names only the layers below it (README.md, "Architecture and seams"): the
 //! kernel names no agent, surface or side module; the agent layer names no surface module;
-//! the side layer (`env`) names nothing else in the crate. Scans the sources for `crate::`
-//! paths into a layer a module may not reach.
+//! `env` names nothing else in the crate, and `tools` names only `env` and the tool seams
+//! (`tool`, `registry`). Scans the sources for `crate::` paths into a layer a module may not
+//! reach.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -156,6 +157,22 @@ fn the_environment_names_nothing_else_in_the_crate() {
     assert!(
         offending.is_empty(),
         "env names other modules:\n{}",
+        offending.join("\n")
+    );
+}
+
+#[test]
+fn the_tools_name_only_the_environment_and_the_tool_seams() {
+    let others: Vec<&str> = KERNEL
+        .iter()
+        .chain(&SURFACE)
+        .chain(AGENT.iter().filter(|module| !matches!(**module, "tool" | "registry")))
+        .copied()
+        .collect();
+    let offending = offending(&["tools"], &others);
+    assert!(
+        offending.is_empty(),
+        "tools name modules beyond env, tool and registry:\n{}",
         offending.join("\n")
     );
 }

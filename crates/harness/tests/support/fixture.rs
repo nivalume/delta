@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use delta_chord::context::Context;
 use delta_chord::json;
-use delta_harness::agent::{AgentChange, Change, HarnessSettings, SettingsSource};
+use delta_harness::agent::{AgentChange, Change, EnvBuilder, HarnessSettings, SettingsSource};
 use delta_harness::compaction::{Compactor, TaskCompactor};
 use delta_harness::documents::DocAddress;
 use delta_harness::generation::{LiveDoc, LiveState};
@@ -43,6 +43,8 @@ pub struct Fixture {
     pub settings: Arc<Mutex<HarnessSettings>>,
     pub reports: Reports,
     pub compactor: Arc<dyn Compactor>,
+    /// Builds each conversation's environment; none by default.
+    pub env: Option<Arc<dyn EnvBuilder>>,
     /// Epoch ms on tokio's clock, so paused time moves it.
     start: tokio::time::Instant,
     _dir: Option<TempDir>,
@@ -62,6 +64,7 @@ impl Fixture {
             settings: Arc::new(Mutex::new(settings)),
             reports: Reports::default(),
             compactor: Arc::new(TaskCompactor),
+            env: None,
             start: tokio::time::Instant::now(),
             _dir: fixture.dir,
         }
@@ -83,6 +86,7 @@ impl Fixture {
         let settings = self.settings.clone();
         options.settings = SettingsSource::Dynamic(Arc::new(move || settings.lock().unwrap().clone()));
         options.compactor = self.compactor.clone();
+        options.env.clone_from(&self.env);
         let start = self.start;
         options.clock = Arc::new(move || clock_at(start));
         let reports = self.reports.clone();

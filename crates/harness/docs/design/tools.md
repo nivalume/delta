@@ -13,28 +13,33 @@ as diagnostics, and survive concurrent calls on one file. They are ported from t
 harness's tools with durable's channels (output, structured output, details, diagnostics).
 
 ```rust
-pub fn read_tool() -> impl HarnessTool;
-pub fn write_tool() -> impl HarnessTool;
-pub fn edit_tool() -> impl HarnessTool;
-pub fn bash_tool(options: BashOptions) -> impl HarnessTool;
-pub fn coding_tools() -> Extension;        // "coding-tools": all four; nothing installs it automatically
+impl ReadTool { pub fn new() -> Self }
+impl WriteTool { pub fn new(queue: FileMutationQueue) -> Self }
+impl EditTool { pub fn new(queue: FileMutationQueue) -> Self }
+impl BashTool { pub fn new(options: BashOptions) -> Self }
+pub fn coding_tools(bash: BashOptions) -> Extension;  // "coding-tools": all four, one queue; nothing installs it automatically
 ```
 
 All four are `ToolReplay::Unsafe`, `callers` both, and raise `No execution environment is
-configured` (an ordinary `tool_error` result) when `api.env()` is `None`.
+configured` (an ordinary `tool_error` result) when `api.env()` is `None`. The module is a
+side module: it names only `env` and the tool seams (`tool`, `registry`), which
+`tests/layering.rs` checks.
+
+`agent::LocalEnvBuilder::new(default_cwd)` is the usual `HarnessOptions.env`: one cached
+`LocalEnv` per directory, the conversation's `cwd` or else the default.
 
 ## Output limits
 
 ```rust
 pub const DEFAULT_MAX_LINES: usize = 2000;
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
-pub const DEFAULT_OUTPUT_LIMITS: OutputLimits = OutputLimits { max_bytes: DEFAULT_MAX_BYTES, max_lines: DEFAULT_MAX_LINES, retain: Retain::Head };
+// tool::DEFAULT_OUTPUT_LIMITS: { max_bytes: 50 KiB, max_lines: 2000, retain: Head }
 
 pub struct Truncation { pub truncated: bool, pub truncated_by: Option<Limit /* Lines | Bytes */>, pub total_lines: usize, pub total_bytes: usize,
                         pub output_lines: usize, pub output_bytes: usize, pub last_line_partial: bool, pub first_line_exceeds_limit: bool,
                         pub max_lines: usize, pub max_bytes: usize }
-pub fn truncate_head(text: &str, limits: &OutputLimits) -> (Cow<'_, str>, Truncation);
-pub fn truncate_head_of(prefix: &str, totals: Totals /* lines, bytes */, limits) -> (Cow<'_, str>, Truncation);
+pub fn truncate_head(text: &str, limits: &OutputLimits) -> (&str, Truncation);      // `retain` ignored
+pub fn truncate_head_of(prefix: &str, totals: Totals /* lines, bytes */, limits) -> (&str, Truncation);
 pub fn format_size(bytes: u64) -> String;   // 512B, 1.5KB, 2.0MB
 ```
 
@@ -55,6 +60,9 @@ bytes, or holds at least `max_lines` newlines. Streaming output is bounded by
   first that exists wins, else the plain resolution.
 
 ## `read`
+
+The description is upstream's without the image sentence: "Read the contents of a text
+file. Output is truncated to 2000 lines or 50KB ...".
 
 Schema: `{ path: string, offset?: number (1-based line), limit?: number }`. Details:
 `{ truncation?: Truncation }` (without the content).
@@ -84,7 +92,8 @@ Schema: `{ path: string, offset?: number (1-based line), limit?: number }`. Deta
      offset=<k> to continue.` (no code).
 4. Output: one text item, or none for empty text.
 
-Images: detection by content (PNG, JPEG, GIF, WebP, BMP signatures) stays, because binary
+Images: detection by content (PNG, JPEG, GIF, WebP signatures; a BMP header must also give
+the file's size, so text starting with `BM` stays text) stays, because binary
 in the context is never useful; in phase 1 a detected image returns the error result with
 code `unsupported_image` (`<path> is an image (<mime>); image input is not supported in this
 build`). The image path (pass-through within the model's `input_limits.images.resize`
@@ -144,7 +153,9 @@ exitCode: number }`.
 ```rust
 pub struct BashOptions { pub command_prefix: Option<String>, pub prepare: Option<Arc<dyn BashPrepare>> }
 pub struct BashExecution { pub command: String, pub cwd: String, pub env: BTreeMap<String, String>, pub inherit_env: bool }
-pub trait BashPrepare: Send + Sync { fn prepare(&self, execution: &mut BashExecution, api: &ToolApi, ctx: &Context) -> BoxFuture<Result<(), ToolError>>; }
+pub trait BashPrepare: Send + Sync {
+    fn prepare<'a>(&'a self, execution: &'a mut BashExecution, api: &'a ToolApi<'a>, ctx: &'a Context) -> BoxFuture<'a, Result<(), ToolError>>;
+}
 ```
 
 1. `timeout` must be finite, positive and at most 2 147 483.647 s, else
@@ -169,17 +180,25 @@ pub trait BashPrepare: Send + Sync { fn prepare(&self, execution: &mut BashExecu
 ## File mutation queue
 
 ```rust
-pub async fn with_file_mutation<T>(env: &dyn ExecutionEnv, path: &str, ctx: &Context, f: impl Future<Output = T>) -> Result<T, FileError>;
+#[derive(Clone, Default)]
+pub struct FileMutationQueue { /* Arc<Mutex<HashMap<Key, Weak<tokio::sync::Mutex<()>>>>> */ }
+impl FileMutationQueue {
+    pub async fn run<T>(&self, env: &dyn ExecutionEnv, path: &str, ctx: &Context, mutation: impl Future<Output = T>) -> FileResult<T>;
+}
 ```
 
-`edit` and `write` serialize their read-modify-write of one file within the process. The
-key is `(env.id(), canonical path)`: for a file that does not exist yet, the canonical
-parent joined with the name (recursively, so a `write` that creates a file and a later
-`edit` of it share one key even under a symlinked directory); `NotSupported` from
-`canonical_path` falls back to the absolute path. A process-wide
-`Mutex<HashMap<Key, Weak<tokio::sync::Mutex<()>>>>` hands out one lock per key; holders
-run in the order their keys resolved; other files and other file systems never wait. It
-is not a lock against `bash` or other processes.
+`edit` and `write` serialize their read-modify-write of one file. The key is
+`(env.id(), canonical path)`: for a file that does not exist yet, the canonical parent
+joined with the name (recursively, so a `write` that creates a file and a later `edit` of
+it share one key even under a symlinked directory); `NotSupported` from `canonical_path`
+falls back to the absolute path. The queue hands out one fair tokio mutex per key (dead
+entries are pruned as new ones are made), so holders run in the order their keys
+resolved; other files and other file systems never wait; waiting is cancellable
+(`aborted`). It is not a lock against `bash` or other processes.
+
+The queue is a value, not a process-wide map (the architecture rules out module-level
+state): `coding_tools` gives its `write` and `edit` one queue, and a host that builds the
+tools itself passes them a shared one. Two queues do not see each other's mutations.
 
 ## Deferrals
 
@@ -192,9 +211,15 @@ is not a lock against `bash` or other processes.
 
 ## Differences from upstream
 
-- `truncate_head` borrows (`Cow`) and counts bytes natively.
-- The mutation queue is a map of weak async mutexes instead of a promise chain; same
-  ordering guarantee.
+- `truncate_head` returns a slice of its input (the kept lines are always a prefix) and
+  counts bytes natively.
+- The mutation queue is a value shared by the tools that hold it, not a process-wide map,
+  and a map of weak async mutexes instead of a promise chain; same ordering guarantee
+  within one queue.
+- `Truncation` serializes snake_case in `read`'s details; the model- and program-facing
+  shapes keep upstream's names (`oldText`/`newText` arguments, `firstChangedLine`,
+  `fullOutputPath`, `exitCode`).
+- `read` describes itself as a text reader; BMP detection checks the header's size field.
 - `edit`'s diff and patch come from `similar` (upstream `diff`), so the diff string's
   exact lines may differ; the tests compare semantics (changed lines, first changed line).
 - Image handling is a deferral rather than a pass-through; the error code is the same
@@ -202,11 +227,11 @@ is not a lock against `bash` or other processes.
   processor.
 - `BashPrepare` is a trait object instead of a function type.
 
-## Open (minor)
+## Decided
 
-- Returning `unsupported_image` for detected images in phase 1 (versus reading them as
-  text, which upstream never does).
-- Keeping upstream's exact error and diagnostic texts (they are what models were tuned
-  against) rather than rewording them.
-- Whether `read` without `limit` on a huge file should also report the `full_output`
-  style path hint; upstream gives the `offset=` continuation only.
+- Detected images return `unsupported_image` in phase 1, as an upstream build without an
+  image processor does for formats it cannot pass through.
+- Upstream's error and diagnostic texts are kept word for word (models were tuned against
+  them).
+- `read` without `limit` on a huge file reports the `offset=` continuation only, as
+  upstream.

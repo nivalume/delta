@@ -92,7 +92,8 @@ crates/harness/
 
 Dependencies: `delta-chord` (with `sqlite`), `delta-ai`, `serde`, `serde_json`, `indexmap`,
 `tokio`, `tokio-util`, `futures`, `thiserror`; `jsonschema` and `schemars` (tool argument
-validation and typed tools); `similar` for `edit` when that phase lands. The crate does not
+validation and typed tools); `similar` (`edit`'s diff and patch) and
+`unicode-normalization` (the tools' NFKC and NFD). The crate does not
 depend on `delta-agent`: upstream durable does not use agent-core either; it is a rewrite
 of that loop whose steps are durable.
 

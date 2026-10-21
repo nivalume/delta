@@ -39,11 +39,13 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "s
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11"
+similar = "3.2"
 thiserror = "2.0"
 tokio = { version = "1.53", features = ["rt", "sync", "time", "macros"] }
 tokio-util = "0.7.20"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tracing = "0.1.44"
+unicode-normalization = "0.1.26"
 url = "2.5"
 uuid = { version = "1.28", features = ["v4"] }
 

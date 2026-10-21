@@ -15,7 +15,8 @@
 //!   [`tool`] (tools and the `delta.tool` task), [`approval`] (the policy, requests and
 //!   decisions), and [`compaction`] (thresholds and the `delta.compaction` task).
 //! - kernel: [`records`], [`documents`], [`storage`], [`session`], [`scheduler`].
-//! - side: [`env`](mod@env), the execution environment and its local implementation.
+//! - side: [`env`](mod@env), the execution environment and its local implementation, and
+//!   [`tools`], the built-in `read`, `write`, `edit` and `bash`.
 
 pub mod agent;
 pub mod approval;
@@ -35,4 +36,5 @@ pub mod scheduler;
 pub mod session;
 pub mod storage;
 pub mod tool;
+pub mod tools;
 pub mod usage;

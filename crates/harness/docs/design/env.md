@@ -230,10 +230,10 @@ impl LocalEnv {
 
 `id()` is `"local"`. The tool task builds `api.env` through `HarnessOptions.env`, an
 `Arc<dyn EnvBuilder>` ([harness.md](harness.md)) whose `build(EnvTarget { conversation_id,
-cwd, read }, &Context)` returns `Option<Arc<dyn ExecutionEnv>>`, never on the session line;
-`LocalEnvBuilder` (one cached `LocalEnv` per directory) is the usual value. The builder and
-its cache live with `EnvBuilder` in the harness surface, not in `env`: `EnvTarget` names the
-kernel's document reader, and a free `local_env(cwd)` with a process-wide cache would be the
+cwd }, &Context)` returns `Option<Arc<dyn ExecutionEnv>>`, never on the session line;
+`LocalEnvBuilder::new(default_cwd)` (one cached `LocalEnv` per directory; the conversation's
+`cwd`, else the default) is the usual value. The builder and its cache live with
+`EnvBuilder` in `agent::env`, not in `env`: `EnvTarget` names a conversation, and a free `local_env(cwd)` with a process-wide cache would be the
 module-level state the architecture rules out. `with_watch` arrives with `watch`.
 
 Paths: `~` and `~/…` name the home directory, a `file://` URL its file path (a malformed one
