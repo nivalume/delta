@@ -7,7 +7,7 @@ use super::output::Waiters;
 use super::pipeline::{self, read_call, resolve};
 use super::records::{ToolTaskCheckpoint, ToolTaskInput, ToolTaskResult};
 use super::settle::{Ending, Settlement, from_slot, settle, slot_progress};
-use super::{TOOL_TASK, TOOL_TASK_VERSION, execute};
+use super::{TOOL_TASK, TOOL_TASK_VERSION, approval, execute};
 use crate::agent::AgentRuntime;
 use crate::records::AbortReason;
 use crate::registry::{TaskHooks, ToolHooks};
@@ -44,18 +44,19 @@ impl TaskDefinition for ToolTask {
     ) -> Result<Next<Self>, TaskError> {
         match phase {
             ToolTaskCheckpoint::Call => pipeline::call(rt, ctx).await,
-            ToolTaskCheckpoint::Approval { .. } => {
-                let call = read_call(rt, ctx).await?;
-                let message = "Tool call blocked: approval required, and this harness cannot ask yet";
-                settle(rt, Settlement::early(rt, call.call, "blocked", message))
-            }
+            ToolTaskCheckpoint::Approval {
+                arguments,
+                replay,
+                deadline,
+                ..
+            } => approval::wait(rt, ctx, arguments, replay, deadline).await,
             ToolTaskCheckpoint::Execute { arguments, replay } => execute::recover(rt, ctx, arguments, replay).await,
         }
     }
 
     /// Settles an error result from what the slot published: `aborted`, or after a restart
     /// that abandoned the task, `interrupted` once intent was recorded and `abandoned`
-    /// before.
+    /// before. A pending approval request is withdrawn, without a decision entry.
     async fn abort<'a>(
         &'a self,
         phase: ToolTaskCheckpoint,
@@ -86,6 +87,10 @@ impl TaskDefinition for ToolTask {
             duration_ms: None,
             ending: Ending::Aborted,
             waiters: Waiters::none(rt.task_id()),
+            withdraw: match phase {
+                ToolTaskCheckpoint::Approval { id, .. } => Some(id),
+                _ => None,
+            },
         };
         settle(rt, settlement)
     }

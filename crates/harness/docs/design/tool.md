@@ -357,5 +357,6 @@ are not rerun on recovery: the arguments they produced are in the checkpoint.
     and result, so a reused key is checked without reading the task.
   - Settlement aborts live nested calls when the `delta.tool.made_nested_calls` memo is
     set (by any attempt), so a rerun that did not reattach still cleans up.
-  - Until the approval phase lands, `PolicyDecision::Ask` settles `blocked`.
+  - The `approval` phase lives in the tool module (`tool::approval`); the `approval`
+    module holds the policy, the records and the waiters, and knows nothing of the task.
   - Nested calls are kept in phase 1, tested through tools that call tools.

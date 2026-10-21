@@ -18,6 +18,7 @@ use super::result::{
 use super::task::{Rt, ToolTask};
 use super::validate;
 use crate::agent::HookRuntime;
+use crate::approval::{ApprovalId, remove_request};
 use crate::documents::DocAddress;
 use crate::generation::{LiveDoc, LiveState, NestedToolSummary, SlotProgress, SlotStatus, edit_live};
 use crate::records::TaskOutcomeError;
@@ -49,6 +50,8 @@ pub(super) struct Settlement {
     pub(super) duration_ms: Option<u64>,
     pub(super) ending: Ending,
     pub(super) waiters: Waiters,
+    /// The task's approval request, removed in the settle commit.
+    pub(super) withdraw: Option<ApprovalId>,
 }
 
 impl Settlement {
@@ -60,7 +63,14 @@ impl Settlement {
             duration_ms: None,
             ending: Ending::Completed,
             waiters: Waiters::none(rt.task_id()),
+            withdraw: None,
         }
+    }
+
+    /// Also removes the approval request `id`.
+    pub(super) fn withdrawing(mut self, id: ApprovalId) -> Self {
+        self.withdraw = Some(id);
+        self
     }
 }
 
@@ -82,7 +92,11 @@ pub(super) fn settle(rt: &Rt, settlement: Settlement) -> Result<Next<ToolTask>, 
                 duration_ms,
                 ending,
                 waiters,
+                withdraw,
             } = settlement;
+            if let Some(id) = withdraw {
+                remove_request(tx, conversation, id).await?;
+            }
             let tool_result = match input {
                 ToolTaskInput::Model { .. } => {
                     let entry = append_tool_result(tx, conversation, &call, &result, now, duration_ms).await?;

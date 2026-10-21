@@ -10,6 +10,7 @@
 //! Corresponds to upstream `src/harness/harness.ts` and `submissions.ts` (spec §2.2). See
 //! `docs/design/harness.md`.
 
+mod approvals;
 mod conversation;
 mod creation;
 mod error;
@@ -26,11 +27,12 @@ pub use creation::{ConversationCreateOptions, ConversationInit, RootOptions};
 pub use error::{HarnessError, OpenError};
 pub use submission::{Submission, SubmissionAbort};
 
+use approvals::SchedulerAbort;
 use creation::{CreationHook, Target, create};
 use submission::{SubmissionObserver, SubmissionWaits, abort_submission};
 
 use crate::agent::{AgentServices, EnvBuilder, SettingsSource};
-use crate::approval::{AllowAll, ApprovalPolicy};
+use crate::approval::{AllowAll, ApprovalPolicy, PendingApprovals};
 use crate::compaction::{Compactor, NoCompaction};
 use crate::documents::DocAddress;
 use crate::generation::{AgentSchedulerHooks, builtin_tasks};
@@ -107,6 +109,7 @@ pub(crate) struct HarnessInner {
     storage: Arc<dyn Storage>,
     registry: Registry,
     services: Arc<AgentServices>,
+    approvals: Arc<PendingApprovals>,
     waits: Arc<SubmissionWaits>,
     on_report: Option<Reporter>,
     _observer: ObserverGuard,
@@ -187,6 +190,8 @@ impl Harness {
         ));
         let session_services = Services::new();
         session_services.insert(services.clone());
+        let approvals = Arc::new(PendingApprovals::new());
+        session_services.insert(approvals.clone());
         let session = Session::open(
             storage.clone(),
             SessionOptions {
@@ -222,18 +227,21 @@ impl Harness {
                 return Err(error.into());
             }
         };
-        Ok(Harness {
-            inner: Arc::new(HarnessInner {
-                session,
-                scheduler,
-                storage,
-                registry,
-                services,
-                waits,
-                on_report,
-                _observer: observer,
-            }),
-        })
+        let inner = Arc::new(HarnessInner {
+            session,
+            scheduler,
+            storage,
+            registry,
+            services,
+            approvals,
+            waits,
+            on_report,
+            _observer: observer,
+        });
+        inner
+            .approvals
+            .set_run_abort(Arc::new(SchedulerAbort(Arc::downgrade(&inner))));
+        Ok(Harness { inner })
     }
 
     /// The Session.

@@ -53,7 +53,7 @@ impl Harness {
     pub async fn wait_for_task(&self, id: TaskId, ctx: &Context) -> Result<SettledTask, HarnessError>;
     pub async fn wait_for_idle(&self, ctx: &Context) -> Result<(), HarnessError>;
     pub async fn usage(&self, ctx: &Context) -> Result<UsageState, HarnessError>;
-    pub async fn decide(&self, id: ApprovalId, decision: ReviewDecision, ctx: &Context) -> Result<(), ApprovalError>;   // approval.md
+    pub async fn decide(&self, id: ApprovalId, decision: ReviewDecision, ctx: &Context) -> Result<(), HarnessError>;   // approval.md; HarnessError::Approval(ApprovalError)
     pub async fn pending_approvals(&self, ctx: &Context) -> Result<Vec<(ConversationId, ApprovalRequest)>, HarnessError>;
     pub async fn task_graph(&self, ctx: &Context) -> ..;                       // observe.md
     pub fn session(&self) -> &Session;                                         // Harness derefs to Session
@@ -115,7 +115,8 @@ impl Conversation {
     pub async fn reset(&self, handoff: Option<String>, ctx: &Context) -> Result<(), HarnessError>;
     pub async fn abort(&self, options: AbortOptions, ctx: &Context) -> Result<(), HarnessError>;   // { background: bool }
     pub async fn wait_for_idle(&self, ctx: &Context) -> Result<(), HarnessError>;
-    pub async fn decide(&self, id: ApprovalId, decision: ReviewDecision, ctx: &Context) -> Result<(), ApprovalError>;   // approval.md
+    pub async fn decide(&self, id: ApprovalId, decision: ReviewDecision, ctx: &Context) -> Result<(), HarnessError>;   // approval.md
+    pub async fn pending_approvals(&self, ctx: &Context) -> Result<Vec<ApprovalRequest>, HarnessError>;
     pub async fn view(&self, ctx: &Context) -> ..;      // observe.md: State<ConversationView> and watch
 }
 
@@ -471,3 +472,11 @@ snapshot immutability, and handover after reinstall.
 - `Change<T>` (`Keep | Clear | Set`) for `AgentChange`. Position: adopt.
 - Tool metadata through `extra() -> Option<&dyn Any>` rather than a generic registry.
   Position: adopt; a generic parameter would spread through every task and hook type.
+
+- Phase 5 (implementation, approvals): `decide` returns `HarnessError`, with refusals as
+  `HarnessError::Approval(ApprovalError { UnknownApproval, NotPending, InvalidDecision })`
+  taken back from the commit closure like `SubmitError`. `Conversation::pending_approvals`
+  lists one conversation's undecided requests; `Harness::pending_approvals` scans them all.
+  The settings gain `approval_timeout` (default 15 minutes). `Harness::open` inserts the
+  `PendingApprovals` session service and installs its `RunAbort` over a weak handle on the
+  scheduler, so the agent layer never names the surface.

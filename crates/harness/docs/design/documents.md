@@ -252,8 +252,8 @@ place; each is specified in its own note.
 | `delta.agent` | `agent::AgentDoc` | conversation | rewindable | as_of | always | harness.md |
 | `delta.provider` | `generation::ProviderDoc` | conversation | latest | initial | always | generation.md |
 | `delta.usage` | `usage::UsageDoc` | conversation | latest | initial | always | generation.md |
-| `delta.approvals` | (phase 5) | conversation | latest | initial | `requests` is empty | approval.md |
-| `delta.tool.nested-call` | (phase 5) | task, family (seed `null`) | — | — | never | tool.md |
+| `delta.approvals` | `approval::ApprovalsDoc` | conversation | latest | initial | `requests` is empty | approval.md |
+| `delta.tool.nested-call` | `tool::NestedCallDoc` | task, family (seed `()`) | — | — | never | tool.md |
 | `delta.codemode.run` | — | task | — | — | — | deferred with code mode |
 
 All are version 1; the definitions carry a `Doc` suffix so they do not shadow the record

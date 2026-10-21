@@ -9,13 +9,13 @@ use delta_ai::types::{JsonObject, Message};
 use delta_chord::context::{Cancelled, Context};
 
 use super::definition::HarnessTool;
-use super::execute;
 use super::records::{ParentCall, ToolHookCall, ToolTaskCheckpoint, ToolTaskInput};
 use super::settle::{Settlement, settle};
 use super::task::{Rt, ToolTask};
 use super::validate;
+use super::{approval, execute};
 use crate::agent::{Agent, AgentRuntime, HookRuntime};
-use crate::approval::{ApprovalCall, PolicyDecision};
+use crate::approval::{ApprovalCall, ApprovalId, PolicyDecision, remove_request};
 use crate::generation::{SlotStatus, edit_live};
 use crate::registry::BeforeTool;
 use crate::scheduler::{Next, NextState, TaskError};
@@ -119,14 +119,22 @@ pub(super) async fn call(rt: &Rt, ctx: &Context) -> Result<Next<ToolTask>, TaskE
             Err(message) => return invalid(message),
         }
     }
-    if let Some(reason) = approval(rt, &agent, &*tool, &call, ctx).await? {
-        let message = format!("Tool call blocked: {reason}");
-        return settle(rt, Settlement::early(rt, stored, "blocked", message));
+    match policy(rt, &agent, &*tool, &call, ctx).await? {
+        Verdict::Allow => {}
+        Verdict::Block(reason) => {
+            let message = format!("Tool call blocked: {reason}");
+            return settle(rt, Settlement::early(rt, stored, "blocked", message));
+        }
+        Verdict::Ask(ask) => {
+            if let Some(next) = approval::ask(rt, ctx, &*tool, &call, ask).await? {
+                return Ok(next);
+            }
+        }
     }
 
     let arguments = call.call.arguments.clone();
     let replay = tool.replay();
-    commit_intent(rt, arguments.clone(), replay, ctx).await?;
+    commit_intent(rt, arguments.clone(), replay, None, ctx).await?;
     execute::run(rt, ctx, &*tool, &call, arguments, replay).await
 }
 
@@ -166,15 +174,22 @@ async fn before_tool(rt: &Rt, call: &ToolHookCall, ctx: &Context) -> Result<Chai
     Ok(Chain::Arguments(replaced))
 }
 
-/// The approval policy on the final arguments: `None` lets the call run, `Some` blocks it
-/// with the reason. A policy failure denies (fail closed).
-async fn approval(
+/// What the approval policy decided.
+enum Verdict {
+    Allow,
+    /// Blocked with the reason.
+    Block(String),
+    Ask(approval::Ask),
+}
+
+/// The approval policy on the final arguments. A policy failure denies (fail closed).
+async fn policy(
     rt: &Rt,
     agent: &Agent,
     tool: &dyn HarnessTool,
     call: &ToolHookCall,
     ctx: &Context,
-) -> Result<Option<String>, TaskError> {
+) -> Result<Verdict, TaskError> {
     let policy = rt.agent_services()?.approval().clone();
     let api = rt.hook_api()?;
     let request = ApprovalCall {
@@ -185,30 +200,35 @@ async fn approval(
         cwd: agent.cwd.as_deref(),
     };
     match policy.decide(&request, &api, ctx).await {
-        Ok(PolicyDecision::Allow) => Ok(None),
-        Ok(PolicyDecision::Deny { reason }) => Ok(Some(format!("approval denied: {reason}"))),
-        Ok(PolicyDecision::Ask { .. }) => Ok(Some("approval required, and this harness cannot ask yet".to_owned())),
+        Ok(PolicyDecision::Allow) => Ok(Verdict::Allow),
+        Ok(PolicyDecision::Deny { reason }) => Ok(Verdict::Block(format!("approval denied: {reason}"))),
+        Ok(PolicyDecision::Ask { timeout, prompt }) => Ok(Verdict::Ask(approval::Ask { timeout, prompt })),
         Err(error) => {
             if let Some(reason) = ctx.reason() {
                 return Err(Cancelled { reason }.into());
             }
-            Ok(Some(format!("approval denied: {error}")))
+            Ok(Verdict::Block(format!("approval denied: {error}")))
         }
     }
 }
 
 /// The intent commit: the final arguments and the replay policy become the checkpoint, and
-/// the slot shows the call running (a nested slot with the final arguments).
-async fn commit_intent(
+/// the slot shows the call running (a nested slot with the final arguments); an approved
+/// request is removed.
+pub(super) async fn commit_intent(
     rt: &Rt,
     arguments: JsonObject,
     replay: super::ToolReplay,
+    approved: Option<ApprovalId>,
     ctx: &Context,
 ) -> Result<(), TaskError> {
     let conversation = rt.conversation_id();
     let task = rt.task_id();
     rt.commit(ctx, move |tx, _| {
         Box::pin(async move {
+            if let Some(id) = approved {
+                remove_request(tx, conversation, id).await?;
+            }
             edit_live(tx, conversation, |live| {
                 if let Some(slot) = live.tool_slot_mut(task) {
                     slot.status = SlotStatus::Running;

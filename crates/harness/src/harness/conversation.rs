@@ -37,8 +37,8 @@ pub struct AbortOptions {
 /// One conversation of a Harness. Stateless and cheap to clone; compare by id.
 #[derive(Clone)]
 pub struct Conversation {
-    inner: Arc<HarnessInner>,
-    id: ConversationId,
+    pub(super) inner: Arc<HarnessInner>,
+    pub(super) id: ConversationId,
 }
 
 impl fmt::Debug for Conversation {

@@ -139,6 +139,9 @@ pub struct PartialProgressPolicy {
     pub output_interval: Option<Duration>,
 }
 
+/// How long an approval request waits by default: 15 minutes.
+pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_mins(15);
+
 /// The default retry policy: enabled, 3 retries, 2 s doubling, at most 60 s.
 pub const DEFAULT_RETRY_POLICY: RetryPolicy = RetryPolicy {
     enabled: true,
@@ -171,6 +174,9 @@ pub struct HarnessSettings {
     /// `Some(None)`: never park.
     pub restart_limit: Option<Option<u32>>,
     pub close_grace: Option<Duration>,
+    /// How long a tool call waits for an approval decision when the policy names no
+    /// timeout.
+    pub approval_timeout: Option<Duration>,
 }
 
 /// The resolved settings.
@@ -189,6 +195,7 @@ pub struct Settings {
     pub after_failed_run: AfterFailedRun,
     pub restart_limit: Option<u32>,
     pub close_grace: Duration,
+    pub approval_timeout: Duration,
 }
 
 impl Default for Settings {
@@ -229,6 +236,7 @@ impl HarnessSettings {
             after_failed_run: self.after_failed_run.unwrap_or_default(),
             restart_limit: self.restart_limit.unwrap_or(Some(DEFAULT_RESTART_LIMIT)),
             close_grace: self.close_grace.unwrap_or(Duration::from_secs(30)),
+            approval_timeout: self.approval_timeout.unwrap_or(DEFAULT_APPROVAL_TIMEOUT),
         }
     }
 }

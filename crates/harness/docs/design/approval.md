@@ -36,8 +36,8 @@ commit to the waiting phase.
 
 ```rust
 pub trait ApprovalPolicy: Send + Sync {
-    fn decide<'a>(&'a self, call: &'a ApprovalCall<'a>, api: &'a HookApi, ctx: &'a Context)
-        -> BoxFuture<'a, Result<PolicyDecision, HarnessError>>;
+    fn decide<'a>(&'a self, call: &'a ApprovalCall<'a>, api: &'a HookApi<'a>, ctx: &'a Context)
+        -> BoxFuture<'a, Result<PolicyDecision, PolicyError>>;
 }
 
 pub struct ApprovalCall<'a> {
@@ -179,8 +179,9 @@ ToolTaskCheckpoint::Approval { id: ApprovalId, arguments, replay, deadline: i64 
      commit removes the request.
    - `Denied { rejection }`: settle `blocked` (`Tool call blocked: approval denied:
      <rejection>`, or `approval denied` alone); the settle commit removes the request.
-   - `Abort`: the deciding commit already marked the run, so the cascade marks this task
-     and its invocation ends at the next await or step; the abort handler settles it.
+   - `Abort`: the phase marks the conversation's run (`delta.live.run`) for abort through
+     the `RunAbort` seam and waits for its own cancellation; the cascade marks this task
+     and the abort handler settles it. Without a run the task settles itself `aborted`.
    - The deadline passes without a decision: one commit sets `TimedOut`, admits the
      `delta.approval` entry, removes the request and settles `blocked` (`Tool call
      blocked: approval timed out after <n>s`). A `decide` racing it finds the request
@@ -272,9 +273,27 @@ later plugs into it without changing the tool task:
   `HookApi` argument (once hooks read documents), `ToolHookCall`, the records, the waiting
   phase and `decide` on the surface.
 
+- Phase 5 (implementation):
+  - The policy's error type is `PolicyError` (a boxed error), not `HarnessError`: the
+    policy is agent layer and cannot name the surface's error. It gets the task's `HookApi`
+    (ids, models, memos); typed document reads wait for a runtime document API, as for hooks.
+  - `decide` does not mark the run for `Abort`: there is no in-commit abort-mark API above
+    the kernel. The `approval` phase does it on consuming `Abort` (fast path or a committed
+    decision read by a rerun), through `approval::RunAbort`, which the surface implements over
+    a weak handle on the scheduler and installs into `PendingApprovals` at open. One code
+    path, crash-safe: a rerun that reads `Abort` aborts the run then.
+  - The timeout is an intermediate commit of the phase that writes `TimedOut` (and its
+    entry) only while the request is still undecided and returns the decision stored now,
+    so a racing `decide` either lands first and is consumed, or finds the request decided
+    and fails `NotPending`.
+  - `AskAll` and `DenyAll` are provided beside `AllowAll`. A request that is consumed
+    (approved: the intent commit; denied or timed out: the settle commit; aborted: the
+    abort handler) is removed from `delta.approvals`.
+  - `Conversation::pending_approvals` beside `Harness::pending_approvals`.
+
 ## Open (minor)
 
 - `AllowAll` as the default: a host that wants fail-closed sets `AskAll` or `DenyAll`.
-- Default timeout 15 minutes, overridable per `Ask` and in settings.
+- Default timeout 15 minutes, overridable per `Ask` and in settings (`approval_timeout`).
 - Whether an `Abort` decision also withdraws the conversation's queued inputs, as
   `Conversation::abort` does, or only marks the run.

@@ -25,9 +25,9 @@ pub use resolve::{Agent, resolve_agent};
 pub(crate) use runtime::report_host;
 pub use runtime::{AgentRuntime, AgentServices, HookRuntime};
 pub use settings::{
-    AfterFailedRun, CompactionPolicy, CompactionSettings, DEFAULT_RESTART_LIMIT, DEFAULT_RETRY_POLICY, HarnessSettings,
-    PartialCompactionPolicy, PartialProgressPolicy, PartialRetryPolicy, ProgressPolicy, QueueMode, ResolvedCompaction,
-    Settings, SettingsSource,
+    AfterFailedRun, CompactionPolicy, CompactionSettings, DEFAULT_APPROVAL_TIMEOUT, DEFAULT_RESTART_LIMIT,
+    DEFAULT_RETRY_POLICY, HarnessSettings, PartialCompactionPolicy, PartialProgressPolicy, PartialRetryPolicy,
+    ProgressPolicy, QueueMode, ResolvedCompaction, Settings, SettingsSource,
 };
 
 use crate::documents::{CheckpointInfo, ConversationScope, DocAddress, DocDefinition, ForkAsOf, Rewindable};

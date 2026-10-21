@@ -14,6 +14,7 @@
 //! `docs/design/tool.md`.
 
 mod api;
+mod approval;
 mod definition;
 mod execute;
 mod function;

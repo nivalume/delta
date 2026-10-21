@@ -1,10 +1,4 @@
-//! The approval seam: the policy that decides, per tool call, whether the call runs, is
-//! denied or must be approved.
-//!
-//! The tool task asks the policy once per call, after the `before_tool` chain, on the final
-//! arguments: `Allow` runs the call, `Deny` settles it `blocked`. Durable requests, decisions,
-//! grants and the waiting phase for `Ask` are the approval phase's (until it lands, `Ask`
-//! settles `blocked` too). See `docs/design/approval.md`.
+//! [`ApprovalPolicy`]: decides, per tool call, whether it runs, is denied or must be approved.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -12,22 +6,10 @@ use std::time::Duration;
 
 use delta_chord::context::Context;
 use futures::future::BoxFuture;
-use serde::{Deserialize, Serialize};
 
 use crate::records::{ConversationId, TaskId};
 use crate::registry::HookApi;
 use crate::tool::{HarnessTool, ToolHookCall};
-
-/// An approval request's id: the id of the tool task that asks, which asks at most once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ApprovalId(pub TaskId);
-
-impl fmt::Display for ApprovalId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
 
 /// A policy failure; the call is denied with its text (fail closed).
 pub type PolicyError = Box<dyn StdError + Send + Sync>;
@@ -81,6 +63,26 @@ pub trait ApprovalPolicy: Send + Sync {
 impl fmt::Debug for dyn ApprovalPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ApprovalPolicy").finish_non_exhaustive()
+    }
+}
+
+/// Asks for every call, with the settings' timeout.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AskAll;
+
+impl ApprovalPolicy for AskAll {
+    fn decide<'a>(
+        &'a self,
+        _call: &'a ApprovalCall<'a>,
+        _api: &'a HookApi<'a>,
+        _ctx: &'a Context,
+    ) -> BoxFuture<'a, Result<PolicyDecision, PolicyError>> {
+        Box::pin(async {
+            Ok(PolicyDecision::Ask {
+                timeout: None,
+                prompt: None,
+            })
+        })
     }
 }
 

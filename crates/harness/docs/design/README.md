@@ -82,7 +82,7 @@ crates/harness/
     model.rs         # the ModelClient seam, ModelsClient, pinned request types
     usage.rs         # delta.usage
     tool/            # HarnessTool, FnHarnessTool, ToolApi, the delta.tool task: pipeline, execute, output, settle, nested
-    approval.rs      # ApprovalPolicy and AllowAll (phase 5: requests and decisions)
+    approval/        # ApprovalPolicy, delta.approvals (requests, decisions, grants), PendingApprovals
     compaction.rs    # thresholds and the Compactor seam (phase 5: the task)
     observe/         # view, events, task_graph
     env/             # trait, local

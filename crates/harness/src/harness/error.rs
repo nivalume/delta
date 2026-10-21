@@ -3,6 +3,7 @@
 use delta_chord::context::Cancelled;
 
 use crate::agent::AgentError;
+use crate::approval::ApprovalError;
 use crate::context::ContextError;
 use crate::inbox::SubmitError;
 use crate::records::{ConversationId, SubmissionId, TaskId};
@@ -26,6 +27,9 @@ pub enum HarnessError {
     /// request id of another type); nothing was written.
     #[error(transparent)]
     Submit(SubmitError),
+    /// `decide` refused the decision; nothing was written.
+    #[error(transparent)]
+    Approval(ApprovalError),
     /// The caller's context was cancelled; shared work is unaffected.
     #[error(transparent)]
     Cancelled(Cancelled),
@@ -54,7 +58,10 @@ impl From<SessionError> for HarnessError {
             SessionError::Tx(TxError::UnknownTask(id)) => Self::UnknownTask(id),
             SessionError::Tx(TxError::Callback(source)) => match source.downcast::<SubmitError>() {
                 Ok(refusal) => Self::Submit(*refusal),
-                Err(source) => Self::Session(SessionError::Tx(TxError::Callback(source))),
+                Err(source) => match source.downcast::<ApprovalError>() {
+                    Ok(refusal) => Self::Approval(*refusal),
+                    Err(source) => Self::Session(SessionError::Tx(TxError::Callback(source))),
+                },
             },
             other => Self::Session(other),
         }

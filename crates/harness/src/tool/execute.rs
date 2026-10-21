@@ -47,6 +47,7 @@ pub(super) async fn run(
                 duration_ms: Some(elapsed()),
                 ending: Ending::Failed(message),
                 waiters: Waiters::none(task),
+                withdraw: None,
             };
             return settle(rt, settlement);
         }
@@ -103,6 +104,7 @@ pub(super) async fn run(
         duration_ms: Some(duration_ms),
         ending,
         waiters,
+        withdraw: None,
     };
     settle(rt, settlement)
 }
@@ -140,6 +142,7 @@ pub(super) async fn recover(
         duration_ms: None,
         ending: Ending::Failed(message),
         waiters: Waiters::none(rt.task_id()),
+        withdraw: None,
     };
     settle(rt, settlement)
 }
