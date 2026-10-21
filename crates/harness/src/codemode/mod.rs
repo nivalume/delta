@@ -20,6 +20,7 @@
 
 mod describe;
 mod documents;
+mod models;
 mod output;
 mod run;
 mod search;
@@ -39,6 +40,7 @@ pub use documents::{
     CodemodeToolDetails, JournalEntry, JournalState, JournaledGlobal, RunState, StartNamespace, StartTool, StoreState,
     StoredResult,
 };
+pub use models::{CLASSIFY_TOOL, GENERATE_IMAGES_TOOL, MAX_CONCURRENT_MODEL_CALLS};
 pub use output::DEFAULT_MAX_OUTPUT_TOKENS;
 pub use tool::{CODEMODE_TOOL_NAME, codemode_description, codemode_extension, codemode_tool};
 
@@ -139,6 +141,9 @@ pub struct CodemodeOptions {
     /// Estimated tokens the tool declarations in the `codemode` section may use. Default
     /// [`DEFAULT_CODEMODE_INLINE_BUDGET`].
     pub inline_budget: usize,
+    /// Gives scripts `models.*`: the model catalog, classifiers and image generation. Default
+    /// on.
+    pub models: bool,
 }
 
 impl CodemodeOptions {
@@ -148,7 +153,14 @@ impl CodemodeOptions {
             namespaces: Vec::new(),
             globals: Vec::new(),
             inline_budget: DEFAULT_CODEMODE_INLINE_BUDGET,
+            models: true,
         }
+    }
+
+    #[must_use]
+    pub fn with_models(mut self, models: bool) -> Self {
+        self.models = models;
+        self
     }
 
     #[must_use]

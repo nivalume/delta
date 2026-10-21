@@ -10,8 +10,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use delta_ai::classifier::{ClassifierContext, ClassifierOptions, ClassifierResult};
 use delta_ai::deferred::{DeferredFetchOptions, DeferredWindow};
-use delta_ai::model::{CacheRetention, Model, ModelThinkingLevel};
+use delta_ai::images::{AssistantImages, ImagesContext, ImagesOptions};
+use delta_ai::model::{AnyModel, CacheRetention, ClassifierModel, ImageModel, Model, ModelThinkingLevel, ModelType};
 use delta_ai::options::{RequestOptions, SimpleStreamOptions, StreamOptions, Transport};
 use delta_ai::types::{AssistantMessage, DeferredHandle, JsonObject, Message, ProviderHeaders};
 use delta_ai::{AssistantMessageEventStream, DeferredRequest, Models};
@@ -168,6 +170,56 @@ pub trait ModelClient: Send + Sync {
         handle: &'a DeferredHandle,
         ctx: &'a Context,
     ) -> BoxFuture<'a, Result<(), ModelError>>;
+
+    /// The catalog: last-known models of `model_type`, of `provider` when given. Default:
+    /// none.
+    fn models_of_type(&self, model_type: ModelType, provider: Option<&str>) -> Vec<AnyModel> {
+        let _ = (model_type, provider);
+        Vec::new()
+    }
+
+    /// Models of `model_type` whose providers have complete auth configuration. Default:
+    /// none.
+    fn available_of_type<'a>(
+        &'a self,
+        model_type: ModelType,
+        provider: Option<&'a str>,
+        ctx: &'a Context,
+    ) -> BoxFuture<'a, Result<Vec<AnyModel>, ModelError>> {
+        let _ = (model_type, provider, ctx);
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// The catalog entry of `model_type` with `provider` and `id`.
+    fn model_of_type(&self, model_type: ModelType, provider: &str, id: &str) -> Option<AnyModel> {
+        self.models_of_type(model_type, Some(provider))
+            .into_iter()
+            .find(|model| model.id() == id)
+    }
+
+    /// Answers a classifier's questions. Never fails: errors are results with stop reason
+    /// `error`. Default: an error result.
+    fn classify<'a>(
+        &'a self,
+        model: &'a ClassifierModel,
+        context: &'a ClassifierContext,
+        ctx: &'a Context,
+    ) -> BoxFuture<'a, ClassifierResult> {
+        let _ = (context, ctx);
+        Box::pin(async move { ClassifierResult::error(model, "Classification is not available", false) })
+    }
+
+    /// Generates images. Never fails: errors are results with stop reason `error`. Default:
+    /// an error result.
+    fn generate_images<'a>(
+        &'a self,
+        model: &'a ImageModel,
+        context: &'a ImagesContext,
+        ctx: &'a Context,
+    ) -> BoxFuture<'a, AssistantImages> {
+        let _ = (context, ctx);
+        Box::pin(async move { AssistantImages::error(model, "Image generation is not available", false) })
+    }
 }
 
 impl fmt::Debug for dyn ModelClient {
@@ -295,6 +347,52 @@ impl ModelClient for ModelsClient {
                 .await
                 .map_err(|error| ModelError(error.to_string()))
         })
+    }
+
+    fn models_of_type(&self, model_type: ModelType, provider: Option<&str>) -> Vec<AnyModel> {
+        self.models().get_models_of_type(model_type, provider)
+    }
+
+    fn available_of_type<'a>(
+        &'a self,
+        model_type: ModelType,
+        provider: Option<&'a str>,
+        ctx: &'a Context,
+    ) -> BoxFuture<'a, Result<Vec<AnyModel>, ModelError>> {
+        Box::pin(async move {
+            let models = self.models();
+            ctx.run(models.get_available_of_type(model_type, provider))
+                .await
+                .map_err(|cancelled| ModelError(cancelled.to_string()))?
+                .map_err(|error| ModelError(error.to_string()))
+        })
+    }
+
+    fn model_of_type(&self, model_type: ModelType, provider: &str, id: &str) -> Option<AnyModel> {
+        self.models().get_model_of_type(model_type, provider, id)
+    }
+
+    fn classify<'a>(
+        &'a self,
+        model: &'a ClassifierModel,
+        context: &'a ClassifierContext,
+        ctx: &'a Context,
+    ) -> BoxFuture<'a, ClassifierResult> {
+        let options = ClassifierOptions {
+            base: request_options(None, ctx),
+            temperature: None,
+        };
+        Box::pin(async move { self.models().classify(model, context, options).await })
+    }
+
+    fn generate_images<'a>(
+        &'a self,
+        model: &'a ImageModel,
+        context: &'a ImagesContext,
+        ctx: &'a Context,
+    ) -> BoxFuture<'a, AssistantImages> {
+        let options = ImagesOptions::from(request_options(None, ctx));
+        Box::pin(async move { self.models().generate_images(model, context, options).await })
     }
 }
 

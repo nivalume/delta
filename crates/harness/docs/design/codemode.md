@@ -128,7 +128,9 @@ global becomes a nested call of the tool, which has its own task, live row, abor
 replay policy. Tools named `delta.codemode.*` are recorded in the start data as `hidden`: never
 in the section, `tools`, `ALL_TOOLS` or search. At most four such calls of one script run at
 once, and a call waiting for a slot when the script has ended is not started. A script that
-received generated images and showed none gets a note in its result.
+received generated images and showed none gets a note in its result. All of it goes through the
+Harness's `ModelClient` (`ToolApi::models()`), and a script's model is looked up again by
+provider and id, so a `baseUrl` or headers the script passes never receive credentials.
 
 ## Differences from upstream
 

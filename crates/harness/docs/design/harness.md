@@ -468,7 +468,10 @@ snapshot immutability, and handover after reinstall.
     module names the surface (`tests/layering.rs` checks it). `HarnessError` is the
     surface's; the agent layer's operations fail with `AgentError`.
   - `HarnessOptions.models` is an `Arc<dyn ModelClient>`; `ModelsClient` is the adapter over
-    `delta_ai::Models` and takes the `Fixed` / `Dynamic` source. `HarnessOptions.compactor`
+    `delta_ai::Models` and takes the `Fixed` / `Dynamic` source. Besides streaming, the seam
+    has the catalog (`models_of_type`, `available_of_type`, `model_of_type`), `classify` and
+    `generate_images`, with defaults that know no models and answer error results, so a test
+    client implements only what it serves; code mode's `models.*` globals use them. `HarnessOptions.compactor`
     is the compaction seam. `conversation_created` is the session's async
     `ConversationHook` (it acquires documents), not a synchronous closure.
   - `AgentRuntime` exposes `agent_services()` instead of separate `settings()` / `models()`

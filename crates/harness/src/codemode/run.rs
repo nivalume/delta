@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, Hasher};
+use std::sync::Arc;
 use std::time::Duration;
 
 use delta_ai::types::{JsonObject, UserBlock};
@@ -23,12 +24,17 @@ use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Map, Value};
+use tokio::sync::Semaphore;
 
 use super::describe::sample_of;
 use super::documents::{
     CallStatus, CodemodeJournalDoc, CodemodeNestedCall, CodemodeRunDoc, CodemodeStart, CodemodeStoreDoc,
     CodemodeToolDetails, JournalEntry, JournalState, JournaledGlobal, RunState, StartNamespace, StartTool, StoreState,
     StoredResult,
+};
+use super::models::{
+    CATALOG_GLOBALS, GENERATE_IMAGES_TOOL, MAX_CONCURRENT_MODEL_CALLS, MODEL_CALLS, catalog_call, count_images,
+    model_call, model_call_arguments,
 };
 use super::output::{self, CallSummary, FormatOptions, Limits, OutputFile};
 use super::search::{SearchDocument, rank_documents};
@@ -221,8 +227,18 @@ pub(super) async fn execute(
         };
         namespaces[index].tools.push(tool.name().to_owned());
     }
+    let model_globals: Vec<&str> = if options.models {
+        CATALOG_GLOBALS
+            .iter()
+            .copied()
+            .chain(MODEL_CALLS.iter().map(|(global, _)| *global))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let globals = DISCOVERY_GLOBALS
         .iter()
+        .chain(&model_globals)
         .map(|name| DeclaredGlobal {
             name: (*name).to_owned(),
             spread: true,
@@ -408,6 +424,10 @@ struct Call<'a> {
     rows: BTreeMap<u64, Row>,
     running: FuturesUnordered<BoxFuture<'a, Landed>>,
     handle: Option<RunHandle>,
+    /// Slots of `models.classify()` and `models.generateImages()` calls.
+    model_slots: Arc<Semaphore>,
+    /// Images `models.generateImages()` returned, to notice a script that never shows them.
+    generated_images: usize,
 }
 
 impl<'a> Call<'a> {
@@ -456,6 +476,8 @@ impl<'a> Call<'a> {
             rows: BTreeMap::new(),
             running: FuturesUnordered::new(),
             handle: None,
+            model_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_MODEL_CALLS)),
+            generated_images: 0,
         }
     }
 
@@ -605,7 +627,7 @@ impl<'a> Call<'a> {
         let formatted = output::format_result(
             result,
             FormatOptions {
-                generated_images: 0,
+                generated_images: self.generated_images,
                 wall_ms: self.api.now() - self.start.started_at,
                 max_output_tokens: self.start.max_output_tokens,
                 calls,
@@ -710,6 +732,17 @@ impl<'a> Call<'a> {
         if self.stopped() {
             return;
         }
+        // A script's call of `models.classify()` or `models.generateImages()` is the call of its
+        // internal tool.
+        let call = match model_call(&call.name) {
+            Some(tool) if call.target == CallTarget::Global => HostCall {
+                id: call.id,
+                target: CallTarget::Tool,
+                name: tool.to_owned(),
+                args: Some(model_call_arguments(call.args.as_ref())),
+            },
+            _ => call,
+        };
         if call.target == CallTarget::Tool {
             self.started(&call);
         }
@@ -915,6 +948,24 @@ impl<'a> Call<'a> {
                     result: CallResult::Global(Ok(outcome)),
                 })));
             }
+            CallTarget::Global if CATALOG_GLOBALS.contains(&call.name.as_str()) => {
+                let (api, ctx) = (self.api, self.ctx);
+                self.running.push(Box::pin(async move {
+                    let result = match api.models() {
+                        Ok(models) => match catalog_call(&call.name, call.args.as_ref(), &*models, ctx).await {
+                            Ok(value) => Ok(Outcome::ok(value)),
+                            Err(_) if ctx.is_cancelled() => Err("The call was cancelled".into()),
+                            Err(message) => Ok(Outcome::err(message)),
+                        },
+                        Err(error) => Err(Box::new(error) as ToolError),
+                    };
+                    Landed {
+                        call,
+                        live: true,
+                        result: CallResult::Global(result),
+                    }
+                }));
+            }
             CallTarget::Global => {
                 let (api, ctx, options) = (self.api, self.ctx, self.options);
                 self.running.push(Box::pin(async move {
@@ -931,7 +982,17 @@ impl<'a> Call<'a> {
 
     fn launch_tool(&mut self, call: HostCall, live: bool) {
         let (api, ctx) = (self.api, self.ctx);
+        let slots = call
+            .name
+            .starts_with(CODEMODE_INTERNAL_PREFIX)
+            .then(|| self.model_slots.clone());
         self.running.push(Box::pin(async move {
+            // A model call waits for a slot; one still waiting when the script ends is dropped
+            // with the loop, so it never starts.
+            let _permit = match slots {
+                Some(slots) => slots.acquire_owned().await.ok(),
+                None => None,
+            };
             // Passed as the script gave them; a script that passes no object gets an error
             // without a nested call, on every run alike.
             let arguments: JsonObject = match &call.args {
@@ -973,6 +1034,9 @@ impl<'a> Call<'a> {
                     .any(|tool| tool.name == call.name && tool.structured);
                 let outcome = outcome_of(&call.name, structured, &result);
                 self.finish_row(call.id, &outcome, &result);
+                if call.name == GENERATE_IMAGES_TOOL {
+                    self.generated_images += count_images(result.structured_output.as_ref());
+                }
                 (outcome, None)
             }
             CallResult::Refused(outcome) => {
@@ -1033,7 +1097,11 @@ impl<'a> Call<'a> {
             let args = call.args.as_ref().map(Value::to_string).unwrap_or_default();
             Row(CodemodeNestedCall {
                 id: call.id,
-                name: call.name.clone(),
+                name: call
+                    .name
+                    .strip_prefix(CODEMODE_INTERNAL_PREFIX)
+                    .unwrap_or(&call.name)
+                    .to_owned(),
                 args: cut(&args, ARGS_PREVIEW_CHARS),
                 status: CallStatus::Running,
                 duration_ms: None,

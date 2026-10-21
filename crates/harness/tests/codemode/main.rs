@@ -24,18 +24,26 @@ macro_rules! cases {
 
 use std::sync::{Arc, Mutex};
 
-use delta_ai::types::{Message, Tool, ToolResultMessage, UserBlock};
+use delta_ai::AssistantMessageEventStream;
+use delta_ai::classifier::{ClassifierAnswer, ClassifierBoolAnswer, ClassifierContext, ClassifierResult};
+use delta_ai::images::{AssistantImages, ImagesContext};
+use delta_ai::model::{
+    AnyModel, ClassifierModel, ImageModel, InputModality, Model, ModelCost, ModelType, OutputModality,
+};
+use delta_ai::types::{AssistantMessage, DeferredHandle, ImageContent, Message, Tool, ToolResultMessage, UserBlock};
 use delta_chord::context::Context;
 use delta_codemode::{Sandbox, SandboxOptions};
 use delta_harness::agent::LocalEnvBuilder;
 use delta_harness::approval::{ApprovalCall, ApprovalPolicy, PolicyDecision, PolicyError};
 use delta_harness::codemode::{
     CODEMODE_MODULE_VERSION, CodemodeGlobal, CodemodeJournalDoc, CodemodeNamespace, CodemodeOptions, CodemodeRunDoc,
-    CodemodeStoreDoc, CodemodeToolDetails, JournalState, RunState, StoreState, StoredResult, codemode_extension,
+    CodemodeStoreDoc, CodemodeToolDetails, JournalState, MAX_CONCURRENT_MODEL_CALLS, RunState, StoreState,
+    StoredResult, codemode_extension,
 };
 use delta_harness::documents::DocAddress;
 use delta_harness::harness::{AbortOptions, Conversation, Harness};
 use delta_harness::inbox::SubmissionDraft;
+use delta_harness::model::{ModelClient, ModelError, ModelRef, ModelRequest};
 use delta_harness::records::{SubmissionId, SubmissionState, TaskId};
 use delta_harness::registry::{Extension, HookApi};
 use delta_harness::tool::{
@@ -63,6 +71,7 @@ cases!(
     a_held_call_whose_key_made_another_call_diverges,
     long_output_and_images_go_to_files,
     the_section_lists_tools_and_scripts_find_the_rest,
+    models_answer_from_the_catalog_and_internal_tools,
 );
 
 /// Counts how often each test tool and global ran.
@@ -926,6 +935,223 @@ try { await searchTools("x", { limit: 0 }); } catch (error) { text(error.message
         section.contains("\n\n## probes\nProbing tools.\n\n### `probe`\nProbes"),
         "{section}"
     );
-    assert!(!section.contains("### `codemode`"), "{section}");
+    assert!(
+        !section.contains("### `codemode`") && !section.contains("delta.codemode"),
+        "{section}"
+    );
+    harness.close(&ctx()).await.unwrap();
+}
+
+/// The fake model with a classifier `fake/judge` and an image model `fake/paint`: the judge
+/// answers `even` with whether `state.n` is even after a short wait, counting how many run at
+/// once; the painter returns one PNG.
+#[derive(Clone)]
+struct Media {
+    inner: support::model::FakeModel,
+    /// Running now, the most at once, started in total.
+    running: Arc<Mutex<(usize, usize, usize)>>,
+}
+
+impl Media {
+    fn judge() -> ClassifierModel {
+        ClassifierModel {
+            id: "judge".to_owned(),
+            name: "Judge".to_owned(),
+            api: "fake-classify".to_owned(),
+            provider: "fake".to_owned(),
+            base_url: "http://judge.invalid".to_owned(),
+            input: vec![InputModality::Text],
+            input_limits: None,
+            cost: ModelCost::default(),
+            headers: Some(
+                [("authorization".to_owned(), "secret".to_owned())]
+                    .into_iter()
+                    .collect(),
+            ),
+            context_window: 1000,
+        }
+    }
+
+    fn paint() -> ImageModel {
+        ImageModel {
+            id: "paint".to_owned(),
+            name: "Paint".to_owned(),
+            api: "fake-images".to_owned(),
+            provider: "fake".to_owned(),
+            base_url: "http://paint.invalid".to_owned(),
+            input: vec![InputModality::Text],
+            input_limits: None,
+            cost: ModelCost::default(),
+            headers: None,
+            output: vec![OutputModality::Image],
+        }
+    }
+
+    /// The most calls that ran at once.
+    fn peak(&self) -> usize {
+        self.running.lock().unwrap().1
+    }
+}
+
+impl ModelClient for Media {
+    fn model(&self, reference: &ModelRef) -> Option<Model> {
+        self.inner.model(reference)
+    }
+
+    fn stream(&self, request: ModelRequest<'_>, ctx: &Context) -> AssistantMessageEventStream {
+        self.inner.stream(request, ctx)
+    }
+
+    fn fetch_deferred<'a>(
+        &'a self,
+        model: &'a Model,
+        handle: &'a DeferredHandle,
+        ctx: &'a Context,
+    ) -> BoxFuture<'a, AssistantMessage> {
+        self.inner.fetch_deferred(model, handle, ctx)
+    }
+
+    fn cancel_deferred<'a>(
+        &'a self,
+        model: &'a Model,
+        handle: &'a DeferredHandle,
+        ctx: &'a Context,
+    ) -> BoxFuture<'a, Result<(), ModelError>> {
+        self.inner.cancel_deferred(model, handle, ctx)
+    }
+
+    fn models_of_type(&self, model_type: ModelType, provider: Option<&str>) -> Vec<AnyModel> {
+        let all = [AnyModel::Classifier(Self::judge()), AnyModel::Image(Self::paint())];
+        all.into_iter()
+            .filter(|model| model.model_type() == model_type && provider.is_none_or(|provider| provider == "fake"))
+            .collect()
+    }
+
+    fn classify<'a>(
+        &'a self,
+        model: &'a ClassifierModel,
+        context: &'a ClassifierContext,
+        _ctx: &'a Context,
+    ) -> BoxFuture<'a, ClassifierResult> {
+        Box::pin(async move {
+            let first = {
+                let mut running = self.running.lock().unwrap();
+                running.0 += 1;
+                running.1 = running.1.max(running.0);
+                running.2 += 1;
+                running.2 <= MAX_CONCURRENT_MODEL_CALLS
+            };
+            // The first calls wait until as many as the limit allows run at once, so a fifth
+            // would join them if the limit did not hold.
+            let deadline = tokio::time::Instant::now() + PATIENCE;
+            while first && self.running.lock().unwrap().0 < MAX_CONCURRENT_MODEL_CALLS {
+                assert!(tokio::time::Instant::now() < deadline, "the first calls run at once");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.running.lock().unwrap().0 -= 1;
+            let n = context.state.get("n").and_then(Value::as_i64).unwrap_or(0);
+            let mut result = ClassifierResult::empty(model);
+            result.answers.insert(
+                "even".to_owned(),
+                ClassifierAnswer::Bool(ClassifierBoolAnswer {
+                    probability: if n % 2 == 0 { 1.0 } else { 0.0 },
+                }),
+            );
+            result
+        })
+    }
+
+    fn generate_images<'a>(
+        &'a self,
+        model: &'a ImageModel,
+        _context: &'a ImagesContext,
+        _ctx: &'a Context,
+    ) -> BoxFuture<'a, AssistantImages> {
+        Box::pin(async move {
+            let mut result = AssistantImages::empty(model);
+            result.output.push(UserBlock::Image(ImageContent {
+                data: PNG.to_owned(),
+                mime_type: "image/png".to_owned(),
+            }));
+            result
+        })
+    }
+}
+
+async fn models_answer_from_the_catalog_and_internal_tools(backend: Backend) {
+    let fixture = Fixture::new(backend).await;
+    let runs = Runs::default();
+    install(&fixture, &runs, 0);
+    let media = Media {
+        inner: fixture.model.clone(),
+        running: Arc::default(),
+    };
+    let mut options = fixture.options();
+    options.models = Arc::new(media.clone());
+    let harness = Harness::open(fixture.storage.clone(), options, &ctx()).await.unwrap();
+    let result = script(
+        &fixture,
+        &harness,
+        r#"
+const judges = await models.getModelsOfType("classifier");
+text(JSON.stringify(judges.map((model) => [model.provider, model.id, model.headers === undefined])));
+const judge = await models.getModelOfType("classifier", "fake", "judge");
+const question = { type: "bool", instructions: "Is n even?", criteria: { true: "even", false: "odd" } };
+const answers = await Promise.all(
+  [1, 2, 3, 4, 5, 6].map((n) => models.classify(judge, { state: { n }, questions: { even: question } })),
+);
+text(answers.map((answer) => answer.answers.even.probability).join(","));
+try { await models.classify({ provider: "fake", id: "paint" }, {}); } catch (error) { text(error.message); }
+try { await models.getModelOfType("classifier", "fake/judge"); } catch (error) { text(error.message); }
+const painter = await models.getModelOfType("image", "fake", "paint");
+const painted = await models.generateImages(painter, { input: [{ type: "text", text: "a dot" }] });
+text(`${painted.output.length} ${painted.stopReason}`);
+text(ALL_TOOLS.filter((tool) => tool.name.startsWith("delta.")).length);
+"#,
+    )
+    .await;
+    assert!(!result.is_error, "{result:?}");
+    let body = body(&result);
+    let texts: Vec<&str> = body.split("\n==> ").collect();
+    assert!(texts[0].ends_with(r#"[["fake","judge",true]]"#), "{body}");
+    assert!(texts[1].ends_with("0,1,0,1,0,1"), "{body}");
+    assert!(
+        texts[2].ends_with(
+            "\"fake/paint\" is an image model, not a classifier model. List the classifier models you can use with models.getAvailableOfType(\"classifier\")."
+        ),
+        "{body}"
+    );
+    assert!(
+        texts[3].contains("models.getModelOfType(type, provider, id) expects three strings, got (a string, a string)."),
+        "{body}"
+    );
+    assert!(texts[4].ends_with("1 stop"), "{body}");
+    assert!(texts[5].starts_with("text 6/6 <==\n0\n"), "{body}");
+    assert!(
+        body.ends_with(
+            "Note: models.generateImages() returned 1 image that the script did not show. Show each image block of result.output with image(block)."
+        ),
+        "{body}"
+    );
+    assert_eq!(
+        media.peak(),
+        MAX_CONCURRENT_MODEL_CALLS,
+        "at most four model calls at once"
+    );
+    let names: Vec<String> = details(&result).calls.into_iter().map(|call| call.name).collect();
+    assert_eq!(
+        names,
+        [
+            "models.classify",
+            "models.classify",
+            "models.classify",
+            "models.classify",
+            "models.classify",
+            "models.classify",
+            "models.classify",
+            "models.generateImages",
+        ]
+    );
     harness.close(&ctx()).await.unwrap();
 }

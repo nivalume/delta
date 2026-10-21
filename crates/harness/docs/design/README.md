@@ -138,7 +138,7 @@ New features plug in through these traits; none needs a kernel change:
 | `HarnessTool` | New tools; the built-in tools are ordinary implementations |
 | `ApprovalPolicy` | Rules engine and permission modes later |
 | `GenerationHooks`, `ToolHooks`, `CompactionHooks` | Extension behaviour; `delta-claude-hooks` bridges Claude Code's command and HTTP hooks |
-| `ModelClient` | Model access; `ModelsClient` wraps `delta_ai::Models`, tests inject a fake |
+| `ModelClient` | Model access (streams, the catalog, classifiers, image generation); `ModelsClient` wraps `delta_ai::Models`, tests inject a fake |
 | `Compactor` | Range selection and starting a `delta.compaction` task; the generation's thresholds and overflow path call it (default `TaskCompactor`; `NoCompaction` disables compaction) |
 | `EnvBuilder` | A conversation's `ExecutionEnv`, built at each use |
 | `ExecutionEnv` | Remote environments later |
