@@ -98,20 +98,20 @@ impl TaskDefinition for CompactionTask {
 
     /// Removes the status and ends `aborted`, writing nothing else: a cut-off attempt has
     /// no committed response.
-    async fn abort<'a>(
+    fn abort<'a>(
         &'a self,
         _phase: CompactionCheckpoint,
         rt: &'a Rt,
         _ctx: &'a Context,
-    ) -> Result<Next<Self>, TaskError> {
+    ) -> impl Future<Output = Result<Next<Self>, TaskError>> + Send + 'a {
         let conversation = rt.conversation_id();
         let task = rt.task_id();
-        Ok(rt.next(move |tx, _| {
+        std::future::ready(Ok(rt.next(move |tx, _| {
             Box::pin(async move {
                 edit_live(tx, conversation, |live| live.remove_compaction(task)).await?;
                 Ok(NextState::aborted(None))
             })
-        }))
+        })))
     }
 }
 

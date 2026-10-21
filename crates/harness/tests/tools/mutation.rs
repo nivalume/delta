@@ -1,13 +1,19 @@
 //! The file mutation queue: mutations of one file, under any of its names, run one at a time
 //! in order; other files never wait.
 
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
 
+#[cfg(unix)]
 use delta_harness::env::LocalEnv;
+#[cfg(unix)]
 use delta_harness::tools::FileMutationQueue;
+#[cfg(unix)]
 use tokio::sync::{Notify, oneshot};
 
+#[cfg(unix)]
 use crate::support::TempDir;
+#[cfg(unix)]
 use crate::support::fixture::ctx;
 use crate::{Backend, Workspace};
 
@@ -30,6 +36,9 @@ async fn parallel_edits_of_one_file_all_land(backend: Backend) {
     workspace.close().await;
 }
 
+// Unix only: it reaches one file under two names through a symlink, which Windows lets only
+// privileged processes create.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_file_waits_and_others_do_not() {
     let dir = TempDir::new();

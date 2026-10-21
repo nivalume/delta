@@ -110,13 +110,13 @@ impl TaskDefinition for Forever {
         Ok(Next::fail("cancelled"))
     }
 
-    async fn abort<'a>(
+    fn abort<'a>(
         &'a self,
         _phase: Json,
         _rt: &'a TaskRuntime<Self>,
         _ctx: &'a Context,
-    ) -> Result<Next<Self>, TaskError> {
-        Ok(Next::abort(None))
+    ) -> impl Future<Output = Result<Next<Self>, TaskError>> + Send + 'a {
+        std::future::ready(Ok(Next::abort(None)))
     }
 }
 

@@ -39,9 +39,12 @@ pub(crate) const ENGINE: &str = "rquickjs 0.14.0, quickjs-ng 0.16.2";
 /// beyond what the fingerprint's other parts capture.
 const DETERMINISTIC_VERSION: u32 = 1;
 /// QuickJS's guard on its own stack: deep recursion becomes a catchable `RangeError` well
-/// before the thread's stack ([`THREAD_STACK`]) runs out.
-pub(crate) const MAX_STACK_SIZE: usize = 4 * 1024 * 1024;
-const THREAD_STACK: usize = 16 * 1024 * 1024;
+/// before the thread's stack ([`THREAD_STACK`]) runs out. Sized for unoptimized builds too: a
+/// JavaScript call takes about 1.4 KB of C stack in a Linux debug build and over 4 KB in a
+/// macOS one, so 16 MiB allows a few thousand nested calls everywhere.
+pub(crate) const MAX_STACK_SIZE: usize = 16 * 1024 * 1024;
+/// Reserved address space, committed only as the stack grows.
+const THREAD_STACK: usize = 64 * 1024 * 1024;
 /// Promise jobs run between two interrupt polls while draining the job queue.
 const JOBS_PER_POLL: u32 = 50;
 

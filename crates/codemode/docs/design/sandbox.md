@@ -48,8 +48,9 @@ null` stays interruptible. The interrupt handler fires when the host sets the ru
 (deadline, abort, finish) or, if one is set, when the interrupt budget is spent.
 
 Limits: `memory_limit` (allocations beyond it fail inside the script as `InternalError: out of
-memory`), QuickJS's stack guard at 4 MiB on a 16 MiB thread (deep recursion is a catchable
-`RangeError`), the deadline (`timeout`, default 300 s for `execute`, none for `start`) and the
+memory`), QuickJS's stack guard at 16 MiB on a 64 MiB thread (deep recursion is a catchable
+`RangeError`; the size leaves room for unoptimized builds, whose interpreter frames take several
+KB), the deadline (`timeout`, default 300 s for `execute`, none for `start`) and the
 optional interrupt budget.
 
 `Sandbox::execute(code, options)` runs the host's own tools: each call runs concurrently on the

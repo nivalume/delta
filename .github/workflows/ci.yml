@@ -80,5 +80,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Check that every crate packages and builds from its tarball
-        run: cargo package --workspace --allow-dirty
+      # `publish = false` crates are left out: they never reach a registry, and one that depends
+      # on another of them cannot resolve it from the packaged set.
+      - name: Check that every publishable crate packages and builds from its tarball
+        run: >-
+          cargo package --allow-dirty
+          $(cargo metadata --no-deps --format-version 1
+          | jq -r '.packages[] | select(.publish != []) | "--package=" + .name')

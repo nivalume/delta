@@ -207,6 +207,7 @@ pub(super) async fn create_temp_dir(prefix: Option<&str>, ctx: &Context) -> File
     let root = std::env::temp_dir();
     ensure_live(ctx, &root)?;
     let path = root.join(format!("{}{}", prefix.unwrap_or("delta-"), random_name()));
+    #[cfg_attr(not(unix), allow(unused_mut))] // Only Unix sets the mode.
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     builder.mode(0o700);

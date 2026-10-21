@@ -129,21 +129,21 @@ impl crate::scheduler::TaskDefinition for Probe {
         delta_chord::json!({ "phase": "start" })
     }
 
-    async fn run<'a>(
+    fn run<'a>(
         &'a self,
         _phase: Self::Checkpoint,
         _rt: &'a crate::scheduler::TaskRuntime<Self>,
         _ctx: &'a delta_chord::context::Context,
-    ) -> Result<crate::scheduler::Next<Self>, crate::scheduler::TaskError> {
-        Ok(crate::scheduler::Next::complete(delta_chord::json::Json::Null))
+    ) -> impl Future<Output = Result<crate::scheduler::Next<Self>, crate::scheduler::TaskError>> + Send + 'a {
+        std::future::ready(Ok(crate::scheduler::Next::complete(delta_chord::json::Json::Null)))
     }
 
-    async fn abort<'a>(
+    fn abort<'a>(
         &'a self,
         _phase: Self::Checkpoint,
         _rt: &'a crate::scheduler::TaskRuntime<Self>,
         _ctx: &'a delta_chord::context::Context,
-    ) -> Result<crate::scheduler::Next<Self>, crate::scheduler::TaskError> {
-        Ok(crate::scheduler::Next::abort(None))
+    ) -> impl Future<Output = Result<crate::scheduler::Next<Self>, crate::scheduler::TaskError>> + Send + 'a {
+        std::future::ready(Ok(crate::scheduler::Next::abort(None)))
     }
 }
