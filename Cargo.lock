@@ -978,6 +978,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "delta-app-server"
+version = "1.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "delta-ai",
+ "delta-chord",
+ "delta-claude-hooks",
+ "delta-harness",
+ "delta-protocol",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "delta-chord"
 version = "1.0.0"
 dependencies = [

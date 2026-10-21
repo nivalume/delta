@@ -178,6 +178,7 @@ Rules:
 | `delta_ai` additions | `is_context_overflow`, `is_retryable_assistant_error`, `retry_delay`, `to_tool_declaration`, as upstream has them in pi-ai |
 | SQLite types | `delta_chord::sqlite` re-exports `rusqlite` |
 | Permissions | `RulesPolicy`: Claude Code's `Tool(specifier)` rules (deny > ask > allow) and modes (`default`, `accept_edits`, `plan`, `dont_ask`, `bypass`) from a per-conversation `delta.permissions` document; `ApprovedWithRule` adds an allow rule harness-wide in the deciding commit ([permissions.md](permissions.md)) |
+| UI protocol | `delta-protocol` (a Codex app-server v2 subset) and `delta-app-server`, built on agent events, submissions and `Conversation::decide` ([protocol.md](../../../protocol/docs/design/protocol.md), [app-server.md](../../../app-server/docs/design/app-server.md)) |
 | Images in `read` | Upstream's pass-through within the model's limits, an `ImageProcessor` seam, and an optional `image`-crate processor behind the `images` feature ([tools.md](tools.md)) |
 | Env `watch` and `list_files` | Optional methods that return `not_supported` until `notify` / `ignore` are dependencies |
 | Cancellation | `delta_chord::context::Context` wherever upstream passes a chord `Context` |
@@ -188,8 +189,6 @@ Rules:
 
 Seams kept visible for work after phase 1, in the order the survey suggests:
 
-- A protocol crate for UIs (thread / turn / item lifecycle, approval requests) derived from
-  agent events and submissions.
 - Code mode on an embedded JavaScript VM with the journal and replay rules.
 - JSONL storage; remote execution environments on pi-env's daemon protocol; telemetry
   once delta has a telemetry crate; sub-agent roles and limits.

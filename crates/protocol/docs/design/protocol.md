@@ -48,17 +48,17 @@ connection.
 | Codex | delta |
 | --- | --- |
 | thread | a conversation (`ConversationId`); `sessionId` is the same id |
-| turn | a run: the user input that starts it, the generations and tool calls it settles, until the conversation yields. The turn id is the run's first input `SubmissionId` |
+| turn | a user input and the generations and tool calls up to its answer, with the inputs steered into it. The turn id is the input's `SubmissionId`. A follow-up placed after the answer starts the next turn, even when the harness continues the same run |
 | item | a unit inside a turn, below |
 | `thread/start` | `Harness::create_conversation` |
 | `thread/resume` | `Harness::conversation`; pending approvals are sent again |
-| `thread/fork` | `Conversation::fork` as of the turn's last entry |
+| `thread/fork` | `Conversation::fork` at the answer of `lastTurnId`, or at the last entry |
 | `thread/list` | `Harness::conversations` (newest first; the cursor is opaque) |
 | `thread/read` | the conversation's record, and with `includeTurns` its turns rebuilt from entries and submission records |
 | `turn/start` | `Conversation::submit` as a follow-up |
 | `turn/steer` | `Conversation::submit` as steering, if `expectedTurnId` is the running turn |
 | `turn/interrupt` | `Conversation::abort` of the running turn |
-| `thread/status/changed` | `idle` when the conversation yields; `active` with `waitingOnApproval` while an approval is pending; `systemError` when a task failed |
+| `thread/status/changed` | `idle` when nothing runs; `active` while a turn or run is in progress, with `waitingOnApproval` while an approval is pending |
 
 Items and their ids:
 
@@ -116,8 +116,11 @@ and snake case in the harness's document.
 - `approvalPolicy` and `sandbox` are reported, not obeyed: the harness's `ApprovalPolicy`
   decides, so a thread reports `on-request` and `dangerFullAccess`. Codex's
   `execpolicy_amendment` becomes a delta permission rule.
-- A turn is a run. A `turn/start` while a run is in progress joins that run, so its
-  `turn/started` names the running turn's id, where Codex would queue a separate turn.
+- A turn ends at its input's answer. A `turn/start` while a turn runs queues a follow-up,
+  whose turn starts once the running one is answered, as Codex queues turns; the harness
+  may answer both in one run.
+- `systemError` is never reported: a failed task sends `error`, and the thread returns to
+  `idle`.
 - `delta/snapshot` replaces replay for a client that fell behind; Codex has no equivalent.
 - `thread/list` ignores Codex's filters (`modelProviders`, `sourceKinds`, `archived`) and
   sorts newest first.

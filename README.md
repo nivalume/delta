@@ -42,6 +42,7 @@ This workspace contains one crate per ported upstream package.
 | **[delta-harness](crates/harness)** | `delta_harness` | `@earendil-works/pi-durable` | Durable agent harness: storage-first conversations, resumable turns and tool calls, durable approvals, built-in coding tools. Not published yet |
 | **[delta-claude-hooks](crates/claude-hooks)** | `delta_claude_hooks` | Claude Code hooks (no upstream package) | Claude Code's command and HTTP hooks over delta-harness's hook seams. Not published yet |
 | **[delta-protocol](crates/protocol)** | `delta_protocol` | Codex app-server v2 (no upstream package) | The UI protocol: a Codex app-server v2 compatible subset plus `delta/` methods (types only). Not published yet |
+| **[delta-app-server](crates/app-server)** | `delta_app_server` | Codex app-server (no upstream package) | A JSON-RPC server speaking delta-protocol over any reader and writer, for UI clients of a delta harness. Not published yet |
 
 Chord's host runtime (objects, links, hot reload) is not ported; see
 [docs/research/chord.md](docs/research/chord.md). Not ported yet: `@earendil-works/pi-telemetry`,

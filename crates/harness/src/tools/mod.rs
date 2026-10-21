@@ -1,7 +1,7 @@
 //! The built-in coding tools: `read`, `write`, `edit` and `bash`.
 //!
-//! Each is a plain [`HarnessTool`] that reaches files and commands only through the call's
-//! [`ExecutionEnv`](crate::env::ExecutionEnv), so it runs wherever the conversation does. A
+//! Each is a plain [`HarnessTool`](crate::tool::HarnessTool) that reaches files and commands
+//! only through the call's [`ExecutionEnv`], so it runs wherever the conversation does. A
 //! call without an environment fails `No execution environment is configured`. All four are
 //! not replay-safe and callable by the model and by tools. `write` and `edit` of one file run
 //! one at a time through a shared [`FileMutationQueue`]. [`coding_tools`] bundles the four;

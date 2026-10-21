@@ -131,7 +131,7 @@ are upstream's `AgentSessionEvent` names, the same `kind()` strings
 `delta_agent::AgentEvent` reports (`message_start`, `tool_execution_update`, ...), so a UI
 built on `delta_agent` events reads these with the known vocabulary; `run_start`/`run_end`
 stand where `agent_start`/`agent_end` do there. Unlike `delta_agent`'s, these events
-serialize: they are the base of the later UI protocol crate.
+serialize; `delta-app-server` translates them into the UI protocol.
 
 Attachment captures the snapshot and registers on the session line atomically. Every event
 is relative to the snapshot and the events before it, never to document paths. The stream
