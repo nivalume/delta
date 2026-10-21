@@ -1,12 +1,13 @@
-//! BM25 tool search for `searchTools()`: upstream's `search.ts`, the coding agent's tool search
-//! ranking.
+//! BM25 tool search, shared by the `tool_search` tool and code mode's `searchTools()`:
+//! upstream's `search.ts`, the coding agent's tool search ranking.
 
 use std::collections::{HashMap, HashSet};
 
 /// One searchable document: a tool's name and the text it is found by.
-pub(super) struct SearchDocument {
-    pub(super) name: String,
-    pub(super) text: String,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchDocument {
+    pub name: String,
+    pub text: String,
 }
 
 const STOP_WORDS: [&str; 21] = [
@@ -36,7 +37,7 @@ fn stem(term: &str) -> String {
 }
 
 /// Lowercase terms, split at camelCase boundaries and non-alphanumerics, without stop words.
-pub(super) fn tokenize(text: &str) -> Vec<String> {
+pub fn tokenize(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut spaced = String::with_capacity(text.len() + 8);
     for (index, &c) in chars.iter().enumerate() {
@@ -64,7 +65,7 @@ pub(super) fn tokenize(text: &str) -> Vec<String> {
 
 /// Okapi BM25 (k1 1.2, b 0.75): the names of the best matches, best first; ties keep document
 /// order.
-pub(super) fn rank_documents(query: &str, documents: &[SearchDocument], limit: usize) -> Vec<String> {
+pub fn rank_documents(query: &str, documents: &[SearchDocument], limit: usize) -> Vec<String> {
     const K1: f64 = 1.2;
     const B: f64 = 0.75;
     let mut seen = HashSet::new();

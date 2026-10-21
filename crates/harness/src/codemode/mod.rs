@@ -23,7 +23,6 @@ mod documents;
 mod models;
 mod output;
 mod run;
-mod search;
 mod tool;
 
 use std::fmt;

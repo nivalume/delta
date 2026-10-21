@@ -16,8 +16,9 @@
 //!   decisions), [`compaction`] (thresholds and the `delta.compaction` task), and, with the
 //!   `codemode` feature, `codemode` (scripts that call the conversation's tools).
 //! - kernel: [`records`], [`documents`], [`storage`], [`session`], [`scheduler`].
-//! - side: [`env`](mod@env), the execution environment and its local implementation, and
-//!   [`tools`], the built-in `read`, `write`, `edit` and `bash`.
+//! - side: [`env`](mod@env), the execution environment and its local implementation,
+//!   [`search`], the BM25 tool ranking, and [`tools`], the built-in `read`, `write`, `edit`,
+//!   `bash` and `tool_search`.
 
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
@@ -40,6 +41,7 @@ pub mod prompt;
 pub mod records;
 pub mod registry;
 pub mod scheduler;
+pub mod search;
 pub mod session;
 pub mod storage;
 pub mod tool;

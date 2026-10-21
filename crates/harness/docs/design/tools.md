@@ -266,11 +266,29 @@ The queue is a value, not a process-wide map (the architecture rules out module-
 state): `coding_tools` gives its `write` and `edit` one queue, and a host that builds the
 tools itself passes them a shared one. Two queues do not see each other's mutations.
 
+## `tool_search`
+
+The model searches the deferred tools it is not offered yet (`Agent.deferred`, such as an MCP
+server's tools), and the matches load with `ToolControl.add_tools`, which the generation's
+`tools` phase writes to `model_tools` ([generation.md](generation.md)), so the next request
+offers them, appended to the declared tools. Loads are recorded by name in `model_tools`, so
+they hold on that branch, after a compaction and in the baseline after a reset.
+`tool_search_extension()` installs it (extension `tool-search`); `coding_tools` does not
+include it. Port of upstream `src/tool-search/tool-search.ts`.
+
+- Parameters `{ query, limit? }`; a blank query and a limit that is not a positive integer
+  are errors. The default limit is 8. `callers MODEL` (scripts have code mode's
+  `searchTools()`), `replay Safe`; the description is fixed, so it does not change as
+  deferred tools come and go.
+- Ranking: `search::rank_documents` (BM25, shared with code mode) over each candidate's name,
+  the name with `_` as spaces, its description, and its parameters' descriptions and property
+  names (through `properties`, `items`, `anyOf`, `oneOf`, `allOf`).
+- Result: `Loaded N tools. They are available from your next call:` with one
+  `- name: first description line` per tool, or `No matching tools found.`; details
+  `{ loaded }`; `add_tools` only when something loaded.
+
 ## Deferrals
 
-- `tool_search` and deferred tools: the seam is `Agent.deferred` plus
-  `ToolControl.add_tools` written to `model_tools` by the generation's `tools` phase
-  ([generation.md](generation.md)); the BM25 ranking extension is later.
 - `powershell`: not ported in phase 1.
 - A remote environment: later, as [README.md](README.md) lists. Code mode is the
   `codemode` feature ([codemode.md](codemode.md)).

@@ -1,5 +1,5 @@
-//! The built-in tools on the local environment, called by a scripted model: `read`, `write`,
-//! `edit` and `bash`, and the file mutation queue.
+//! The built-in tools, called by a scripted model: `read`, `write`, `edit` and `bash` on the
+//! local environment, the file mutation queue, and `tool_search`.
 //!
 //! Ported from upstream `test/tools/*.test.ts` where they apply. Each case runs in its own
 //! temp directory, the conversation's environment, against memory and SQLite in a file.
@@ -28,6 +28,7 @@ mod image;
 mod mutation;
 mod permissions;
 mod read;
+mod tool_search;
 mod write;
 
 use std::path::Path;

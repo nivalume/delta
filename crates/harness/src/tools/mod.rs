@@ -1,6 +1,7 @@
-//! The built-in coding tools: `read`, `write`, `edit` and `bash`.
+//! The built-in tools: the coding tools `read`, `write`, `edit` and `bash`, and
+//! `tool_search`, which loads deferred tools ([`tool_search_extension`]).
 //!
-//! Each is a plain [`HarnessTool`](crate::tool::HarnessTool) that reaches files and commands
+//! Each coding tool is a plain [`HarnessTool`](crate::tool::HarnessTool) that reaches files and commands
 //! only through the call's [`ExecutionEnv`], so it runs wherever the conversation does. A
 //! call without an environment fails `No execution environment is configured`. All four are
 //! not replay-safe and callable by the model and by tools. `write` and `edit` of one file run
@@ -16,6 +17,7 @@ mod image;
 mod mutation;
 mod paths;
 mod read;
+mod tool_search;
 mod truncate;
 mod write;
 
@@ -36,6 +38,10 @@ pub use image::{
 pub use mutation::FileMutationQueue;
 pub use paths::{normalize_tool_path, resolve_read_path, resolve_tool_path};
 pub use read::{ReadOptions, ReadTool};
+pub use tool_search::{
+    DEFAULT_TOOL_SEARCH_LIMIT, TOOL_SEARCH_EXTENSION, TOOL_SEARCH_TOOL_NAME, ToolSearchDetails, ToolSearchTool,
+    tool_search_extension,
+};
 pub use truncate::{
     DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Limit, Totals, Truncation, format_size, truncate_head, truncate_head_of,
 };

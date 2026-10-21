@@ -37,9 +37,9 @@ use super::models::{
     model_call, model_call_arguments,
 };
 use super::output::{self, CallSummary, FormatOptions, Limits, OutputFile};
-use super::search::{SearchDocument, rank_documents};
 use super::{CODEMODE_INTERNAL_PREFIX, CODEMODE_MODULE_VERSION, CodemodeOptions, namespace_of};
 use crate::documents::DocAddress;
+use crate::search::{SearchDocument, rank_documents};
 use crate::session::TxError;
 use crate::tool::{
     NestedCallDoc, NestedCallOptions, NestedCallState, NestedToolExecutionResult, Severity, ToolApi, ToolApiError,

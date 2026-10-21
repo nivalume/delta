@@ -1,8 +1,8 @@
 //! Each layer names only the layers below it (README.md, "Architecture and seams"): the
 //! kernel names no agent, surface or side module; the agent layer names no surface module;
-//! `env` names nothing else in the crate, and `tools` names only `env` and the tool seams
-//! (`tool`, `registry`). Scans the sources for `crate::` paths into a layer a module may not
-//! reach.
+//! `env` and `search` name nothing else in the crate, and `tools` names only them and the tool
+//! seams (`tool`, `registry`). Scans the sources for `crate::` paths into a layer a module may
+//! not reach.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ const AGENT: [&str; 12] = [
 const SURFACE: [&str; 2] = ["harness", "observe"];
 
 /// The side layer's modules.
-const SIDE: [&str; 2] = ["env", "tools"];
+const SIDE: [&str; 3] = ["env", "search", "tools"];
 
 fn rust_files(path: &Path, files: &mut Vec<PathBuf>) {
     if path.is_dir() {
@@ -163,6 +163,23 @@ fn the_environment_names_nothing_else_in_the_crate() {
 }
 
 #[test]
+fn the_search_names_nothing_else_in_the_crate() {
+    let others: Vec<&str> = KERNEL
+        .iter()
+        .chain(&AGENT)
+        .chain(&SURFACE)
+        .chain(SIDE.iter().filter(|module| **module != "search"))
+        .copied()
+        .collect();
+    let offending = offending(&["search"], &others);
+    assert!(
+        offending.is_empty(),
+        "search names other modules:\n{}",
+        offending.join("\n")
+    );
+}
+
+#[test]
 fn the_tools_name_only_the_environment_and_the_tool_seams() {
     let others: Vec<&str> = KERNEL
         .iter()
@@ -173,7 +190,7 @@ fn the_tools_name_only_the_environment_and_the_tool_seams() {
     let offending = offending(&["tools"], &others);
     assert!(
         offending.is_empty(),
-        "tools name modules beyond env, tool and registry:\n{}",
+        "tools name modules beyond env, search, tool and registry:\n{}",
         offending.join("\n")
     );
 }

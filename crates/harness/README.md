@@ -24,6 +24,7 @@ What it provides:
 - An execution environment (`env`, with `LocalEnv`) and the built-in `read`, `write`,
   `edit` and `bash` tools (`tools`). `read` sends images within the model's limits; the
   `images` feature adds `ImageCrateProcessor`, which resizes and converts the rest.
+- Deferred tools, offered once `tool_search` (`tool_search_extension`) finds them by BM25.
 - Code mode (the `codemode` feature): the `codemode` tool runs a model-written JavaScript
   script on `delta-codemode`'s QuickJS sandbox; the script calls the conversation's tools as
   nested calls and survives a restart by deterministic replay (`codemode_extension`).
