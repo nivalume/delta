@@ -13,11 +13,12 @@ as diagnostics, and survive concurrent calls on one file. They are ported from t
 harness's tools with durable's channels (output, structured output, details, diagnostics).
 
 ```rust
-impl ReadTool { pub fn new() -> Self }
+impl ReadTool { pub fn new() -> Self; pub fn with_options(options: ReadOptions) -> Self }
 impl WriteTool { pub fn new(queue: FileMutationQueue) -> Self }
 impl EditTool { pub fn new(queue: FileMutationQueue) -> Self }
 impl BashTool { pub fn new(options: BashOptions) -> Self }
-pub fn coding_tools(bash: BashOptions) -> Extension;  // "coding-tools": all four, one queue; nothing installs it automatically
+pub struct CodingToolsOptions { pub bash: BashOptions, pub read: ReadOptions }   // From<BashOptions>
+pub fn coding_tools(options: impl Into<CodingToolsOptions>) -> Extension;  // "coding-tools": all four, one queue; nothing installs it automatically
 ```
 
 All four are `ToolReplay::Unsafe`, `callers` both, and raise `No execution environment is
@@ -61,8 +62,9 @@ bytes, or holds at least `max_lines` newlines. Streaming output is bounded by
 
 ## `read`
 
-The description is upstream's without the image sentence: "Read the contents of a text
-file. Output is truncated to 2000 lines or 50KB ...".
+The description is upstream's: "Read the contents of a file. Supports text files and images
+(jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated
+to 2000 lines or 50KB ...", with `bmp` added to the list when an image processor is set.
 
 Schema: `{ path: string, offset?: number (1-based line), limit?: number }`. Details:
 `{ truncation?: Truncation }` (without the content).
@@ -92,14 +94,78 @@ Schema: `{ path: string, offset?: number (1-based line), limit?: number }`. Deta
      offset=<k> to continue.` (no code).
 4. Output: one text item, or none for empty text.
 
-Images: detection by content (PNG, JPEG, GIF, WebP signatures; a BMP header must also give
-the file's size, so text starting with `BM` stays text) stays, because binary
-in the context is never useful; in phase 1 a detected image returns the error result with
-code `unsupported_image` (`<path> is an image (<mime>); image input is not supported in this
-build`). The image path (pass-through within the model's `input_limits.images.resize`
-limits, an `ImageProcessor` seam for resizing and conversion, the `image` info diagnostic,
-the placeholder for models without vision) is deferred with the images decision in
-[README.md](README.md).
+### Images
+
+Detection reads the first 32 bytes, as upstream's `detectSupportedImageMimeTypeOf`:
+
+- JPEG: `FF D8 FF`, except JPEG-LS (fourth byte `F7`).
+- PNG: the signature, then an `IHDR` chunk of length 13; an animated PNG (an `acTL` chunk
+  before the first `IDAT`, found by walking the chunk headers in 64 KiB reads) is not an
+  image.
+- GIF: `GIF87a` / `GIF89a`. WebP: `RIFF` … `WEBP`.
+- BMP: `BM` and a plausible structure (at least 26 bytes; a declared size of 0 or at least
+  26; the pixel offset at least `14 + dib` and below a non-zero declared size; a DIB header
+  of 12 or 40..=124 bytes; one color plane; 1, 4, 8, 16, 24 or 32 bits per pixel).
+
+A file none of these accept is read as text. A detected image is never read as text.
+
+```rust
+pub struct ImageLimits { pub max_width: u32, pub max_height: u32, pub max_bytes: u64 /* of base64 */ }
+pub const DEFAULT_IMAGE_LIMITS: ImageLimits = ImageLimits { max_width: 2000, max_height: 2000, max_bytes: 4_718_592 };
+impl ImageLimits { pub fn for_model(model: Option<&Model>) -> Self }   // input_limits.images.resize, field by field over the defaults
+pub fn base64_len(bytes: u64) -> u64;                                  // ceil(bytes / 3) * 4
+pub struct Dimensions { pub width: u32, pub height: u32 }
+pub fn image_dimensions(bytes: &[u8], mime: &str) -> Option<Dimensions>;   // from the header, without decoding
+pub struct PreparedImage { pub data: Vec<u8>, pub mime: String, pub resized: Option<(Dimensions, Dimensions)>, pub converted_from: Option<String> }
+pub trait ImageProcessor: Send + Sync + fmt::Debug {
+    fn prepare<'a>(&'a self, bytes: &'a [u8], mime: &'a str, limits: ImageLimits, ctx: &'a Context) -> BoxFuture<'a, Option<PreparedImage>>;
+}
+pub struct ReadOptions { pub image_processor: Option<Arc<dyn ImageProcessor>> }
+```
+
+The limits come from the conversation's model (`api.agent().model` resolved through
+`api.models()`); a model that does not resolve counts as one that takes images within the
+defaults. `image_dimensions` reads PNG's IHDR, GIF's logical screen, WebP's `VP8 `, `VP8L`
+or `VP8X` chunk, and JPEG's first SOF marker (`C0`..=`CF` except `C4`, `C8`, `CC`, fill
+bytes skipped).
+
+With a processor, the whole file goes to `prepare`; `None` fails `<path> is an image (<mime>)
+that cannot be prepared for the model`. Without one, in order:
+
+1. a format providers do not take inline (anything but PNG, JPEG, GIF, WebP): `<path> is an
+   image (<mime>) that needs converting, and no image processor is configured`;
+2. `base64_len(size) > max_bytes`, checked before reading: `<path> is an image (<mime>) of
+   <format_size(size)>, too large to send, and no image processor is configured to shrink it`;
+3. no readable dimensions: `<path> is an image (<mime>) whose size cannot be read`;
+4. larger than the limits: `<path> is an image (<mime>) of WxH, larger than MWxMH, and no
+   image processor is configured to shrink it`.
+
+Each failure is an error result with no output and an `error` diagnostic `unsupported_image`.
+Success is one image item (base64 of the bytes) and an `info` diagnostic `image`: `Read image
+file [<mime>].`, then `Converted from <from> to <to>.` and `Resized from WxH to wxh. Multiply
+coordinates by <from.width / to.width, two decimals> to map them to the original.` when the
+processor did either, then `The current model does not support images; it sees a placeholder
+instead.` for a model without image input. The image is kept in the transcript either way;
+`delta_ai` replaces it with its placeholder when it builds a request for such a model.
+
+A file that changes while it is read is read again once, as text is; an image must be
+unchanged (an image that only grew is not a finished image).
+
+#### `ImageCrateProcessor` (feature `images`, off by default)
+
+On the `image` crate (PNG, JPEG, GIF, WebP and BMP decoders), run in `spawn_blocking`:
+
+1. Decode, always (a damaged file is `None`, not an image the provider rejects), and read
+   the EXIF orientation from the decoder.
+2. An inline format with no orientation to apply, within the dimensions and with a base64
+   that fits, is returned as it is.
+3. Otherwise apply the orientation, scale to fit `max_width` × `max_height` (Lanczos3),
+   and encode PNG, then JPEG at quality 80, 70, 55, 40 (the JPEGs first for a JPEG
+   source); the first whose base64 fits wins. If none fits, shrink to 3/4 and try again;
+   at 1×1, `None`.
+
+`resized` is set when the dimensions changed, `converted_from` when the format did (BMP
+always becomes PNG or JPEG).
 
 ## `write`
 
@@ -202,7 +268,6 @@ tools itself passes them a shared one. Two queues do not see each other's mutati
 
 ## Deferrals
 
-- Images in `read` (above) and the `ImageProcessor` seam.
 - `tool_search` and deferred tools: the seam is `Agent.deferred` plus
   `ToolControl.add_tools` written to `model_tools` by the generation's `tools` phase
   ([generation.md](generation.md)); the BM25 ranking extension is later.
@@ -219,18 +284,21 @@ tools itself passes them a shared one. Two queues do not see each other's mutati
 - `Truncation` serializes snake_case in `read`'s details; the model- and program-facing
   shapes keep upstream's names (`oldText`/`newText` arguments, `firstChangedLine`,
   `fullOutputPath`, `exitCode`).
-- `read` describes itself as a text reader; BMP detection checks the header's size field.
 - `edit`'s diff and patch come from `similar` (upstream `diff`), so the diff string's
   exact lines may differ; the tests compare semantics (changed lines, first changed line).
-- Image handling is a deferral rather than a pass-through; the error code is the same
-  `unsupported_image` so the model's experience matches an upstream build without a
+- `PreparedImage.data` holds the bytes; `read` encodes them as base64 (upstream's processor
+  returns base64).
+- The optional processor is on the `image` crate behind a feature instead of Photon in
+  WebAssembly; it uses the decoder's EXIF orientation instead of a hand-written EXIF reader.
   processor.
 - `BashPrepare` is a trait object instead of a function type.
 
 ## Decided
 
-- Detected images return `unsupported_image` in phase 1, as an upstream build without an
-  image processor does for formats it cannot pass through.
+- Images follow upstream: pass-through within the model's limits without a processor, the
+  `ImageProcessor` seam for resizing and conversion, and an optional processor behind the
+  `images` feature. Nothing enforces `max_per_message` / `max_per_request` or uses
+  `jpeg_quality` (upstream ignores them too).
 - Upstream's error and diagnostic texts are kept word for word (models were tuned against
   them).
 - `read` without `limit` on a huge file reports the `offset=` continuation only, as

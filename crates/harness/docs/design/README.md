@@ -164,7 +164,7 @@ Rules:
 | Kernel | pi-durable's model (storage-first commits, task state machines, documents, inbox, ownership tree), not pi-coding-agent's in-memory loop |
 | Compatibility with pi | None for the harness's own records and storage: kinds, record JSON and the SQLite schema are delta's. Messages inside entries are `delta_ai` types, which keep upstream's shape |
 | Namespace | Built-in entry, document and task kinds start with `delta.` (`delta.user`, `delta.assistant`, `delta.tool-result`, `delta.system`, `delta.reset`, `delta.compaction`, `delta.approval`; documents `delta.agent`, `delta.provider`, `delta.live`, `delta.inbox`, `delta.usage`, `delta.approvals`; tasks `delta.generation`, `delta.tool`, `delta.compaction`, each at version 1) |
-| Phase 1 scope | Kernel, built-in tools and a local execution env. Deferred: code mode, remote env, JSONL storage, telemetry, Durable Object hosting, images |
+| Phase 1 scope | Kernel, built-in tools and a local execution env. Deferred: code mode, remote env, JSONL storage, telemetry, Durable Object hosting |
 | The session line | One tokio task owns the session state. `commit` sends a closure that receives `&mut Tx`; a document that is not loaded is read through `tx`, so a read inside a commit cannot hang |
 | Documents | `tx.doc::<D>()` borrows the `Tx` and returns a draft over `delta_chord::delta::Change` (one document edited at a time); prepared ops become `base` or `delta` writes under `checkpoint_when`; observers get a read-only `DocumentState` over a `delta_chord::State` |
 | No-op batches and overflow | chord's rules: a change that ends equal to its base writes and publishes nothing; a subscriber that falls behind gets merged batches (`r` past `MAX_OPS`) |
@@ -176,6 +176,7 @@ Rules:
 | Ids | Newtypes over `u64` |
 | `delta_ai` additions | `is_context_overflow`, `is_retryable_assistant_error`, `retry_delay`, `to_tool_declaration`, as upstream has them in pi-ai |
 | SQLite types | `delta_chord::sqlite` re-exports `rusqlite` |
+| Images in `read` | Upstream's pass-through within the model's limits, an `ImageProcessor` seam, and an optional `image`-crate processor behind the `images` feature ([tools.md](tools.md)) |
 | Env `watch` and `list_files` | Optional methods that return `not_supported` until `notify` / `ignore` are dependencies |
 | Cancellation | `delta_chord::context::Context` wherever upstream passes a chord `Context` |
 | Tests | Never the network: fake models replay recorded stream events; storage in memory or in SQLite files under a temp dir |

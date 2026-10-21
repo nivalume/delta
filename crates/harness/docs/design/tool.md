@@ -319,7 +319,7 @@ are not rerun on recovery: the arguments they produced are in the checkpoint.
 - `typed_harness_tool` replaces `defineTool` type inference.
 - Not ported: PowerShell variants, `wrapTool` as a separate helper (wrapping is a
   `HarnessTool` that holds an `Arc<dyn HarnessTool>`; the registry composes wrappers per
-  resolution as [harness.md](harness.md) describes), images in `read` (tools.md).
+  resolution as [harness.md](harness.md) describes).
 
 ## Decisions
 
