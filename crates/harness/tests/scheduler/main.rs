@@ -39,6 +39,7 @@ macro_rules! paused_cases {
 mod inspect;
 mod ownership;
 mod recovery;
+mod short_sleeps;
 mod sleep;
 mod tasks;
 mod waits;

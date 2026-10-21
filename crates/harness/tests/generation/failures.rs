@@ -133,11 +133,11 @@ async fn a_retryable_error_sleeps_and_retries(backend: Backend) {
 async fn retries_stop_at_the_policy_limit(backend: Backend) {
     let fixture = Fixture::new(backend).await;
     fixture.settings(|settings| {
-        // Backoffs of a few milliseconds: shorter sleeps can fall due between the scheduler's
-        // reservation pass and its timer computation (see the scheduler's `drive`).
+        // One-millisecond backoffs: the sleeps fall due around the scheduler's reservation
+        // pass, which once left them without a timer.
         settings.retry = Some(PartialRetryPolicy {
             max_retries: Some(2),
-            base_delay: Some(Duration::from_millis(20)),
+            base_delay: Some(Duration::from_millis(1)),
             ..PartialRetryPolicy::default()
         });
     });

@@ -26,7 +26,8 @@ pub struct Wake {
     /// invocation, a waiting task whose `on` settled, a due sleep, an abort-marked task
     /// whose work drained, or a reconcile pass that is scheduled or underway.
     pub active: bool,
-    /// The earliest sleep not yet due (epoch ms on the Session clock).
+    /// The earliest sleep (epoch ms on the Session clock). It is in the past when a runnable
+    /// sleep came due after the last reservation pass; the host should run a pass at once.
     pub at: Option<i64>,
 }
 
@@ -50,7 +51,13 @@ impl State {
                 }
                 _ => {}
             }
-            if active || parked(record, limit) {
+            // A sleep that came due after the last reservation pass read the clock: it is
+            // runnable now, and its `until` (in the past) arms a timer that fires at once.
+            let due_sleep = match &record.state {
+                TaskState::Sleeping { until, .. } => Some(*until),
+                _ => None,
+            };
+            if (active && due_sleep.is_none()) || parked(record, limit) {
                 continue;
             }
             // An abort invocation waits for the live work below it, which counts itself.
@@ -62,6 +69,9 @@ impl State {
             let request = record.abort_requested && record.abort_reason.is_none();
             if !request && matches!(self.fit(record, snapshot.task(&record.kind)), Fit::Blocked(_)) {
                 continue;
+            }
+            if let Some(until) = due_sleep {
+                at = Some(at.map_or(until, |at| at.min(until)));
             }
             active = true;
         }
