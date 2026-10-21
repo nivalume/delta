@@ -18,7 +18,7 @@ use crate::agent::{Agent, AgentError, AgentRuntime};
 use crate::documents::{DocAddress, DocDefinition};
 use crate::env::ExecutionEnv;
 use crate::model::ModelClient;
-use crate::records::{ConversationId, EntryId, EntryRecord, TaskId};
+use crate::records::{ConversationId, ConversationRecord, EntryId, EntryRecord, TaskId};
 use crate::scheduler::{RuntimeError, TaskDefinition, TaskRuntime};
 use crate::session::Session;
 
@@ -175,6 +175,15 @@ impl<'a> HookApi<'a> {
             return Ok(Some(env.cwd().to_owned()));
         }
         Ok(self.agent(ctx).await?.cwd.clone())
+    }
+
+    /// The committed record of the hook's conversation (its owner, its parent).
+    pub async fn conversation(&self, ctx: &Context) -> Result<Option<ConversationRecord>, RuntimeError> {
+        let id = self.conversation_id;
+        let session = self.host.session()?;
+        Ok(session
+            .commit(ctx, move |tx| Box::pin(async move { tx.conversation(id).await }))
+            .await?)
     }
 
     /// The current value of a committed document.
