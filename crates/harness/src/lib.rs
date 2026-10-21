@@ -7,7 +7,8 @@
 //! The modules form layers; each depends only on the layers below it:
 //!
 //! - surface: [`harness`](mod@harness) ([`Harness`](harness::Harness),
-//!   [`Conversation`](harness::Conversation), [`Submission`](harness::Submission)).
+//!   [`Conversation`](harness::Conversation), [`Submission`](harness::Submission)) and
+//!   [`observe`] (the conversation view).
 //! - agent: [`registry`] (extensions and hooks), [`agent`] (`delta.agent`, resolution,
 //!   settings, the runtime of agent-layer tasks), [`inbox`], [`context`], [`prompt`],
 //!   [`generation`], [`usage`], [`model`] (the [`ModelClient`](model::ModelClient) seam),
@@ -26,6 +27,7 @@ pub mod generation;
 pub mod harness;
 pub mod inbox;
 pub mod model;
+pub mod observe;
 pub mod prompt;
 pub mod records;
 pub mod registry;

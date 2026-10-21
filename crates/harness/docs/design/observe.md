@@ -256,6 +256,22 @@ impl Harness {
 - `DocumentState` is a read-only wrapper; the view and the task graph hand out their
   `State`'s read-only side the same way.
 
+- Phase 6 (implementation, view):
+  - `view_state` returns `observe::ViewState` and `watch` a `ViewSubscription`: read-only
+    wrappers over the mount's `State` that keep the mount alive, as `DocumentState` pins
+    its incarnation. A bare `State` clone could not tell the mount it is still observed.
+  - A mount is built in a read-only commit: it reads the conversation record, the active
+    transcript (the newest head marker, then the non-head entries from its head) and the
+    mounted documents (`Tx::peek_doc`), and registers its `CommitObserver` before the
+    commit returns, so it starts at a committed state and misses no later commit.
+  - The observer advances the mount on the line with `State::apply` (chord), relaying
+    document ops re-rooted under `["docs", kind]`. An op that does not apply would be a
+    mount bug; it is skipped instead of failing the Session.
+  - The conversation record is mounted too (`["s", ["conversation"], record]` when it
+    changes).
+  - On-line observers run in registration order, so a waiter woken by an earlier one (a
+    submission's) may read the view before the mount advanced for that commit.
+
 ## Open (minor)
 
 - `Snapshot.generation.message` as `AssistantMessage` (typed) versus `Json`; typed costs a

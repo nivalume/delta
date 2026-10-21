@@ -39,6 +39,9 @@ impl State {
     pub fn begin(&self) -> Change;
     pub fn commit(&self, ctx: &Context, prepared: Prepared) -> Result<(), AdoptError>;
 
+    // A batch made elsewhere, relayed as it is (a mirror of another state).
+    pub fn apply(&self, ctx: &Context, ops: Vec<Op>) -> Result<(), ApplyError>;
+
     pub fn subscribe(&self) -> Subscription;
     pub fn subscribe_with(&self, options: SubscribeOptions) -> Subscription;
 }
@@ -57,6 +60,10 @@ impl State {
   needed), `prepare` it, write the ops to storage, then `commit`. `commit` adopts and
   publishes; it fails with `AdoptError::Stale` when another change was committed since
   `begin`.
+- `apply` applies a batch to the current value and publishes exactly that batch
+  (`Tracker::prepare_ops`). A harness view mounts several documents into one state and
+  relays each commit's ops re-rooted under the document's key, so its subscribers see the
+  writer's ops, not a diff. A batch that does not apply changes nothing.
 - Empty batches are adopted but not published. `sequence()` counts published changes.
 
 ## Subscriptions

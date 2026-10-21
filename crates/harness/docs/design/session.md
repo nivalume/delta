@@ -481,6 +481,12 @@ storage failed to close.
 - The close barrier and `write_at_close` (above) for joining invocations and writing the
   tasks close stopped back as `pending` (phase 3).
 
+- Phase 6: `Tx::peek_doc(at) -> Option<(DocumentId, Json)>` reads the current incarnation
+  without acquiring or creating it (an acquired document's working value, else the
+  committed value through the cache, as `Session::snapshot`). The view mount reads its
+  documents with it inside the read-only commit that registers its observer, so the mount
+  starts at a committed state and misses no later commit.
+
 ## Open (minor)
 
 - The `commit` signature (`FnOnce(&mut Tx) -> BoxFuture<Result<T, TxError>>`) versus a

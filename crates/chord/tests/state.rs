@@ -170,3 +170,24 @@ fn reentrant_changes_panic() {
     let state = State::new(json!(0));
     state.change(&Context::background(), |_| state.change(&Context::background(), |_| ()));
 }
+
+#[tokio::test]
+async fn apply_publishes_a_relayed_batch_as_it_is() {
+    let state = State::new(json!({"docs": {"live": {"out": "ab"}}}));
+    let mut subscription = state.subscribe();
+    subscription.next().await.unwrap();
+    let ops = vec![
+        Op::TrimStart(vec!["docs".into(), "live".into(), "out".into()].into(), 1),
+        Op::Append(vec!["docs".into(), "live".into(), "out".into()].into(), "cd".into()),
+    ];
+    state.apply(&Context::background(), ops.clone()).unwrap();
+    let delivery = subscription.next().await.unwrap();
+    assert_eq!(delivery.value, json!({"docs": {"live": {"out": "bcd"}}}));
+    assert_eq!(ops_json(&delivery.ops), ops_json(&ops));
+    // A batch that does not apply changes nothing; an empty one publishes nothing.
+    let missing = vec![Op::Delete(vec!["nope".into(), "deeper".into()].into())];
+    assert!(state.apply(&Context::background(), missing).is_err());
+    state.apply(&Context::background(), Vec::new()).unwrap();
+    assert_eq!(state.sequence(), 1);
+    assert_eq!(state.value(), json!({"docs": {"live": {"out": "bcd"}}}));
+}

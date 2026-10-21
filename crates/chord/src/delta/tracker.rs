@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::json::Json;
 
 use super::draft::{Draft, Edit};
-use super::{MAX_OPS, Op, diff};
+use super::{ApplyError, MAX_OPS, Op, applied, diff};
 
 static NEXT_TRACKER: AtomicU64 = AtomicU64::new(1);
 
@@ -80,6 +80,17 @@ impl Tracker {
             ops
         };
         self.prepared(value, ops)
+    }
+
+    /// Prepare the batch `ops`, applied to the current revision, as it is: for a writer that
+    /// relays a batch made elsewhere (a mirror of another state). An empty batch prepares
+    /// nothing.
+    pub fn prepare_ops(&self, ops: Vec<Op>) -> Result<Prepared, ApplyError> {
+        if ops.is_empty() {
+            return Ok(self.prepared(self.value.clone(), ops));
+        }
+        let value = applied(&self.value, &ops)?;
+        Ok(self.prepared(value, ops))
     }
 
     /// Make a preparation's value the current revision and return its ops.

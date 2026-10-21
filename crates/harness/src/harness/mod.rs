@@ -14,6 +14,7 @@ mod approvals;
 mod conversation;
 mod creation;
 mod error;
+mod observe;
 mod submission;
 
 use std::fmt;
@@ -37,6 +38,7 @@ use crate::compaction::{Compactor, TaskCompactor};
 use crate::documents::DocAddress;
 use crate::generation::{AgentSchedulerHooks, builtin_tasks};
 use crate::model::ModelClient;
+use crate::observe::ViewMounts;
 use crate::records::{
     ConversationId, ConversationQuery, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionStatus, TaskId,
     TaskRecord,
@@ -110,6 +112,7 @@ pub(crate) struct HarnessInner {
     registry: Registry,
     services: Arc<AgentServices>,
     approvals: Arc<PendingApprovals>,
+    views: ViewMounts,
     waits: Arc<SubmissionWaits>,
     on_report: Option<Reporter>,
     _observer: ObserverGuard,
@@ -234,6 +237,7 @@ impl Harness {
             registry,
             services,
             approvals,
+            views: ViewMounts::default(),
             waits,
             on_report,
             _observer: observer,

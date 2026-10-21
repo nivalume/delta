@@ -10,7 +10,7 @@ use futures::Stream;
 use tokio::sync::Notify;
 
 use crate::context::Context;
-use crate::delta::{AdoptError, Change, Draft, MAX_OPS, Op, Prepared, Tracker};
+use crate::delta::{AdoptError, ApplyError, Change, Draft, MAX_OPS, Op, Prepared, Tracker};
 use crate::json::Json;
 
 /// Deliveries a subscription keeps before merging them, by default.
@@ -115,6 +115,17 @@ impl State {
         let prepared = inner.tracker.prepare_diff(value);
         let ops = inner.tracker.adopt(prepared).expect("no competing change while locked");
         inner.publish(context, ops);
+    }
+
+    /// Apply `ops` to the current value and publish them as they are: a mirror relaying
+    /// another state's batches. An empty batch publishes nothing; a batch that does not
+    /// apply changes nothing.
+    pub fn apply(&self, context: &Context, ops: Vec<Op>) -> Result<(), ApplyError> {
+        let mut inner = self.lock();
+        let prepared = inner.tracker.prepare_ops(ops)?;
+        let ops = inner.tracker.adopt(prepared).expect("no competing change while locked");
+        inner.publish(context, ops);
+        Ok(())
     }
 
     /// Start a change for a writer that persists its batch before committing it.

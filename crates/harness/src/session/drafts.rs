@@ -217,6 +217,33 @@ impl Tx<'_> {
         })
     }
 
+    /// The current incarnation at `at` as this transaction sees it, with its id, without
+    /// acquiring or creating it: an acquired document's working value, the committed value
+    /// (loaded and migrated in memory, as [`Session::snapshot`](super::Session::snapshot)
+    /// does), or `None` when absent or retired here. Reads nothing from the tables.
+    pub async fn peek_doc<D: DocDefinition>(
+        &mut self,
+        at: DocAddress<D>,
+    ) -> Result<Option<(DocumentId, Json)>, TxError> {
+        let address = at.to_address();
+        if let Some(index) = self.latest.get(&address).copied() {
+            if self.documents[index].retire {
+                return Ok(None);
+            }
+            if matches!(self.documents[index].target, Some(Target::ForkCopy { .. })) {
+                let acquired = Acquired {
+                    semantics: semantics::<D>(),
+                    checkpoint_when: D::checkpoint_when,
+                };
+                self.acquire_fork_copy::<D>(index, acquired).await?;
+            }
+            let entry = &self.documents[index];
+            return Ok(entry.id().zip(entry.open().map(|open| open.change.value().clone())));
+        }
+        let loaded = self.line.cache.load::<D>(&self.line.guard, &address, &self.ctx).await?;
+        Ok(loaded.map(|loaded| (loaded.handle.record().id, loaded.handle.value())))
+    }
+
     /// Retires the current incarnation at `at` in this commit; an acquired change's final
     /// content is written first. Absent: nothing. A later `doc` in the same transaction
     /// creates a new incarnation.
