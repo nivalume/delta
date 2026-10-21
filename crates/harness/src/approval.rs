@@ -1,21 +1,33 @@
 //! The approval seam: the policy that decides, per tool call, whether the call runs, is
 //! denied or must be approved.
 //!
-//! Phase 4 of the crate defines the policy and its default, [`AllowAll`], so hosts pass one
-//! through `HarnessOptions.approval` from the start. The tool task asks it once per call,
-//! after the `before_tool` chain, on the final arguments; requests, decisions, grants and
-//! the waiting phase arrive with the tool task in phase 5. See `docs/design/approval.md`.
+//! The tool task asks the policy once per call, after the `before_tool` chain, on the final
+//! arguments: `Allow` runs the call, `Deny` settles it `blocked`. Durable requests, decisions,
+//! grants and the waiting phase for `Ask` are the approval phase's (until it lands, `Ask`
+//! settles `blocked` too). See `docs/design/approval.md`.
 
 use std::error::Error as StdError;
 use std::fmt;
 use std::time::Duration;
 
-use delta_ai::types::ToolCall;
 use delta_chord::context::Context;
 use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 
 use crate::records::{ConversationId, TaskId};
-use crate::tool::HarnessTool;
+use crate::registry::HookApi;
+use crate::tool::{HarnessTool, ToolHookCall};
+
+/// An approval request's id: the id of the tool task that asks, which asks at most once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ApprovalId(pub TaskId);
+
+impl fmt::Display for ApprovalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
 
 /// A policy failure; the call is denied with its text (fail closed).
 pub type PolicyError = Box<dyn StdError + Send + Sync>;
@@ -25,7 +37,7 @@ pub struct ApprovalCall<'a> {
     pub conversation_id: ConversationId,
     pub task_id: TaskId,
     /// The call with its final arguments.
-    pub call: &'a ToolCall,
+    pub call: &'a ToolHookCall,
     pub tool: &'a dyn HarnessTool,
     pub cwd: Option<&'a str>,
 }
@@ -54,11 +66,14 @@ pub enum PolicyDecision {
     },
 }
 
-/// Decides whether a tool call needs approval.
+/// Decides whether a tool call needs approval. It runs off the session line with the
+/// task's [`HookApi`] (ids, models, memos); a crash before the call's intent commit may run
+/// it again.
 pub trait ApprovalPolicy: Send + Sync {
     fn decide<'a>(
         &'a self,
         call: &'a ApprovalCall<'a>,
+        api: &'a HookApi<'a>,
         ctx: &'a Context,
     ) -> BoxFuture<'a, Result<PolicyDecision, PolicyError>>;
 }
@@ -77,8 +92,27 @@ impl ApprovalPolicy for AllowAll {
     fn decide<'a>(
         &'a self,
         _call: &'a ApprovalCall<'a>,
+        _api: &'a HookApi<'a>,
         _ctx: &'a Context,
     ) -> BoxFuture<'a, Result<PolicyDecision, PolicyError>> {
         Box::pin(async { Ok(PolicyDecision::Allow) })
+    }
+}
+
+/// Denies every call with `reason`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DenyAll {
+    pub reason: String,
+}
+
+impl ApprovalPolicy for DenyAll {
+    fn decide<'a>(
+        &'a self,
+        _call: &'a ApprovalCall<'a>,
+        _api: &'a HookApi<'a>,
+        _ctx: &'a Context,
+    ) -> BoxFuture<'a, Result<PolicyDecision, PolicyError>> {
+        let reason = self.reason.clone();
+        Box::pin(async move { Ok(PolicyDecision::Deny { reason }) })
     }
 }

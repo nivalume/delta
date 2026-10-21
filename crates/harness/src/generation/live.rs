@@ -6,11 +6,11 @@ use delta_chord::delta::Op;
 use delta_chord::json::{self, Json};
 use serde::{Deserialize, Serialize};
 
+use super::slots::{NestedToolSlot, ToolSlot};
 use super::{ASSISTANT_ENTRY, GenerationInput, GenerationTask};
 use crate::documents::{CheckpointInfo, ConversationScope, DocAddress, DocDefinition, ForkInitial, Latest};
-use crate::records::{ConversationId, EntryDraft, EntryId, EntryRecord, SubmissionId, SubmissionSettlement, TaskId};
+use crate::records::{ConversationId, EntryDraft, EntryRecord, SubmissionId, SubmissionSettlement, TaskId};
 use crate::session::{TaskOptions, Tx, TxError};
-use crate::tool::ToolDiagnostic;
 use crate::usage::{UsageBucket, record_usage};
 
 /// The `delta.live` document: conversation scope, `latest`, a fork starts empty, a complete
@@ -86,71 +86,8 @@ impl LiveGeneration {
     }
 }
 
-/// Where a tool call of the round stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SlotStatus {
-    Pending,
-    Running,
-    Done,
-}
-
-/// The presentation of one tool call of the current round.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolSlot {
-    pub call_id: String,
-    pub name: String,
-    /// Absent for a call not started yet (sequential round) and for a call the request did
-    /// not offer, which starts `done`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<TaskId>,
-    pub status: SlotStatus,
-    /// Retained running output; only while `running`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dropped_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dropped_lines: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Json>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostics: Option<Vec<ToolDiagnostic>>,
-    /// The result entry once done; absent when the tool task faulted or was orphaned.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry: Option<EntryId>,
-}
-
-impl ToolSlot {
-    /// A slot of call `call_id` in status `status`.
-    pub fn new(call_id: &str, name: &str, status: SlotStatus) -> Self {
-        Self {
-            call_id: call_id.to_owned(),
-            name: name.to_owned(),
-            task_id: None,
-            status,
-            output: None,
-            dropped_bytes: None,
-            dropped_lines: None,
-            details: None,
-            diagnostics: None,
-            entry: None,
-        }
-    }
-
-    /// Done, without the progress it published while running.
-    pub fn finish(&mut self) {
-        self.status = SlotStatus::Done;
-        self.output = None;
-        self.dropped_bytes = None;
-        self.dropped_lines = None;
-        self.details = None;
-        self.diagnostics = None;
-    }
-}
-
-/// The value of a `delta.live` document. The nested-call and compaction fields are carried
-/// as JSON; their owners (the tool and compaction tasks) type them.
+/// The value of a `delta.live` document. The compaction fields are carried as JSON; the
+/// compaction task types them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LiveState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,7 +97,7 @@ pub struct LiveState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolSlot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nested_tools: Option<Vec<Json>>,
+    pub nested_tools: Option<Vec<NestedToolSlot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactions: Option<Vec<Json>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

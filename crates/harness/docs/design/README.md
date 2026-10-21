@@ -78,10 +78,10 @@ crates/harness/
     inbox/           # submissions, admission, boundaries, withdrawal
     context/         # model context derivation, result ordering, kept ranges
     prompt/          # sections, delta.system planning
-    generation/      # the delta.generation task, delta.live, delta.provider, cleanup hooks
+    generation/      # the delta.generation task, delta.live and its slots, delta.provider, cleanup hooks
     model.rs         # the ModelClient seam, ModelsClient, pinned request types
     usage.rs         # delta.usage
-    tool.rs          # HarnessTool (declaration side), results, the tool-task seam (phase 5: the task)
+    tool/            # HarnessTool, FnHarnessTool, ToolApi, the delta.tool task: pipeline, execute, output, settle, nested
     approval.rs      # ApprovalPolicy and AllowAll (phase 5: requests and decisions)
     compaction.rs    # thresholds and the Compactor seam (phase 5: the task)
     observe/         # view, events, task_graph

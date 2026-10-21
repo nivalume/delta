@@ -46,14 +46,15 @@ stored JSON. The run's inputs live in `delta.live.run`, not in the task input.
 pub struct LiveState {
     pub run: Option<RunControl>,                 // { task_id, inputs }: present exactly while busy
     pub generation: Option<LiveGeneration>,      // { attempt, message?: Json, retry?: { at, error }, deferred?: { poll_at } }
-    pub nested_tools: Option<Vec<NestedSlot>>,   // tool.md
+    pub nested_tools: Option<Vec<NestedToolSlot>>, // tool.md
     pub tools: Option<Vec<ToolSlot>>,            // the current round in call order
     pub compactions: Option<Vec<CompactionStatus>>,
     pub compaction_failure: Option<CompactionFailure>,
 }
 pub struct ToolSlot { pub call_id: String, pub name: String, pub task_id: Option<TaskId>, pub status: SlotStatus /* Pending | Running | Done */,
-                      pub output: Option<String>, pub dropped_bytes: Option<u64>, pub dropped_lines: Option<u64>,
-                      pub details: Option<Json>, pub diagnostics: Option<Vec<ToolDiagnostic>>, pub entry: Option<EntryId> }
+                      #[serde(flatten)] pub progress: SlotProgress, pub entry: Option<EntryId> }
+pub struct SlotProgress { pub output: Option<String>, pub dropped_bytes: Option<u64>, pub dropped_lines: Option<u64>,
+                          pub details: Option<Json>, pub diagnostics: Option<Vec<ToolDiagnostic>> }
 ```
 
 | field | value |
@@ -276,8 +277,15 @@ a scripted `fetch_deferred`.
     `NoCompaction` finds no cut, so phase 4 never compacts and an overflow fails
     `model_error`. The estimate and thresholds themselves (`compaction::estimate_context`,
     `compaction::threshold`) are implemented.
-  - `LiveState` carries `nested_tools`, `compactions` and `compaction_failure` as JSON until
-    the tool and compaction tasks type them; a typed edit round-trips them unchanged.
+  - `LiveState` carries `compactions` and `compaction_failure` as JSON until the compaction
+    task types them; a typed edit round-trips them unchanged.
+
+- Phase 5 (implementation): `nested_tools` is typed (`NestedToolSlot`, in
+  `generation::slots` with `ToolSlot`); both slots carry the running progress as a flattened
+  `SlotProgress`, so the stored JSON keeps its flat shape, and `LiveState` has the slot
+  helpers the tool task and the cleanup hooks share (`tool_slot_mut`, `nested_slot_mut`,
+  `slot_progress_mut`, `remove_nested_below`). `builtin_tasks()` returns the generation and
+  `delta.tool`.
   - The scheduler cleanup hooks are `generation::AgentSchedulerHooks`: a run generation's
     partial, inputs and run marker, a tool task's slot (and nested slots); compaction status
     joins in phase 5. Its `withdraw_inputs` also removes the inputs from `delta.inbox`.

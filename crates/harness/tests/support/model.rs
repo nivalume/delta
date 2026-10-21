@@ -79,6 +79,22 @@ impl Reply {
         }
     }
 
+    /// A tool-calling answer whose calls carry arguments: `(id, name, arguments)`.
+    pub fn calls_with(calls: &[(&str, &str, serde_json::Value)]) -> Self {
+        let blocks = calls
+            .iter()
+            .map(|(id, name, arguments)| Block::ToolCall {
+                id: (*id).to_owned(),
+                name: (*name).to_owned(),
+                arguments: arguments.as_object().cloned().unwrap_or_default(),
+            })
+            .collect();
+        Self {
+            blocks,
+            ..Self::new(StopReason::ToolUse)
+        }
+    }
+
     /// A failed response with `message`.
     pub fn error(message: &str) -> Self {
         Self {

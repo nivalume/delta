@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use delta_ai::types::{Message, StopReason};
+use delta_ai::types::{Message, StopReason, ToolResultMessage, UserBlock};
 use delta_harness::harness::{AbortOptions, Harness};
 use delta_harness::inbox::SubmissionDraft;
 use delta_harness::records::{EntryRecord, SubmissionState, TaskOutcome};
@@ -93,18 +93,23 @@ async fn abort_during_a_round_answers_unstarted_calls(backend: Backend) {
     let state = settled(&submission).await.state;
     assert!(matches!(&state, SubmissionState::Unanswered { reason, .. } if reason == "aborted"));
     let transcript = entries(&conversation).await;
-    // The started call's task was aborted (the stand-in writes no result); the call that
-    // never started got its `aborted` result from the generation.
-    let results: Vec<&EntryRecord> = transcript
+    // The started call settled an `aborted` result from its slot; the call that never
+    // started got its `aborted` result from the generation.
+    let results: Vec<&ToolResultMessage> = transcript
         .iter()
         .filter(|entry| entry.kind == "delta.tool-result")
+        .map(|entry| match entry.model.as_deref() {
+            Some([Message::ToolResult(result)]) => result,
+            _ => panic!("a result"),
+        })
         .collect();
-    assert_eq!(results.len(), 1);
-    let Some([Message::ToolResult(result)]) = results[0].model.as_deref() else {
-        panic!("a result")
-    };
-    assert_eq!(result.tool_call_id, "c2");
-    assert!(result.is_error);
+    let calls: Vec<&str> = results.iter().map(|result| result.tool_call_id.as_str()).collect();
+    assert_eq!(calls, ["c1", "c2"]);
+    assert!(results.iter().all(|result| result.is_error));
+    assert_eq!(
+        results[0].content,
+        vec![UserBlock::text("<harness>\n[error] Tool write was aborted\n</harness>")]
+    );
     assert_eq!(script.started(), ["c1"]);
     assert!(live(&harness, &conversation).await.tools.is_none());
     harness.close(&ctx()).await.unwrap();

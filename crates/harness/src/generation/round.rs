@@ -8,9 +8,8 @@ use delta_ai::types::{AssistantMessage, Message, ToolCall, UserMessage};
 use delta_chord::context::Context;
 use delta_chord::json;
 
-use super::live::{
-    LiveDoc, LiveState, SlotStatus, ToolSlot, append_assistant, create_generation, edit_live, end_run, start_run,
-};
+use super::live::{LiveDoc, LiveState, append_assistant, create_generation, edit_live, end_run, start_run};
+use super::slots::{SlotStatus, ToolSlot};
 use super::{GenerationCheckpoint, GenerationResult, GenerationTask, Rt, hook_failed};
 use crate::agent::{AgentRuntime, HookRuntime, add_tools};
 use crate::documents::DocAddress;

@@ -12,6 +12,7 @@
 
 mod extension;
 mod hooks;
+mod task_hooks;
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -23,6 +24,7 @@ use tokio::sync::watch;
 
 pub use extension::{Extension, HookRegistration, SectionWrapper, ToolWrapper, Wrap, WrapError};
 pub use hooks::{GenerationHooks, HookApi, HookError, HookHost, HookResult, HookRunner, RequestMessages, TaskHooks};
+pub use task_hooks::{BeforeTool, ToolHooks};
 
 use crate::prompt::PromptSection;
 use crate::scheduler::{AnyTask, CatalogSnapshot, TaskCatalog};

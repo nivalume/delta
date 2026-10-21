@@ -14,6 +14,15 @@ impl HarnessTool for Named {
     fn definition(&self) -> &delta_ai::types::Tool {
         &self.0
     }
+
+    fn execute<'a>(
+        &'a self,
+        _arguments: delta_ai::types::JsonObject,
+        _api: &'a crate::tool::ToolApi<'a>,
+        _ctx: &'a delta_chord::context::Context,
+    ) -> futures::future::BoxFuture<'a, Result<crate::tool::ToolExecutionResult, crate::tool::ToolError>> {
+        Box::pin(async { Ok(crate::tool::ToolExecutionResult::default()) })
+    }
 }
 
 fn tool(name: &str) -> Arc<dyn HarnessTool> {
@@ -26,6 +35,7 @@ fn a_new_registry_holds_the_builtin_tasks_only() {
     let snapshot = registry.snapshot();
     assert!(snapshot.installed().is_empty());
     assert!(snapshot.task(GENERATION_TASK).is_some());
+    assert!(snapshot.task(crate::tool::TOOL_TASK).is_some());
     assert_eq!(snapshot.generation(), 0);
 }
 

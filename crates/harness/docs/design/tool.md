@@ -338,8 +338,24 @@ are not rerun on recovery: the arguments they produced are in the checkpoint.
   (`generation::builtin_tasks`). `deferred()` is new: resolution offers a deferred tool only once
   `model_tools` loads it (harness.md).
 
-## Open (minor)
-
-- `output()` panicking after the invocation ends (upstream throws). Alternative: ignore
-  late output and report once.
-- Nested calls land in phase 1 behind tests only; they could wait for code mode.
+- Phase 5 (implementation):
+  - `ToolApi<'r>` borrows the invocation's runtime and reporter, so it cannot outlive
+    `execute`: the "panic after the invocation ends" question is moot, and nothing panics.
+    It has no `conversation()` (it would name the surface layer) and no `watch_doc()` (the
+    runtime has no document-state API yet); both wait for observe (phase 6).
+  - Progress commits are served: `Progress` needs a `'static` write closure, so the closure
+    snapshots the reported state and sends the slot update over a channel to a loop that
+    runs beside `execute` in the invocation and commits through the runtime; stopping the
+    `Progress` closes the channel. Pending `details()` waiters are resolved by the settle
+    commit after its writes, and fail when that commit never runs.
+  - `output_skipped` on a head window is reported and ignored instead of panicking.
+  - `models()` and `registry()` return `Result` (the runtime's agent services may be
+    missing); `agent()` is the phase's resolved agent, synchronous.
+  - Argument validation is `delta_ai::validation::validate_tool_arguments`, which already
+    has pi-ai's coercions; structured output is checked with `jsonschema`.
+  - A `NestedCallDoc` member stores the call's tool name and arguments beside its task id
+    and result, so a reused key is checked without reading the task.
+  - Settlement aborts live nested calls when the `delta.tool.made_nested_calls` memo is
+    set (by any attempt), so a rerun that did not reattach still cleans up.
+  - Until the approval phase lands, `PolicyDecision::Ask` settles `blocked`.
+  - Nested calls are kept in phase 1, tested through tools that call tools.

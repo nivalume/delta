@@ -20,6 +20,7 @@ mod prepare;
 mod provider;
 mod request;
 mod round;
+mod slots;
 
 use std::sync::Arc;
 
@@ -29,15 +30,17 @@ use serde::{Deserialize, Serialize};
 pub use checkpoint::GenerationCheckpoint;
 pub use cleanup::AgentSchedulerHooks;
 pub use live::{
-    LiveDeferred, LiveDoc, LiveGeneration, LiveRetry, LiveState, RunControl, SlotStatus, ToolSlot, append_assistant,
-    convert_partial, create_generation, edit_live, end_run, live_state, start_run,
+    LiveDeferred, LiveDoc, LiveGeneration, LiveRetry, LiveState, RunControl, append_assistant, convert_partial,
+    create_generation, edit_live, end_run, live_state, start_run,
 };
 pub use provider::ProviderDoc;
+pub use slots::{NestedToolSlot, NestedToolSummary, SlotProgress, SlotStatus, ToolSlot};
 
 use crate::agent::HookRuntime;
 use crate::records::EntryId;
 use crate::registry::{GenerationHooks, TaskHooks};
 use crate::scheduler::{AnyTask, Next, TaskDefinition, TaskError, TaskRuntime};
+use crate::tool::ToolTask;
 
 /// The task kind.
 pub const GENERATION_TASK: &str = "delta.generation";
@@ -46,7 +49,7 @@ pub const ASSISTANT_ENTRY: &str = "delta.assistant";
 
 /// The built-in task definitions every registry holds.
 pub fn builtin_tasks() -> Vec<Arc<dyn AnyTask>> {
-    vec![Arc::new(GenerationTask)]
+    vec![Arc::new(GenerationTask), Arc::new(ToolTask)]
 }
 
 /// The input of a generation: `{}`. The run's inputs are in `delta.live.run`.

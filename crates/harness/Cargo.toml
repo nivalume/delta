@@ -17,11 +17,19 @@ publish = false
 [lib]
 name = "delta_harness"
 
+[features]
+default = ["schemars"]
+# Typed tools: parameter schemas generated from Rust types.
+schemars = ["dep:schemars"]
+
 [dependencies]
 delta-ai.workspace = true
 delta-chord = { workspace = true, features = ["sqlite"] }
 futures.workspace = true
 indexmap.workspace = true
+# Structured tool output against its declared schema.
+jsonschema.workspace = true
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

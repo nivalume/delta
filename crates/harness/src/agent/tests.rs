@@ -29,6 +29,15 @@ impl HarnessTool for Named {
     fn callers(&self) -> Callers {
         self.callers
     }
+
+    fn execute<'a>(
+        &'a self,
+        _arguments: delta_ai::types::JsonObject,
+        _api: &'a crate::tool::ToolApi<'a>,
+        _ctx: &'a delta_chord::context::Context,
+    ) -> futures::future::BoxFuture<'a, Result<crate::tool::ToolExecutionResult, crate::tool::ToolError>> {
+        Box::pin(async { Ok(crate::tool::ToolExecutionResult::default()) })
+    }
 }
 
 fn tool(name: &str, description: &str) -> Arc<dyn HarnessTool> {
