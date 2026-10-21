@@ -22,7 +22,8 @@ What it provides:
 - Observation: a live view of each conversation, agent events derived from it, and a task
   graph.
 - An execution environment (`env`, with `LocalEnv`) and the built-in `read`, `write`,
-  `edit` and `bash` tools (`tools`).
+  `edit` and `bash` tools (`tools`). `read` sends images within the model's limits; the
+  `images` feature adds `ImageCrateProcessor`, which resizes and converts the rest.
 
 ## Quick start
 
@@ -198,4 +199,4 @@ kinds use delta's own `delta.*` names and a SQLite schema of their own. Messages
 entries stay `delta_ai` types, which are wire compatible with pi. Each design note lists
 its other differences from upstream.
 
-Not in this version: images in `read`, code mode, remote environments, JSONL storage.
+Not in this version: code mode, remote environments, JSONL storage.

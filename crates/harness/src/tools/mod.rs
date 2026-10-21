@@ -27,6 +27,8 @@ use serde::de::DeserializeOwned;
 
 pub use bash::{BashExecution, BashOptions, BashPrepare, BashTool};
 pub use edit::EditTool;
+#[cfg(feature = "images")]
+pub use image::ImageCrateProcessor;
 pub use image::{
     DEFAULT_IMAGE_LIMITS, Dimensions, INLINE_IMAGE_TYPES, ImageLimits, ImageProcessor, PreparedImage, base64_len,
     detect_image_type, image_dimensions, is_inline,

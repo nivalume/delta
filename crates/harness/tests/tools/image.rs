@@ -267,3 +267,35 @@ fn the_description_names_bmp_only_with_a_processor() {
             .contains("(jpg, png, gif, webp, bmp)")
     );
 }
+
+/// The `image` crate's processor through `read`: a BMP arrives as PNG.
+#[cfg(feature = "images")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_image_crate_processor_converts_a_bmp() {
+    use delta_harness::tools::ImageCrateProcessor;
+
+    let options = CodingToolsOptions {
+        bash: BashOptions::default(),
+        read: ReadOptions {
+            image_processor: Some(Arc::new(ImageCrateProcessor)),
+        },
+    };
+    let workspace = Workspace::open(Backend::Memory, options, None).await;
+    vision(&workspace, &serde_json::json!({}));
+    // A 2 × 2 24-bit BMP: headers, then two rows of 6 pixel bytes padded to 8.
+    let mut bytes = bmp();
+    bytes.truncate(54);
+    bytes.extend_from_slice(&[0, 0, 255, 0, 255, 0, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0]);
+    workspace.write("pic.bmp", &bytes);
+    let called = workspace.call("read", serde_json::json!({ "path": "pic.bmp" })).await;
+    assert!(!called.message.is_error, "{:?}", called.diagnostics);
+    let [UserBlock::Image(image), ..] = called.message.content.as_slice() else {
+        panic!("an image item")
+    };
+    assert_eq!(image.mime_type, "image/png");
+    assert_eq!(
+        called.diagnostic("image").message,
+        "Read image file [image/png]. Converted from image/bmp to image/png."
+    );
+    workspace.close().await;
+}

@@ -29,6 +29,8 @@ getrandom = "0.4"
 google-cloud-aiplatform-v1 = { version = "1.17", default-features = false, features = ["prediction-service"] }
 google-cloud-auth = "1.17"
 http = "1.5"
+# The optional image processor of delta-harness (`images`): decoders and encoders only.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 indexmap = { version = "2.14", features = ["serde"] }
 jsonschema = { version = "0.59", default-features = false }
 schemars = "1.2"

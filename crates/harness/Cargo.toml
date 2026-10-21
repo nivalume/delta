@@ -21,6 +21,8 @@ name = "delta_harness"
 default = ["schemars"]
 # Typed tools: parameter schemas generated from Rust types.
 schemars = ["dep:schemars"]
+# `ImageCrateProcessor`: resizing and converting images `read` sends.
+images = ["dep:image"]
 
 [dependencies]
 # The base64 of images `read` sends.
@@ -28,6 +30,7 @@ base64.workspace = true
 delta-ai.workspace = true
 delta-chord = { workspace = true, features = ["sqlite"] }
 futures.workspace = true
+image = { workspace = true, optional = true }
 indexmap.workspace = true
 # Structured tool output against its declared schema.
 jsonschema.workspace = true

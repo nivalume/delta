@@ -3,6 +3,8 @@
 
 mod detect;
 mod dimensions;
+#[cfg(feature = "images")]
+mod processor;
 
 use std::fmt;
 
@@ -13,6 +15,8 @@ use futures::future::BoxFuture;
 pub(super) use detect::detect;
 pub use detect::detect_image_type;
 pub use dimensions::image_dimensions;
+#[cfg(feature = "images")]
+pub use processor::ImageCrateProcessor;
 
 /// Formats every provider takes inline; others (BMP) need converting.
 pub const INLINE_IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -82,7 +86,7 @@ pub struct PreparedImage {
 
 /// Decodes, orients, resizes and re-encodes images so the model can take them. `read` uses
 /// one when given; without one, it passes inline images within the limits through as they
-/// are.
+/// are. `ImageCrateProcessor` (feature `images`) is one.
 pub trait ImageProcessor: Send + Sync + fmt::Debug {
     /// The image prepared to fit `limits`, or `None` when it cannot be decoded or made to fit.
     fn prepare<'a>(
