@@ -217,15 +217,10 @@ and asks nobody.
 The seam is the policy trait plus the request, decision and grant records. What comes
 later plugs into it without changing the tool task:
 
-- **Rules and modes.** A `RulesPolicy` reads a per-conversation `delta.permissions`
-  document (`mode`, and rules `Tool(specifier)` evaluated deny, then ask, then allow,
-  first match wins, as Claude Code) and a harness-wide default. Permission modes are
-  policies over the same rules (`default`, `accept_edits`, `plan`, `dont_ask`,
-  `bypass`), selected per conversation like Codex's per-turn policy record.
-- **Amendments.** Codex's `ApprovedExecpolicyAmendment` (and its network policy
-  amendment) lets a decision add a rule. delta adds a `ReviewDecision` variant carrying
-  the rule; the deciding commit writes it into `delta.permissions` with the decision, so
-  the rule and the decision that created it are one durable fact.
+- **Rules and modes.** Done in [permissions.md](permissions.md): `RulesPolicy` over a
+  per-conversation `delta.permissions` document, Claude Code's `Tool(specifier)` rules and
+  modes, and `ReviewDecision::ApprovedWithRule`, whose rule the deciding commit writes into
+  the session's `delta.permission_rules`.
 - **Hook bridge.** A command / HTTP hook speaking Claude Code's `PermissionRequest`
   protocol is an `ApprovalPolicy`; `PreToolUse` and `PostToolUse` map to `before_tool`
   and `after_tool` ([tool.md](tool.md)).

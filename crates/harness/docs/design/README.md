@@ -25,7 +25,8 @@ scoped this crate is [docs/research/harnesses.md](../../../../docs/research/harn
 | [context.md](context.md) | `context`, `prompt` | Model context from entries, head markers and edits, positional system sections, prompt-cache stability |
 | [generation.md](generation.md) | `generation`, `usage` | The `delta.generation` task: prepare, request, retry, poll, tool rounds, handover, usage |
 | [tool.md](tool.md) | `tool` | The `delta.tool` task: validation, hooks, approval, execution with output windows, results, nested calls, replay safety |
-| [approval.md](approval.md) | `approval` | The approval seam: policy, request and decision records, timeout, later rules and modes |
+| [approval.md](approval.md) | `approval` | The approval seam: policy, request and decision records, timeout |
+| [permissions.md](permissions.md) | `approval` | Permission rules and modes: `RulesPolicy`, `delta.permissions`, rules added by approvals |
 | [compaction.md](compaction.md) | `compaction` | The `delta.compaction` task: thresholds, range selection, overflow retry, stale summaries |
 | [observe.md](observe.md) | `observe` | Conversation view, agent events derived from ops, task graph |
 | [env.md](env.md) | `env` | `ExecutionEnv`: file system and shell, the local implementation |
@@ -163,7 +164,7 @@ Rules:
 | --- | --- |
 | Kernel | pi-durable's model (storage-first commits, task state machines, documents, inbox, ownership tree), not pi-coding-agent's in-memory loop |
 | Compatibility with pi | None for the harness's own records and storage: kinds, record JSON and the SQLite schema are delta's. Messages inside entries are `delta_ai` types, which keep upstream's shape |
-| Namespace | Built-in entry, document and task kinds start with `delta.` (`delta.user`, `delta.assistant`, `delta.tool-result`, `delta.system`, `delta.reset`, `delta.compaction`, `delta.approval`; documents `delta.agent`, `delta.provider`, `delta.live`, `delta.inbox`, `delta.usage`, `delta.approvals`; tasks `delta.generation`, `delta.tool`, `delta.compaction`, each at version 1) |
+| Namespace | Built-in entry, document and task kinds start with `delta.` (`delta.user`, `delta.assistant`, `delta.tool-result`, `delta.system`, `delta.reset`, `delta.compaction`, `delta.approval`; documents `delta.agent`, `delta.provider`, `delta.live`, `delta.inbox`, `delta.usage`, `delta.approvals`, `delta.permissions`, `delta.permission_rules`; tasks `delta.generation`, `delta.tool`, `delta.compaction`, each at version 1) |
 | Phase 1 scope | Kernel, built-in tools and a local execution env. Deferred: code mode, remote env, JSONL storage, telemetry, Durable Object hosting |
 | The session line | One tokio task owns the session state. `commit` sends a closure that receives `&mut Tx`; a document that is not loaded is read through `tx`, so a read inside a commit cannot hang |
 | Documents | `tx.doc::<D>()` borrows the `Tx` and returns a draft over `delta_chord::delta::Change` (one document edited at a time); prepared ops become `base` or `delta` writes under `checkpoint_when`; observers get a read-only `DocumentState` over a `delta_chord::State` |
@@ -176,6 +177,7 @@ Rules:
 | Ids | Newtypes over `u64` |
 | `delta_ai` additions | `is_context_overflow`, `is_retryable_assistant_error`, `retry_delay`, `to_tool_declaration`, as upstream has them in pi-ai |
 | SQLite types | `delta_chord::sqlite` re-exports `rusqlite` |
+| Permissions | `RulesPolicy`: Claude Code's `Tool(specifier)` rules (deny > ask > allow) and modes (`default`, `accept_edits`, `plan`, `dont_ask`, `bypass`) from a per-conversation `delta.permissions` document; `ApprovedWithRule` adds an allow rule harness-wide in the deciding commit ([permissions.md](permissions.md)) |
 | Images in `read` | Upstream's pass-through within the model's limits, an `ImageProcessor` seam, and an optional `image`-crate processor behind the `images` feature ([tools.md](tools.md)) |
 | Env `watch` and `list_files` | Optional methods that return `not_supported` until `notify` / `ignore` are dependencies |
 | Cancellation | `delta_chord::context::Context` wherever upstream passes a chord `Context` |
@@ -186,8 +188,6 @@ Rules:
 
 Seams kept visible for work after phase 1, in the order the survey suggests:
 
-- A rules engine and permission modes over the approval seam (deny > ask > allow, rules
-  that approvals can amend, a per-turn policy record as Codex's).
 - A command / HTTP hook bridge speaking the Claude Code hook protocol.
 - A protocol crate for UIs (thread / turn / item lifecycle, approval requests) derived from
   agent events and submissions.
