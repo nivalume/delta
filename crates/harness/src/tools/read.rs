@@ -14,9 +14,11 @@ use serde::Deserialize;
 use super::image::{ImageLimits, ImageProcessor, base64_len, detect as detect_image, image_dimensions, is_inline};
 use super::paths::resolve_read_path;
 use super::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Limit, Totals, format_size, truncate_head_of};
-use super::{js_number, parse, require_env};
-use crate::env::{BinaryReader, FileInfo, FileResult, LineScan, OpenOptions, Utf8Decoder};
-use crate::tool::{HarnessTool, Severity, ToolApi, ToolDiagnostic, ToolError, ToolExecutionResult};
+use super::{js_number, parse, path_subject, require_env};
+use crate::env::{BinaryReader, ExecutionEnv, FileInfo, FileResult, LineScan, OpenOptions, Utf8Decoder};
+use crate::tool::{
+    HarnessTool, PathAccess, PermissionSubject, Severity, ToolApi, ToolDiagnostic, ToolError, ToolExecutionResult,
+};
 
 /// Bytes read per call while reading the head of the selection.
 const READ_CHUNK: usize = 64 * 1024;
@@ -95,6 +97,10 @@ struct ReadArguments {
 impl HarnessTool for ReadTool {
     fn definition(&self) -> &Tool {
         &self.definition
+    }
+
+    fn permission_subject(&self, arguments: &JsonObject, env: Option<&dyn ExecutionEnv>) -> Option<PermissionSubject> {
+        path_subject(arguments, env, PathAccess::Read)
     }
 
     fn execute<'a>(

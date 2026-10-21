@@ -9,6 +9,7 @@ use delta_chord::json::{self, Json};
 use serde::{Deserialize, Serialize};
 
 use super::APPROVAL_ENTRY;
+use super::permissions::edit_permission_rules;
 use crate::documents::{CheckpointInfo, ConversationScope, DocAddress, DocDefinition, ForkInitial, Latest};
 use crate::inbox::{QueueModes, SubmissionDraft, SubmitError, admit_submission};
 use crate::records::{ConversationId, EntryDraft, TaskId};
@@ -40,6 +41,11 @@ pub enum ReviewDecision {
     TimedOut,
     /// Aborts the conversation's run.
     Abort,
+    /// Approved, and `rule` joins the session's allow rules (`delta.permission_rules`) in
+    /// the deciding commit.
+    ApprovedWithRule {
+        rule: String,
+    },
 }
 
 /// One pending request.
@@ -54,6 +60,9 @@ pub struct ApprovalRequest {
     pub approval_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// The rule a UI offers to always allow such calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_rule: Option<String>,
     pub requested_at: i64,
     /// Harness clock, epoch ms; also in the task's checkpoint.
     pub deadline: i64,
@@ -151,9 +160,10 @@ pub enum Recorded {
 }
 
 /// Writes `decision` into the pending request `id`: the request's `decision`, a grant for
-/// `ApprovedForSession` when the request has an approval key, and the display-only
-/// `delta.approval` entry, admitted once under request id `approval:<id>`. Admission comes
-/// first, before any table write of the commit.
+/// `ApprovedForSession` when the request has an approval key, the rule of
+/// `ApprovedWithRule` in the session's allow rules, and the display-only `delta.approval`
+/// entry, admitted once under request id `approval:<id>`. Admission comes first, before
+/// any table write of the commit.
 pub async fn record_decision(
     tx: &mut Tx<'_>,
     conversation: ConversationId,
@@ -191,6 +201,15 @@ pub async fn record_decision(
         }),
         _ => None,
     };
+    if let ReviewDecision::ApprovedWithRule { rule } = &decision {
+        let rule = rule.trim().to_owned();
+        edit_permission_rules(tx, |rules| {
+            if !rules.allow.contains(&rule) {
+                rules.allow.push(rule);
+            }
+        })
+        .await?;
+    }
     edit_approvals(tx, conversation, |state| {
         if let Some(request) = state.requests.iter_mut().find(|request| request.id == id) {
             request.decision = Some(decision);

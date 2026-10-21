@@ -10,6 +10,7 @@
 
 mod document;
 mod pending;
+mod permissions;
 mod policy;
 pub mod rules;
 
@@ -18,6 +19,10 @@ pub use document::{
     approvals_state, edit_approvals, record_decision, remove_request,
 };
 pub use pending::{ApprovalWaiter, PendingApprovals, RunAbort};
+pub use permissions::{
+    PermissionDefaults, PermissionMode, PermissionRules, PermissionRulesDoc, PermissionsChange, PermissionsDoc,
+    PermissionsState, RulesPolicy, create_permissions, edit_permission_rules, edit_permissions,
+};
 pub use policy::{AllowAll, ApprovalCall, ApprovalPolicy, AskAll, DenyAll, PolicyDecision, PolicyError};
 
 /// The entry kind of a decision: display-only, the audit record observers see.
@@ -36,6 +41,9 @@ pub enum ApprovalError {
     /// `TimedOut` is the harness's own decision.
     #[error("A caller cannot decide {0}: only the harness times out")]
     InvalidDecision(&'static str),
+    /// A rule (of `ApprovedWithRule`, or a permissions change) that does not parse.
+    #[error(transparent)]
+    InvalidRule(#[from] rules::RuleError),
 }
 
 impl ApprovalError {

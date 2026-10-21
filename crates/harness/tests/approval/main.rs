@@ -59,6 +59,7 @@ impl ApprovalPolicy for AskEcho {
             PolicyDecision::Ask {
                 timeout: self.0,
                 prompt: Some(format!("Run echo {:?}?", call.call.call.arguments)),
+                proposed_rule: None,
             }
         } else {
             PolicyDecision::Allow

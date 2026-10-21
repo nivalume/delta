@@ -7,6 +7,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use crate::agent::{AgentChange, configure, create_agent};
+use crate::approval::create_permissions;
 use crate::documents::DocAddress;
 use crate::generation::{LiveDoc, ProviderDoc};
 use crate::inbox::InboxDoc;
@@ -108,7 +109,8 @@ pub(super) async fn create(
 }
 
 /// The built-in creation hook: empty `delta.live`, `delta.inbox` and `delta.usage`, a fresh
-/// `delta.provider`, the conversation's `delta.agent`, then the host's hook.
+/// `delta.provider`, the conversation's `delta.agent` (and its owner's `delta.permissions`),
+/// then the host's hook.
 pub(super) struct CreationHook {
     pub(super) host: Option<Arc<dyn ConversationHook>>,
 }
@@ -126,6 +128,7 @@ impl ConversationHook for CreationHook {
             tx.doc(DocAddress::<UsageDoc>::new(id)).await?;
             tx.doc(DocAddress::<ProviderDoc>::new(id)).await?;
             create_agent(tx, record).await?;
+            create_permissions(tx, record).await?;
             if let Some(host) = &self.host {
                 host.conversation_created(tx, record).await?;
             }

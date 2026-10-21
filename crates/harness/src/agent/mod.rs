@@ -126,7 +126,7 @@ pub enum Change<T> {
 }
 
 impl<T> Change<T> {
-    fn apply(self, field: &mut Option<T>) {
+    pub(crate) fn apply(self, field: &mut Option<T>) {
         match self {
             Self::Keep => {}
             Self::Clear => *field = None,

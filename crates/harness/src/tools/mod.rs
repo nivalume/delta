@@ -43,7 +43,7 @@ pub use write::WriteTool;
 
 use crate::env::ExecutionEnv;
 use crate::registry::Extension;
-use crate::tool::{ToolApi, ToolError};
+use crate::tool::{PathAccess, PermissionSubject, ToolApi, ToolError};
 
 /// The name of the [`coding_tools`] extension.
 pub const CODING_TOOLS: &str = "coding-tools";
@@ -80,6 +80,21 @@ fn require_env<'a>(api: &'a ToolApi<'_>) -> Result<&'a dyn ExecutionEnv, ToolErr
     api.env()
         .map(|env| &**env)
         .ok_or_else(|| "No execution environment is configured".into())
+}
+
+/// The subject of a call on the file `arguments.path`: absolute through `env`, or as
+/// written when it is absolute already.
+fn path_subject(
+    arguments: &JsonObject,
+    env: Option<&dyn ExecutionEnv>,
+    access: PathAccess,
+) -> Option<PermissionSubject> {
+    let path = arguments.get("path")?.as_str()?;
+    let path = match env {
+        Some(env) => resolve_tool_path(env, path).ok()?,
+        None => Some(normalize_tool_path(path)).filter(|path| path.starts_with('/'))?,
+    };
+    Some(PermissionSubject::Path { path, access })
 }
 
 /// The validated arguments as the tool's type.

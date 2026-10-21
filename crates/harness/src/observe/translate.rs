@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use super::events::{AgentEvent, MessageChange, OutputChange, QueuedItem, Snapshot, ToolEventCall};
 use super::view::{ConversationView, Revision};
 use crate::agent::{AgentDoc, AgentState};
-use crate::approval::{ApprovalsDoc, ApprovalsState};
+use crate::approval::{ApprovalsDoc, ApprovalsState, PermissionsDoc, PermissionsState};
 use crate::documents::DocDefinition;
 use crate::generation::{
     ASSISTANT_ENTRY, GENERATION_TASK, LiveDoc, LiveState, NestedToolSlot, SlotProgress, SlotStatus, ToolSlot,
@@ -32,6 +32,7 @@ struct Docs {
     agent: Option<Json>,
     usage: Option<Json>,
     approvals: ApprovalsState,
+    permissions: Option<Json>,
 }
 
 /// A mounted document of `view`.
@@ -52,6 +53,7 @@ impl Docs {
             agent: doc(view, AgentDoc::KIND),
             usage: doc(view, UsageDoc::KIND),
             approvals: typed(doc(view, ApprovalsDoc::KIND).as_ref()),
+            permissions: doc(view, PermissionsDoc::KIND),
         }
     }
 }
@@ -75,6 +77,7 @@ pub(crate) fn snapshot(view: &Json) -> Snapshot {
         agent: typed(docs.agent.as_ref()),
         usage: typed(docs.usage.as_ref()),
         approvals: pending_requests(&docs.approvals),
+        permissions: typed(docs.permissions.as_ref()),
     }
 }
 
@@ -418,6 +421,10 @@ impl Translator {
             out.push(AgentEvent::ApprovalUpdate {
                 requests: pending_requests(&after.approvals),
             });
+        }
+        if before.permissions != after.permissions {
+            let permissions: PermissionsState = typed(after.permissions.as_ref());
+            out.push(AgentEvent::PermissionsChanged { permissions });
         }
 
         // Starts.

@@ -7,8 +7,9 @@ use serde::Deserialize;
 
 use super::mutation::FileMutationQueue;
 use super::paths::resolve_tool_path;
-use super::{check_aborted, parse, require_env};
-use crate::tool::{HarnessTool, ToolApi, ToolError, ToolExecutionResult};
+use super::{check_aborted, parse, path_subject, require_env};
+use crate::env::ExecutionEnv;
+use crate::tool::{HarnessTool, PathAccess, PermissionSubject, ToolApi, ToolError, ToolExecutionResult};
 
 /// The `write` tool; its mutations of a file wait for the queue's earlier ones.
 #[derive(Debug)]
@@ -44,6 +45,10 @@ struct WriteArguments {
 impl HarnessTool for WriteTool {
     fn definition(&self) -> &Tool {
         &self.definition
+    }
+
+    fn permission_subject(&self, arguments: &JsonObject, env: Option<&dyn ExecutionEnv>) -> Option<PermissionSubject> {
+        path_subject(arguments, env, PathAccess::Write)
     }
 
     fn execute<'a>(

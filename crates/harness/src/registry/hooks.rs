@@ -14,9 +14,11 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::documents::{DocAddress, DocDefinition};
 use crate::model::ModelClient;
 use crate::records::{ConversationId, EntryId, TaskId};
 use crate::scheduler::{RuntimeError, TaskDefinition, TaskRuntime};
+use crate::session::Session;
 
 /// An ordinary hook failure: reported, and the next handler runs.
 pub type HookError = Box<dyn StdError + Send + Sync>;
@@ -77,6 +79,9 @@ pub trait HookHost: Send + Sync {
         candidate: Json,
         ctx: &'a Context,
     ) -> BoxFuture<'a, Result<Json, RuntimeError>>;
+
+    /// The Session, for committed document reads; refused once the invocation ended.
+    fn session(&self) -> Result<&Session, RuntimeError>;
 }
 
 impl<T: TaskDefinition> HookHost for TaskRuntime<T> {
@@ -91,6 +96,10 @@ impl<T: TaskDefinition> HookHost for TaskRuntime<T> {
         ctx: &'a Context,
     ) -> BoxFuture<'a, Result<Json, RuntimeError>> {
         Box::pin(self.memo_or_insert(name, candidate, ctx))
+    }
+
+    fn session(&self) -> Result<&Session, RuntimeError> {
+        self.checked_session()
     }
 }
 
@@ -131,6 +140,15 @@ impl<'a> HookApi<'a> {
             .map(|value| json::from_json(&value))
             .transpose()
             .map_err(RuntimeError::Codec)
+    }
+
+    /// The current value of a committed document.
+    pub async fn snapshot<D: DocDefinition>(
+        &self,
+        at: DocAddress<D>,
+        ctx: &Context,
+    ) -> Result<Option<Json>, RuntimeError> {
+        Ok(self.host.session()?.snapshot(at, ctx).await?)
     }
 
     /// The memo `name`, inserting `candidate` when there is none; returns the winner.

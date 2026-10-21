@@ -15,6 +15,7 @@ mod conversation;
 mod creation;
 mod error;
 mod observe;
+mod permissions;
 mod submission;
 
 use std::fmt;

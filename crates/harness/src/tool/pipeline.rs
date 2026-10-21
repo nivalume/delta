@@ -14,11 +14,12 @@ use super::settle::{Settlement, settle};
 use super::task::{Rt, ToolTask};
 use super::validate;
 use super::{approval, execute};
-use crate::agent::{Agent, AgentRuntime, HookRuntime};
+use crate::agent::{Agent, AgentError, AgentRuntime, HookRuntime, report_host};
 use crate::approval::{ApprovalCall, ApprovalId, PolicyDecision, remove_request};
 use crate::generation::{SlotStatus, edit_live};
 use crate::registry::BeforeTool;
 use crate::scheduler::{Next, NextState, TaskError};
+use crate::session::HostCallback;
 
 /// A hook's ordinary failure is reported; one after the invocation's context was cancelled
 /// stops the phase.
@@ -192,17 +193,39 @@ async fn policy(
 ) -> Result<Verdict, TaskError> {
     let policy = rt.agent_services()?.approval().clone();
     let api = rt.hook_api()?;
+    // The environment makes the subject's paths absolute; without one the policy decides on
+    // what the call names.
+    let env = match rt.env(ctx).await {
+        Ok(env) => env,
+        Err(AgentError::Cancelled(cancelled)) => return Err(cancelled.into()),
+        Err(error) => {
+            report_host(rt, &error, HostCallback::Env);
+            None
+        }
+    };
     let request = ApprovalCall {
         conversation_id: rt.conversation_id(),
         task_id: rt.task_id(),
         call,
         tool,
-        cwd: agent.cwd.as_deref(),
+        subject: tool.permission_subject(&call.call.arguments, env.as_deref()),
+        cwd: match env.as_deref() {
+            Some(env) => Some(env.cwd()),
+            None => agent.cwd.as_deref(),
+        },
     };
     match policy.decide(&request, &api, ctx).await {
         Ok(PolicyDecision::Allow) => Ok(Verdict::Allow),
         Ok(PolicyDecision::Deny { reason }) => Ok(Verdict::Block(format!("approval denied: {reason}"))),
-        Ok(PolicyDecision::Ask { timeout, prompt }) => Ok(Verdict::Ask(approval::Ask { timeout, prompt })),
+        Ok(PolicyDecision::Ask {
+            timeout,
+            prompt,
+            proposed_rule,
+        }) => Ok(Verdict::Ask(approval::Ask {
+            timeout,
+            prompt,
+            proposed_rule,
+        })),
         Err(error) => {
             if let Some(reason) = ctx.reason() {
                 return Err(Cancelled { reason }.into());

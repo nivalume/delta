@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentDoc;
-use crate::approval::ApprovalsDoc;
+use crate::approval::{ApprovalsDoc, PermissionsDoc};
 use crate::documents::{DocAddress, DocDefinition};
 use crate::generation::{LiveDoc, ProviderDoc};
 use crate::inbox::InboxDoc;
@@ -28,13 +28,14 @@ use crate::usage::UsageDoc;
 const PAGE: usize = 256;
 
 /// The documents a view mounts, by kind.
-pub const MOUNTED_DOCUMENTS: [&str; 6] = [
+pub const MOUNTED_DOCUMENTS: [&str; 7] = [
     AgentDoc::KIND,
     LiveDoc::KIND,
     InboxDoc::KIND,
     ProviderDoc::KIND,
     UsageDoc::KIND,
     ApprovalsDoc::KIND,
+    PermissionsDoc::KIND,
 ];
 
 /// The value of a conversation view.
@@ -273,6 +274,7 @@ pub(crate) async fn read_view(tx: &mut Tx<'_>, conversation: ConversationId) -> 
     peek!(ProviderDoc);
     peek!(UsageDoc);
     peek!(ApprovalsDoc);
+    peek!(PermissionsDoc);
     let view = ConversationView {
         conversation: record,
         entries: active,

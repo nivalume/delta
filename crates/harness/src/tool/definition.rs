@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use super::api::ToolApi;
 use super::result::ToolExecutionResult;
+use crate::env::ExecutionEnv;
 
 /// An error a tool returns: the call ends `failed` with a `tool_error` result.
 pub type ToolError = Box<dyn StdError + Send + Sync + 'static>;
@@ -130,6 +131,13 @@ pub trait HarnessTool: Send + Sync {
     /// Repairs commonly malformed arguments before validation; an error makes them invalid.
     fn prepare_arguments(&self, arguments: JsonObject) -> Result<JsonObject, ToolError> {
         Ok(arguments)
+    }
+
+    /// What permission rules match the call on: a command, or a path it reads or writes,
+    /// made absolute with `env` when there is one. `None`: only rules naming the tool.
+    fn permission_subject(&self, arguments: &JsonObject, env: Option<&dyn ExecutionEnv>) -> Option<PermissionSubject> {
+        let _ = (arguments, env);
+        None
     }
 
     /// The key a session approval grant matches; `None`: never granted for the session.

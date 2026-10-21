@@ -27,7 +27,7 @@ use super::transition::commit_state;
 use super::waits::{self, SettledTask};
 use crate::documents::{ConversationDoc, DocAddress, DocDefinition, Rewindable};
 use crate::records::{ConversationId, EntryId, EntryRecord, TaskId, TaskOutcome, TaskRecord, TaskState, TaskStatus};
-use crate::session::{HostCallback, ReportInfo, ReportTask, Services, TransactionScope, Tx, TxError};
+use crate::session::{HostCallback, ReportInfo, ReportTask, Services, Session, TransactionScope, Tx, TxError};
 
 /// What every runtime of one phase shares: the scheduler, the invocation, the phase's
 /// catalog snapshot and its per-phase data.
@@ -375,6 +375,12 @@ impl<T: TaskDefinition> TaskRuntime<T> {
         self.core
             .read(ctx, move |tx| Box::pin(async move { tx.entry(id).await }))
             .await
+    }
+
+    /// The Session, while the invocation lasts.
+    pub fn checked_session(&self) -> Result<&Session, RuntimeError> {
+        self.core.check()?;
+        Ok(&self.core.inner.session)
     }
 
     /// The current value of a committed document.

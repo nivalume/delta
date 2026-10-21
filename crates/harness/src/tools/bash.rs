@@ -14,9 +14,10 @@ use serde_json::Value;
 
 use super::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
 use super::{js_number, parse, require_env};
-use crate::env::{Command, ExecErrorCode, ExecOptions, MAX_TIMEOUT, OutputChunk, SpillOptions};
+use crate::env::{Command, ExecErrorCode, ExecOptions, ExecutionEnv, MAX_TIMEOUT, OutputChunk, SpillOptions};
 use crate::tool::{
-    DEFAULT_OUTPUT_LIMITS, HarnessTool, Severity, ToolApi, ToolDiagnostic, ToolError, ToolExecutionResult,
+    DEFAULT_OUTPUT_LIMITS, HarnessTool, PermissionSubject, Severity, ToolApi, ToolDiagnostic, ToolError,
+    ToolExecutionResult,
 };
 
 /// A command about to run, which [`BashPrepare`] may change.
@@ -135,6 +136,13 @@ impl HarnessTool for BashTool {
 
     fn structured_output_schema(&self) -> Option<&Value> {
         Some(&self.structured_output)
+    }
+
+    fn permission_subject(&self, arguments: &JsonObject, _env: Option<&dyn ExecutionEnv>) -> Option<PermissionSubject> {
+        let command = arguments.get("command")?.as_str()?;
+        Some(PermissionSubject::Command {
+            command: command.to_owned(),
+        })
     }
 
     fn execute<'a>(

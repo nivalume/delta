@@ -11,9 +11,9 @@ use super::edit_diff::{
 };
 use super::mutation::FileMutationQueue;
 use super::paths::resolve_tool_path;
-use super::{check_aborted, parse, require_env};
+use super::{check_aborted, parse, path_subject, require_env};
 use crate::env::{ExecutionEnv, FileError, FileKind};
-use crate::tool::{HarnessTool, ToolApi, ToolError, ToolExecutionResult};
+use crate::tool::{HarnessTool, PathAccess, PermissionSubject, ToolApi, ToolError, ToolExecutionResult};
 
 /// The `edit` tool. Details: `{ diff, patch, firstChangedLine? }`. Its mutations of a file
 /// wait for the queue's earlier ones.
@@ -105,6 +105,10 @@ impl HarnessTool for EditTool {
 
     fn prepare_arguments(&self, arguments: JsonObject) -> Result<JsonObject, ToolError> {
         Ok(prepare_edit_arguments(arguments))
+    }
+
+    fn permission_subject(&self, arguments: &JsonObject, env: Option<&dyn ExecutionEnv>) -> Option<PermissionSubject> {
+        path_subject(arguments, env, PathAccess::Write)
     }
 
     fn execute<'a>(

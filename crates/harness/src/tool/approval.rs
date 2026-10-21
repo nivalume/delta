@@ -29,6 +29,7 @@ use crate::session::TxError;
 pub(super) struct Ask {
     pub(super) timeout: Option<Duration>,
     pub(super) prompt: Option<String>,
+    pub(super) proposed_rule: Option<String>,
 }
 
 /// The committed `delta.approvals` of the task's conversation.
@@ -69,6 +70,7 @@ pub(super) async fn ask(
         arguments: arguments.clone(),
         approval_key: key,
         prompt: ask.prompt,
+        proposed_rule: ask.proposed_rule,
         requested_at: now,
         deadline,
         decision: None,
@@ -179,7 +181,7 @@ async fn consume(
         )
     };
     match decision {
-        ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {
+        ReviewDecision::Approved | ReviewDecision::ApprovedForSession | ReviewDecision::ApprovedWithRule { .. } => {
             let agent = rt.agent(ctx).await?;
             let Some(tool) = resolve(&agent, rt.input(), &stored.name) else {
                 let message = format!("Tool {} is not available", stored.name);

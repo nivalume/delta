@@ -160,7 +160,13 @@ harness.close(&ctx).await?;
 ```
 
 `ReviewDecision::ApprovedForSession` also grants every later call with the same approval
-key (by default the call's canonical arguments). A decision committed while no process
+key (by default the call's canonical arguments).
+
+`RulesPolicy` is the policy for a coding agent: Claude Code's `Tool(specifier)` rules
+(`Bash(cargo test:*)`, `Read(./.env)`, `Edit(src/**)`; deny > ask > allow) and modes
+(`default`, `accept_edits`, `plan`, `dont_ask`, `bypass`), per conversation through
+`Conversation::update_permissions`. `ReviewDecision::ApprovedWithRule { rule }` approves a
+call and adds its proposed rule for every conversation. A decision committed while no process
 runs is read by the call when the storage is reopened; a request with no answer ends
 `blocked` at its stored deadline.
 
@@ -186,7 +192,7 @@ traits, so an extension can do anything a built-in does.
 | `TaskDefinition` | Other durable work, with its own checkpoints and phases |
 | `DocDefinition` | Other durable state in a conversation |
 | `GenerationHooks`, `ToolHooks`, `CompactionHooks` | Changing requests, calls, results and compaction |
-| `ApprovalPolicy` | Permission rules |
+| `ApprovalPolicy` | Permission rules (`RulesPolicy` is the built-in one) |
 | `ModelClient` | Model access; `ModelsClient` wraps `delta_ai::Models` |
 | `EnvBuilder`, `ExecutionEnv` | Where tools run; `LocalEnvBuilder` and `LocalEnv` are the local ones |
 | `Storage` | Other backends |

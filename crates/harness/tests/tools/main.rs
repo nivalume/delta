@@ -26,6 +26,7 @@ mod bash;
 mod edit;
 mod image;
 mod mutation;
+mod permissions;
 mod read;
 mod write;
 

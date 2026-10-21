@@ -9,7 +9,7 @@ use futures::future::BoxFuture;
 
 use crate::records::{ConversationId, TaskId};
 use crate::registry::HookApi;
-use crate::tool::{HarnessTool, ToolHookCall};
+use crate::tool::{HarnessTool, PermissionSubject, ToolHookCall};
 
 /// A policy failure; the call is denied with its text (fail closed).
 pub type PolicyError = Box<dyn StdError + Send + Sync>;
@@ -21,6 +21,9 @@ pub struct ApprovalCall<'a> {
     /// The call with its final arguments.
     pub call: &'a ToolHookCall,
     pub tool: &'a dyn HarnessTool,
+    /// What permission rules match the call on (`HarnessTool::permission_subject`).
+    pub subject: Option<PermissionSubject>,
+    /// The call's working directory: its environment's, else the agent's.
     pub cwd: Option<&'a str>,
 }
 
@@ -30,6 +33,7 @@ impl fmt::Debug for ApprovalCall<'_> {
             .field("conversation_id", &self.conversation_id)
             .field("task_id", &self.task_id)
             .field("call", &self.call)
+            .field("subject", &self.subject)
             .field("cwd", &self.cwd)
             .finish_non_exhaustive()
     }
@@ -45,6 +49,8 @@ pub enum PolicyDecision {
     Ask {
         timeout: Option<Duration>,
         prompt: Option<String>,
+        /// The rule a UI offers to always allow such calls (`ApprovedWithRule`).
+        proposed_rule: Option<String>,
     },
 }
 
@@ -81,6 +87,7 @@ impl ApprovalPolicy for AskAll {
             Ok(PolicyDecision::Ask {
                 timeout: None,
                 prompt: None,
+                proposed_rule: None,
             })
         })
     }

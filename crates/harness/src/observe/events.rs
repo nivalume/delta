@@ -6,7 +6,7 @@ use delta_chord::json::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentState;
-use crate::approval::ApprovalRequest;
+use crate::approval::{ApprovalRequest, PermissionsState};
 use crate::compaction::{CompactionFailure, CompactionReason, CompactionStatus};
 use crate::generation::{LiveGeneration, NestedToolSlot, RunControl, ToolSlot};
 use crate::inbox::InboxItem;
@@ -132,6 +132,9 @@ pub struct Snapshot {
     pub agent: AgentState,
     pub usage: UsageState,
     pub approvals: Vec<ApprovalRequest>,
+    /// The conversation's `delta.permissions`.
+    #[serde(default)]
+    pub permissions: PermissionsState,
 }
 
 /// One event; a commit yields a batch of them, in upstream's order.
@@ -229,6 +232,10 @@ pub enum AgentEvent {
     ApprovalUpdate {
         requests: Vec<ApprovalRequest>,
     },
+    /// delta: the conversation's permission mode, rules or directories changed.
+    PermissionsChanged {
+        permissions: PermissionsState,
+    },
 }
 
 impl AgentEvent {
@@ -258,6 +265,7 @@ impl AgentEvent {
             Self::CompactionStart { .. } => "compaction_start",
             Self::CompactionEnd { .. } => "compaction_end",
             Self::ApprovalUpdate { .. } => "approval_update",
+            Self::PermissionsChanged { .. } => "permissions_changed",
         }
     }
 }

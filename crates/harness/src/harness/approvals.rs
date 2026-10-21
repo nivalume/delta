@@ -8,6 +8,7 @@ use delta_chord::context::Context;
 use futures::future::BoxFuture;
 
 use super::{Conversation, Harness, HarnessError, HarnessInner, SCAN_PAGE};
+use crate::approval::rules::Rule;
 use crate::approval::{
     ApprovalError, ApprovalId, ApprovalRequest, ApprovalsDoc, ApprovalsState, Recorded, ReviewDecision, RunAbort,
     record_decision,
@@ -36,13 +37,19 @@ impl RunAbort for SchedulerAbort {
 
 impl Conversation {
     /// Decides the pending approval request `id` of this conversation: one commit writes
-    /// the decision (and the `delta.approval` entry, and a session grant for
-    /// `ApprovedForSession`), then the waiting tool task is notified. A request that is not
-    /// waiting for a decision is [`ApprovalError::NotPending`]; `TimedOut` is the harness's
-    /// own. Asks for progress, so the decision is consumed.
+    /// the decision (and the `delta.approval` entry, a session grant for
+    /// `ApprovedForSession`, the rule of `ApprovedWithRule`), then the waiting tool task is
+    /// notified. A request that is not waiting for a decision is
+    /// [`ApprovalError::NotPending`]; `TimedOut` is the harness's own; a rule that does not
+    /// parse is [`ApprovalError::InvalidRule`]. Asks for progress, so the decision is
+    /// consumed.
     pub async fn decide(&self, id: ApprovalId, decision: ReviewDecision, ctx: &Context) -> Result<(), HarnessError> {
         if decision == ReviewDecision::TimedOut {
             return Err(HarnessError::Approval(ApprovalError::InvalidDecision("timed_out")));
+        }
+        if let ReviewDecision::ApprovedWithRule { rule } = &decision {
+            rule.parse::<Rule>()
+                .map_err(|error| HarnessError::Approval(error.into()))?;
         }
         self.inner.scheduler.resume()?;
         let conversation = self.id;
