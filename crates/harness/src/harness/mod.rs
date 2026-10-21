@@ -41,8 +41,8 @@ use crate::generation::{AgentSchedulerHooks, builtin_tasks};
 use crate::model::ModelClient;
 use crate::observe::{GraphMounts, ViewMounts};
 use crate::records::{
-    ConversationId, ConversationQuery, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionStatus, TaskId,
-    TaskRecord,
+    ConversationId, ConversationQuery, ConversationRecord, Cursor, Page, SubmissionId, SubmissionQuery,
+    SubmissionRecord, SubmissionStatus, TaskId, TaskRecord,
 };
 use crate::registry::Registry;
 use crate::scheduler::{
@@ -301,6 +301,18 @@ impl Harness {
             .commit(ctx, move |tx| Box::pin(async move { tx.conversation(id).await }))
             .await?;
         Ok(record.map(|record| Conversation::new(self.inner.clone(), record.id)))
+    }
+
+    /// A page of conversation records matching `query`, `limit` at a time; pass the page's
+    /// `next` as `cursor` for the following one.
+    pub async fn conversations(
+        &self,
+        query: ConversationQuery,
+        limit: usize,
+        cursor: Option<Cursor>,
+        ctx: &Context,
+    ) -> Result<Page<ConversationRecord>, HarnessError> {
+        Ok(self.inner.storage.scan_conversations(query, limit, cursor, ctx).await?)
     }
 
     /// A new conversation with its explicit ownership, agent change and `init`, in one
