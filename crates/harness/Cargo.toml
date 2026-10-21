@@ -23,12 +23,15 @@ default = ["schemars"]
 schemars = ["dep:schemars"]
 # `ImageCrateProcessor`: resizing and converting images `read` sends.
 images = ["dep:image"]
+# The `codemode` tool: scripts that call the conversation's tools (`delta-codemode`).
+codemode = ["dep:delta-codemode"]
 
 [dependencies]
 # The base64 of images `read` sends.
 base64.workspace = true
 delta-ai.workspace = true
 delta-chord = { workspace = true, features = ["sqlite"] }
+delta-codemode = { workspace = true, optional = true }
 futures.workspace = true
 image = { workspace = true, optional = true }
 indexmap.workspace = true
@@ -53,6 +56,11 @@ uuid = { workspace = true, features = ["v7"] }
 [dev-dependencies]
 pretty_assertions.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+[[test]]
+name = "codemode"
+path = "tests/codemode/main.rs"
+required-features = ["codemode"]
 
 [package.metadata.docs.rs]
 all-features = true

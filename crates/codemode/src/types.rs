@@ -100,8 +100,8 @@ pub struct During {
 }
 
 /// How a run ended. `output` and `calls` are kept for failed runs too; `exit()` succeeds with no
-/// value.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// value. The default is a successful run without output.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodemodeResult {
     /// `None`: it succeeded. The returned value is `value`.

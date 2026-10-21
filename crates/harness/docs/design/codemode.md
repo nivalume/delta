@@ -34,6 +34,11 @@ reruns them; their results come from `NestedCallDoc`. Then the script continues 
 description is fixed: the script environment and its globals. The `codemode` prompt section
 lists the callable tools (below).
 
+Host functions join as globals (`CodemodeOptions::with_global`, a `CodemodeGlobal`): a call
+of one is answered by the host and journaled with its outcome, so a replay resolves with the
+journaled outcome without calling it again. A tool call whose argument is not an object (or
+nothing) rejects without a nested call, the same way on every run.
+
 A tool resolves in the script as in the coding agent: one that declares a
 `structured_output_schema` resolves with its `structured_output`, also on an error result that
 carries one (`bash` with a nonzero exit resolves with `{ output, exitCode, … }`); a schema-less
@@ -71,8 +76,9 @@ with the next journal commit, or at once when the VM has processed everything de
 is launched only once the count of the drain that made it is committed, so every key an attempt
 admitted is at most its last recorded count.
 
-A run the sandbox ends as `aborted` without the call having asked for it decides nothing: the
-call stores no outcome and ends with its invocation, so a later attempt replays the script.
+An invocation that ends without an outcome (its context cancelled, the Harness closing) drops
+the call's future, which stops the VM and stores nothing, so a later attempt replays the
+script.
 
 ## Rerun
 
@@ -126,5 +132,11 @@ received generated images and showed none gets a note in its result.
 - Document kinds are `delta.codemode.*`; internal tools are `delta.codemode.models.*`.
 - The sandbox is a native QuickJS thread ([sandbox.md](../../../codemode/docs/design/sandbox.md)),
   so the fingerprint differs from upstream's and a run started under pi does not resume here.
-- The VM's call ids reach the host through a channel, so the host side is a single task that
-  owns the run's state instead of callbacks.
+- The VM's call ids reach the host through a channel, so the host side is one loop that owns
+  the run's state instead of callbacks. It awaits its commits inline, which gives one commit in
+  flight and nothing delivered before the fingerprint check without upstream's gate; results
+  that land together join one journal commit.
+- The sandbox cannot be closed apart from its call, so upstream's "aborted by the host" case
+  is the call's own cancellation, which stores nothing.
+- A tool call with arguments that are not an object rejects in the script, without a nested
+  call; upstream passes them on to fail validation.

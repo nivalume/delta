@@ -11,9 +11,10 @@ use std::path::{Path, PathBuf};
 const KERNEL: [&str; 5] = ["records", "documents", "storage", "session", "scheduler"];
 
 /// The agent layer's modules.
-const AGENT: [&str; 11] = [
+const AGENT: [&str; 12] = [
     "agent",
     "approval",
+    "codemode",
     "compaction",
     "context",
     "generation",

@@ -13,7 +13,8 @@
 //!   settings, the runtime of agent-layer tasks), [`inbox`], [`context`], [`prompt`],
 //!   [`generation`], [`usage`], [`model`] (the [`ModelClient`](model::ModelClient) seam),
 //!   [`tool`] (tools and the `delta.tool` task), [`approval`] (the policy, requests and
-//!   decisions), and [`compaction`] (thresholds and the `delta.compaction` task).
+//!   decisions), [`compaction`] (thresholds and the `delta.compaction` task), and, with the
+//!   `codemode` feature, `codemode` (scripts that call the conversation's tools).
 //! - kernel: [`records`], [`documents`], [`storage`], [`session`], [`scheduler`].
 //! - side: [`env`](mod@env), the execution environment and its local implementation, and
 //!   [`tools`], the built-in `read`, `write`, `edit` and `bash`.
@@ -24,6 +25,8 @@ struct ReadmeDoctests;
 
 pub mod agent;
 pub mod approval;
+#[cfg(feature = "codemode")]
+pub mod codemode;
 pub mod compaction;
 pub mod context;
 pub mod documents;

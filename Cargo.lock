@@ -1050,6 +1050,7 @@ dependencies = [
  "base64 0.23.1",
  "delta-ai",
  "delta-chord",
+ "delta-codemode",
  "futures",
  "image",
  "indexmap 2.14.2",
