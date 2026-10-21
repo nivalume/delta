@@ -21,6 +21,7 @@ macro_rules! cases {
     };
 }
 
+mod approval;
 mod bash;
 mod edit;
 mod mutation;
@@ -34,6 +35,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use delta_ai::types::{Message, ToolResultMessage, UserBlock};
 use delta_chord::json;
 use delta_harness::agent::LocalEnvBuilder;
+use delta_harness::approval::ApprovalPolicy;
 use delta_harness::harness::{Conversation, Harness};
 use delta_harness::inbox::SubmissionDraft;
 use delta_harness::tool::ToolDiagnostic;
@@ -106,11 +108,20 @@ impl Workspace {
     }
 
     async fn with_bash(backend: Backend, bash: BashOptions) -> Self {
+        Self::open(backend, bash, None).await
+    }
+
+    /// With `approval` as the Harness's policy instead of allowing every call.
+    async fn open(backend: Backend, bash: BashOptions, approval: Option<Arc<dyn ApprovalPolicy>>) -> Self {
         let dir = TempDir::new();
         let mut fixture = Fixture::new(backend).await;
         fixture.env = Some(Arc::new(LocalEnvBuilder::new(dir.path())));
         fixture.registry.install(coding_tools(bash)).unwrap();
-        let harness = fixture.open().await;
+        let mut options = fixture.options();
+        if let Some(approval) = approval {
+            options.approval = approval;
+        }
+        let harness = Harness::open(fixture.storage.clone(), options, &ctx()).await.unwrap();
         let conversation = chat(&harness).await;
         Self {
             fixture,

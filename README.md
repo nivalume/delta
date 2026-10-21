@@ -39,7 +39,7 @@ This workspace contains one crate per ported upstream package.
 | **[delta-ai](crates/ai)** | `delta_ai` | `@earendil-works/pi-ai` | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
 | **[delta-agent](crates/agent)** | `delta_agent` | `@earendil-works/pi-agent-core` | Agent runtime with tool calling and state management |
 | **[delta-chord](crates/chord)** | `delta_chord` | `@earendil-works/chord` (base library) | JSON revisions with op batches, replicated state, contexts, bounded output, SQLite helpers. Not published yet |
-| **[delta-harness](crates/harness)** | `delta_harness` | `@earendil-works/pi-durable` | Durable agent harness: storage-first conversations, resumable turns and tool calls. In design; see [docs/research/harnesses.md](docs/research/harnesses.md) |
+| **[delta-harness](crates/harness)** | `delta_harness` | `@earendil-works/pi-durable` | Durable agent harness: storage-first conversations, resumable turns and tool calls, durable approvals, built-in coding tools. Not published yet |
 
 Chord's host runtime (objects, links, hot reload) is not ported; see
 [docs/research/chord.md](docs/research/chord.md). Not ported yet: `@earendil-works/pi-telemetry`,

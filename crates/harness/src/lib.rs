@@ -18,6 +18,10 @@
 //! - side: [`env`](mod@env), the execution environment and its local implementation, and
 //!   [`tools`], the built-in `read`, `write`, `edit` and `bash`.
 
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod agent;
 pub mod approval;
 pub mod compaction;
