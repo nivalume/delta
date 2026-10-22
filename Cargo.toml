@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "examples/*"]
 
 [workspace.package]
 version = "1.0.0"
@@ -28,6 +28,12 @@ aws-smithy-http-client = { version = "1.5", default-features = false, features =
 aws-smithy-runtime-api = { version = "1.19", default-features = false, features = ["client", "http-1x"] }
 base64 = "0.23"
 bytes = "1.12"
+# Command lines of the examples.
+clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
+# Terminal control of the examples' interactive and TUI front ends.
+crossterm = "0.29"
+# The examples' per-user configuration directory.
+dirs = "7"
 futures = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }
 getrandom = "0.4"
 google-cloud-aiplatform-v1 = { version = "1.17", default-features = false, features = ["prediction-service"] }
@@ -37,15 +43,26 @@ http = "1.5"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 indexmap = { version = "2.14", features = ["serde"] }
 jsonschema = { version = "0.59", default-features = false }
+# Jinja templates of the mini-swe-agent example, whose configs are upstream's.
+minijinja = { version = "3", features = ["json", "loop_controls", "serde"] }
+# The mini-swe-agent example's trajectory inspector and batch progress.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 schemars = "1.2"
 # QuickJS for delta-codemode: no loader, no futures; the VM thread drives jobs itself.
 rquickjs = "0.14"
 rusqlite = { version = "0.40", features = ["bundled"] }
+# Line editing with history for the mini-swe-agent example's prompts. 19 needs Rust 1.95
+# (`cfg_select!`), above the MSRV.
+rustyline = { version = "18", default-features = false, features = ["with-file-history"] }
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 regex = "1.13"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "http2", "system-proxy", "charset"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
+# YAML configs of the mini-swe-agent example (upstream's format), in safe Rust; the parser's
+# events find a block scalar that ends the file.
+saphyr-parser = "0.0.6"
+serde-saphyr = "0.0"
 sha2 = "0.11"
 similar = "3.2"
 thiserror = "2.0"
@@ -61,6 +78,7 @@ uuid = { version = "1.28", features = ["v4"] }
 aws-smithy-eventstream = "0.61"
 google-cloud-gax = { version = "1.15", default-features = false }
 pretty_assertions = "1"
+tempfile = "3"
 tokio-test = "0.4"
 wiremock = "0.6"
 

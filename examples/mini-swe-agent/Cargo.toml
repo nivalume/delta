@@ -1,0 +1,53 @@
+[package]
+name = "delta-mini-swe-agent"
+description = "mini-swe-agent on delta-harness: the `mini` agent, its trajectories, the trajectory inspector and the SWE-bench runners"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+name = "delta_mini"
+
+[[bin]]
+name = "mini"
+path = "src/bin/mini.rs"
+
+[[bin]]
+name = "mini-extra"
+path = "src/bin/mini-extra.rs"
+
+[dependencies]
+clap.workspace = true
+crossterm.workspace = true
+delta-ai.workspace = true
+delta-chord.workspace = true
+delta-harness.workspace = true
+dirs.workspace = true
+futures.workspace = true
+minijinja.workspace = true
+ratatui.workspace = true
+regex.workspace = true
+# Datasets from the Hugging Face datasets server.
+reqwest.workspace = true
+rustyline.workspace = true
+saphyr-parser.workspace = true
+serde.workspace = true
+serde-saphyr.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "process"] }
+uuid.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true
+wiremock.workspace = true
+
+[lints]
+workspace = true

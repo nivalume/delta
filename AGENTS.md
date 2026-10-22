@@ -13,6 +13,8 @@ algorithms are delta's own wherever Rust offers a better fit.
 - `crates/<crate>/docs/design/`: design documents (English), one per module. Each lists
   its differences from upstream; new design decisions are confirmed with the maintainer
   before they are implemented.
+- `examples/<name>`: programs built on the crates, such as a port of an upstream tool on
+  delta-harness (`examples/mini-swe-agent`); `publish = false`, with their own design notes.
 - `docs/research/`: notes on reference implementations.
 - `.claude/skills/diagram-design`: the diagram skill used for every design diagram.
 
