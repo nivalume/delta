@@ -520,7 +520,8 @@ mod tests {
         let lock = include_str!("../../../Cargo.lock");
         let version = lock
             .split("[[package]]")
-            .find(|package| package.contains("name = \"rquickjs\"\n"))
+            // By lines: a Windows checkout may have CRLF line ends.
+            .find(|package| package.lines().any(|line| line == "name = \"rquickjs\""))
             .and_then(|package| package.lines().find_map(|line| line.strip_prefix("version = ")))
             .map(|version| version.trim_matches('"'));
         let version = version.unwrap_or_default();

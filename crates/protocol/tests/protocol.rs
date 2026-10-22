@@ -341,7 +341,8 @@ fn schema_snapshot_is_current() {
         std::fs::write(&path, &schema).unwrap();
         return;
     }
-    let snapshot = std::fs::read_to_string(&path).unwrap_or_default();
+    // A Windows checkout may have CRLF line ends.
+    let snapshot = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
     assert!(
         snapshot == schema,
         "schema/v2.json is stale; run `DELTA_UPDATE_SCHEMA=1 cargo test -p delta-protocol`"
