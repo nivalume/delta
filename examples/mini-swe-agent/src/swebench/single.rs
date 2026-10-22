@@ -1,5 +1,4 @@
-//! `mini-extra swebench-single`: one instance with the interactive agent (upstream's
-//! `run/benchmarks/swebench_single.py`).
+//! `mini-extra swebench-single`: one instance with the interactive agent.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -9,8 +8,8 @@ use serde_json::{Map, Value as Json};
 
 use super::{instance_environment, load_dataset};
 use crate::agent::{AgentKind, Frontend, Terminal};
-use crate::cli::{BuildOptions, build_agent};
-use crate::config::{self, Overrides};
+use crate::cli::{BuildOptions, build_agent, load_config, with_model};
+use crate::config::Overrides;
 
 /// Run on a single SWE-bench instance.
 #[derive(Clone, Debug, clap::Args)]
@@ -24,25 +23,16 @@ pub struct SingleArgs {
     /// SWE-bench instance ID or index (into the sorted IDs).
     #[arg(short = 'i', long = "instance", default_value = "0")]
     pub instance: String,
-    /// Model to use.
+    /// Model as provider/model-id, or a model id one provider has.
     #[arg(short = 'm', long = "model")]
     pub model: Option<String>,
-    /// Model class to use (e.g., 'litellm' or 'litellm_textbased').
-    #[arg(long = "model-class")]
-    pub model_class: Option<String>,
-    /// Agent class to use (e.g., 'interactive' or 'default').
-    #[arg(long = "agent-class")]
-    pub agent_class: Option<String>,
-    /// Environment class to use (`docker`).
-    #[arg(long = "environment-class")]
-    pub environment_class: Option<String>,
     /// Run without confirmation.
     #[arg(short = 'y', long = "yolo")]
     pub yolo: bool,
-    /// Cost limit. Set to 0 to disable.
+    /// Cost limit in USD. Set to 0 to disable.
     #[arg(short = 'l', long = "cost-limit")]
     pub cost_limit: Option<f64>,
-    /// Path to config files, filenames, or key-value pairs; default `swebench.yaml`.
+    /// Config files and key.path=value pairs; default `swebench.yaml`.
     #[arg(short = 'c', long = "config")]
     pub config: Vec<String>,
     /// Exit immediately when the agent wants to finish instead of prompting.
@@ -52,7 +42,7 @@ pub struct SingleArgs {
     #[arg(short = 'o', long = "output")]
     pub output: Option<PathBuf>,
     /// The Hugging Face datasets server.
-    #[arg(long = "datasets-server", hide = true)]
+    #[arg(long = "datasets-server")]
     pub datasets_server: Option<String>,
 }
 
@@ -99,35 +89,24 @@ pub async fn run_single(args: SingleArgs) -> ExitCode {
         Ok(instance) => instance,
         Err(error) => return fail(error),
     };
-    let specs = if args.config.is_empty() {
-        vec!["swebench.yaml".to_owned()]
-    } else {
-        args.config.clone()
-    };
-    eprintln!("Building agent config from specs: {specs:?}");
-    let mut config = match config::load(&specs) {
+    let mut config = match load_config(&args.config, "swebench.yaml") {
         Ok(config) => config,
-        Err(error) => return fail(error.to_string()),
+        Err(error) => return fail(error),
     };
     let output = args
         .output
         .clone()
-        .unwrap_or_else(|| crate::global::global_config_dir().join("last_swebench_single_run.traj.json"));
-    Overrides::default()
-        .set("agent.agent_class", args.agent_class.clone())
+        .unwrap_or_else(|| crate::home::home_dir().join("last_swebench_single_run.traj.json"));
+    with_model(Overrides::default(), args.model.as_deref())
         .set("agent.mode", args.yolo.then_some("yolo"))
         .set("agent.cost_limit", args.cost_limit)
         .set("agent.confirm_exit", args.exit_immediately.then_some(false))
-        .set("agent.output_path", Some(output.display().to_string()))
-        .set("model.model_class", args.model_class.clone())
-        .set("model.model_name", args.model.clone())
-        .set("environment.environment_class", args.environment_class.clone())
         .apply(&mut config);
     let env = match instance_environment(&config, &instance).await {
         Ok(env) => env,
         Err(error) => return fail(error),
     };
-    let history = crate::global::global_config_dir().join("interactive_history.txt");
+    let history = crate::home::home_dir().join("interactive_history.txt");
     let frontend: Arc<dyn Frontend> = match Terminal::new(Some(history)) {
         Ok(terminal) => Arc::new(terminal),
         Err(error) => {
@@ -138,10 +117,11 @@ pub async fn run_single(args: SingleArgs) -> ExitCode {
     let built = match build_agent(
         &config,
         BuildOptions {
-            default_kind: Some(AgentKind::Interactive),
+            kind: AgentKind::Interactive,
             default_environment: "docker",
             frontend: Some(frontend),
             handle_ctrl_c: true,
+            output: Some(output.clone()),
             env: Some(Arc::clone(&env)),
             ..BuildOptions::default()
         },
@@ -160,7 +140,10 @@ pub async fn run_single(args: SingleArgs) -> ExitCode {
     match result {
         Ok(run) => {
             eprintln!("Saved trajectory to '{}'", output.display());
-            eprintln!("Exit status: {}", run.exit.exit_status);
+            match &run.exit.error {
+                Some(error) => eprintln!("Exit status: {} ({error})", run.exit.status),
+                None => eprintln!("Exit status: {}", run.exit.status),
+            }
             ExitCode::SUCCESS
         }
         Err(error) => fail(error.to_string()),

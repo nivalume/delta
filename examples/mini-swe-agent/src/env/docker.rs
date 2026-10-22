@@ -1,5 +1,4 @@
-//! Commands in a Docker container, started once and stopped at cleanup, with the command
-//! lines upstream's `DockerEnvironment` uses.
+//! Commands in a Docker container, started once and stopped at cleanup.
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -12,10 +11,11 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
-use super::{Environment, EnvironmentError, ExecOutput, serialized, timeout_message};
+use super::{Environment, EnvironmentError, ExecOutput, timeout_message, typed};
 
-/// Upstream's `DockerEnvironmentConfig`.
+/// The `environment` section of type `docker`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DockerEnvironmentConfig {
     pub image: String,
     /// Where commands run in the container.
@@ -55,7 +55,7 @@ fn default_timeout() -> u64 {
 }
 
 fn default_executable() -> String {
-    crate::global::env_var("MSWEA_DOCKER_EXECUTABLE").unwrap_or_else(|| "docker".to_owned())
+    "docker".to_owned()
 }
 
 fn default_run_args() -> Vec<String> {
@@ -82,10 +82,10 @@ pub struct DockerEnvironment {
 }
 
 impl DockerEnvironment {
-    /// Starts the container: `docker run -d --name minisweagent-<8 hex> -w <cwd> <run_args>
+    /// Starts the container: `docker run -d --name delta-mini-<8 hex> -w <cwd> <run_args>
     /// <image> sleep <container_timeout>`.
     pub async fn start(config: DockerEnvironmentConfig) -> Result<Self, EnvironmentError> {
-        let name = format!("minisweagent-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let name = format!("delta-mini-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
         let mut command = tokio::process::Command::new(&config.executable);
         command
             .args(["run", "-d", "--name", &name, "-w", &config.cwd])
@@ -146,8 +146,8 @@ impl DockerEnvironment {
     }
 }
 
-/// Runs `executable args`, with stdout and stderr on one pipe as Python's
-/// `stderr=subprocess.STDOUT` does. `Ok(None)` when the timeout killed it.
+/// Runs `executable args` with stdout and stderr on one pipe. `Ok(None)` when the timeout or
+/// `ctx` killed it.
 async fn run_merged(
     executable: &str,
     args: &[String],
@@ -194,7 +194,7 @@ impl Environment for DockerEnvironment {
     ) -> BoxFuture<'a, ExecOutput> {
         Box::pin(async move {
             let Some(container_id) = self.container_id() else {
-                return ExecOutput::exception(String::new(), "AssertionError", "Container not started");
+                return ExecOutput::exception(String::new(), "The container is not running");
             };
             let cwd = cwd.filter(|cwd| !cwd.is_empty()).unwrap_or(&self.config.cwd);
             let timeout = timeout.unwrap_or(Duration::from_secs(self.config.timeout));
@@ -206,32 +206,20 @@ impl Environment for DockerEnvironment {
                     ..ExecOutput::default()
                 },
                 Ok((None, output)) if ctx.is_cancelled() => {
-                    ExecOutput::exception(output, "KeyboardInterrupt", "Interrupted")
+                    ExecOutput::exception(output, "The command was interrupted")
                 }
-                Ok((None, output)) => {
-                    ExecOutput::exception(output, "TimeoutExpired", &timeout_message(command, timeout))
-                }
-                Err(error) => ExecOutput::exception(String::new(), "OSError", &error.to_string()),
+                Ok((None, output)) => ExecOutput::exception(output, timeout_message(timeout)),
+                Err(error) => ExecOutput::exception(String::new(), format!("The command could not run: {error}")),
             }
         })
     }
 
-    fn template_vars(&self) -> Json {
-        crate::template::vars([
-            serde_json::to_value(&self.config).unwrap_or(Json::Null),
-            crate::template::uname(),
-        ])
-    }
-
-    fn serialize(&self) -> Json {
-        serialized(
-            &serde_json::to_value(&self.config).unwrap_or(Json::Null),
-            "minisweagent.environments.docker.DockerEnvironment",
-        )
+    fn config(&self) -> Json {
+        typed("docker", serde_json::to_value(&self.config).unwrap_or(Json::Null))
     }
 
     /// Stops the container: `(timeout 60 docker stop <id> || docker rm -f <id>)`, in the
-    /// background on Unix as upstream, so it outlives the process.
+    /// background on Unix, so it outlives the process.
     fn cleanup(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             let Some(container_id) = self
@@ -279,7 +267,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exec_lines_follow_upstream() {
+    fn exec_lines_hold_the_config() {
         let config: DockerEnvironmentConfig = serde_json::from_value(serde_json::json!({
             "image": "python:3.11",
             "cwd": "/testbed",

@@ -1,11 +1,11 @@
 //! SWE-bench datasets: a Hugging Face dataset read through the datasets server's `/rows`
-//! endpoint (upstream uses the `datasets` library), or a local JSON or JSON Lines file.
+//! endpoint, or a local JSON or JSON Lines file.
 
 use std::path::Path;
 
 use serde_json::Value as Json;
 
-/// Upstream's subset names.
+/// Subset names and their Hugging Face datasets.
 pub const DATASET_MAPPING: [(&str, &str); 8] = [
     ("full", "princeton-nlp/SWE-Bench"),
     ("verified", "princeton-nlp/SWE-Bench_Verified"),
@@ -17,7 +17,7 @@ pub const DATASET_MAPPING: [(&str, &str); 8] = [
     ("rebench", "nebius/SWE-rebench"),
 ];
 
-/// The datasets server, unless `MSWEA_DATASETS_SERVER_URL` names another.
+/// The datasets server, unless `--datasets-server` names another.
 pub const DATASETS_SERVER: &str = "https://datasets-server.huggingface.co";
 
 /// Rows per request; the server's maximum.
@@ -48,10 +48,7 @@ pub async fn load_dataset(subset: &str, split: &str, server: Option<&str>) -> Re
         .iter()
         .find(|(name, _)| *name == subset)
         .map_or(subset, |(_, dataset)| dataset);
-    let server = server
-        .map(str::to_owned)
-        .or_else(|| crate::global::env_var("MSWEA_DATASETS_SERVER_URL"))
-        .unwrap_or_else(|| DATASETS_SERVER.to_owned());
+    let server = server.unwrap_or(DATASETS_SERVER);
     load_from_server(server.trim_end_matches('/'), dataset, split).await
 }
 
@@ -86,7 +83,7 @@ async fn load_from_server(server: &str, dataset: &str, split: &str) -> Result<Ve
         message,
     };
     let client = reqwest::Client::new();
-    let token = crate::global::env_var("HF_TOKEN");
+    let token = std::env::var("HF_TOKEN").ok().filter(|token| !token.trim().is_empty());
     let get = |url: String, query: Vec<(&'static str, String)>| {
         let url = reqwest::Url::parse_with_params(&url, &query);
         let client = client.clone();

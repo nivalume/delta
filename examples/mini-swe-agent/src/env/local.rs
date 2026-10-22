@@ -10,10 +10,11 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
-use super::{Environment, ExecOutput, serialized, timeout_message};
+use super::{Environment, ExecOutput, timeout_message, typed};
 
-/// Upstream's `LocalEnvironmentConfig`.
+/// The `environment` section of type `local`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalEnvironmentConfig {
     /// Where commands run; empty: the current directory.
     #[serde(default)]
@@ -95,32 +96,17 @@ impl Environment for LocalEnvironment {
                     ..ExecOutput::default()
                 },
                 Err(error) if error.code == ExecErrorCode::Timeout => {
-                    ExecOutput::exception(text, "TimeoutExpired", &timeout_message(command, timeout))
+                    ExecOutput::exception(text, timeout_message(timeout))
                 }
-                Err(error) => {
-                    let exception_type = match error.code {
-                        ExecErrorCode::Aborted => "KeyboardInterrupt",
-                        ExecErrorCode::SpawnError | ExecErrorCode::ShellUnavailable => "OSError",
-                        _ => "RuntimeError",
-                    };
-                    ExecOutput::exception(text, exception_type, &error.message)
+                Err(error) if error.code == ExecErrorCode::Aborted => {
+                    ExecOutput::exception(text, "The command was interrupted")
                 }
+                Err(error) => ExecOutput::exception(text, format!("The command could not run: {}", error.message)),
             }
         })
     }
 
-    fn template_vars(&self) -> Json {
-        crate::template::vars([
-            serde_json::to_value(&self.config).unwrap_or(Json::Null),
-            crate::template::uname(),
-            crate::template::environ(),
-        ])
-    }
-
-    fn serialize(&self) -> Json {
-        serialized(
-            &serde_json::to_value(&self.config).unwrap_or(Json::Null),
-            "minisweagent.environments.local.LocalEnvironment",
-        )
+    fn config(&self) -> Json {
+        typed("local", serde_json::to_value(&self.config).unwrap_or(Json::Null))
     }
 }

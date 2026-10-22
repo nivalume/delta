@@ -1,5 +1,5 @@
-//! The agent end to end: scripted model outputs, commands in a temporary directory, and
-//! scripted answers for the interactive agent.
+//! The agent end to end: scripted answers from the faux provider, commands in a temporary
+//! directory, and scripted answers for the interactive agent.
 
 #![allow(clippy::unwrap_used)] // Test helpers outside #[test] functions.
 
@@ -15,29 +15,28 @@ use delta_mini::agent::{Agent, AgentKind, AgentOptions, Frontend, Input, RunOutp
 use delta_mini::config;
 use delta_mini::env::{LocalEnvironment, LocalEnvironmentConfig};
 use delta_mini::model::{MiniModelClient, ModelSettings};
+use delta_mini::trajectory::{Entry, ExitStatus, InterruptReason, Trajectory, message_text};
 use futures::future::BoxFuture;
 use pretty_assertions::assert_eq;
 use serde_json::{Value as Json, json};
 
-/// A tool-call output calling bash with each command.
+/// A script item calling bash with each command, at a cost of 1.
 fn calls(commands: &[&str]) -> Json {
-    let tool_calls: Vec<Json> = commands
-        .iter()
-        .enumerate()
-        .map(|(index, command)| {
-            json!({
-                "id": format!("call_{}_{index}", uuid::Uuid::new_v4().simple()),
-                "type": "function",
-                "function": { "name": "bash", "arguments": json!({ "command": command }).to_string() },
-            })
+    let mut content = vec![json!({ "type": "text", "text": "Running." })];
+    content.extend(commands.iter().enumerate().map(|(index, command)| {
+        json!({
+            "type": "toolCall",
+            "id": format!("call_{}_{index}", uuid::Uuid::new_v4().simple()),
+            "name": "bash",
+            "arguments": { "command": command },
         })
-        .collect();
-    json!({ "role": "assistant", "content": "Running.", "tool_calls": tool_calls })
+    }));
+    json!({ "content": content, "cost": 1.0 })
 }
 
-/// A text-only output.
+/// A text-only script item, at a cost of 1.
 fn text(content: &str) -> Json {
-    json!({ "role": "assistant", "content": content })
+    json!({ "content": [{ "type": "text", "text": content }], "cost": 1.0 })
 }
 
 const SUBMIT: &str = "printf 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\\nthe patch\\n'";
@@ -85,7 +84,7 @@ struct Run {
 
 struct Setup {
     specs: Vec<String>,
-    outputs: Vec<Json>,
+    script: Vec<Json>,
     agent: Json,
     frontend: Option<Arc<Scripted>>,
     kind: AgentKind,
@@ -93,13 +92,10 @@ struct Setup {
 }
 
 impl Setup {
-    fn toolcall(outputs: Vec<Json>) -> Self {
+    fn tool_calls(script: Vec<Json>) -> Self {
         Self {
-            specs: vec![
-                "mini.yaml".to_owned(),
-                "model.model_class=deterministic_toolcall".to_owned(),
-            ],
-            outputs,
+            specs: vec!["mini.yaml".to_owned(), "model.provider=faux".to_owned()],
+            script,
             agent: json!({}),
             frontend: None,
             kind: AgentKind::Default,
@@ -107,13 +103,10 @@ impl Setup {
         }
     }
 
-    fn textbased(outputs: Vec<Json>) -> Self {
+    fn text(script: Vec<Json>) -> Self {
         Self {
-            specs: vec![
-                "mini_textbased.yaml".to_owned(),
-                "model.model_class=deterministic".to_owned(),
-            ],
-            ..Self::toolcall(outputs)
+            specs: vec!["mini_textbased.yaml".to_owned(), "model.provider=faux".to_owned()],
+            ..Self::tool_calls(script)
         }
     }
 
@@ -131,12 +124,12 @@ impl Setup {
     async fn run(self) -> Run {
         let dir = tempfile::tempdir().unwrap();
         let mut config = config::load(&self.specs).unwrap();
-        config["model"]["outputs"] = Json::Array(self.outputs);
+        config["model"]["script"] = Json::Array(self.script);
         config::merge(&mut config, json!({ "agent": self.agent }));
-        config["agent"]["output_path"] = json!(dir.path().join("run.traj.json"));
-        let model = ModelSettings::new(&config["model"], None).unwrap();
-        let client = MiniModelClient::new(&model).unwrap();
-        let model_ref = client.reference();
+        let model = ModelSettings::new(&config["model"]).unwrap();
+        let (client, warning) = MiniModelClient::new(&model, &Json::Null, None).unwrap();
+        assert_eq!(warning, None);
+        let resolved = client.resolved().clone();
         let recording = Arc::new(Recording {
             inner: client,
             requests: Mutex::new(Vec::new()),
@@ -146,16 +139,18 @@ impl Setup {
             ..LocalEnvironmentConfig::default()
         });
         let agent = Agent::new(AgentOptions {
-            config: config["agent"].clone(),
-            default_kind: self.kind,
+            config,
+            kind: self.kind,
             model,
+            resolved,
             client: Arc::clone(&recording) as Arc<dyn ModelClient>,
-            model_ref,
             env: Arc::new(env),
             frontend: self.frontend.clone().map(|frontend| frontend as Arc<dyn Frontend>),
-            extra_info: Vec::new(),
+            output: Some(dir.path().join("run.traj.json")),
+            extra: serde_json::Map::new(),
             handle_ctrl_c: false,
             on_step: None,
+            batch: None,
         })
         .unwrap();
         if let Some(delay) = self.interrupt_after {
@@ -177,17 +172,25 @@ impl Setup {
     }
 }
 
-fn roles(run: &Run) -> Vec<String> {
-    run.output.trajectory["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|message| message["role"].as_str().unwrap().to_owned())
-        .collect()
+fn kinds(run: &Run) -> Vec<&'static str> {
+    run.output.trajectory.entries.iter().map(Entry::kind).collect()
 }
 
-fn message(run: &Run, index: usize) -> &Json {
-    &run.output.trajectory["messages"][index]
+fn entry(run: &Run, index: usize) -> &Entry {
+    &run.output.trajectory.entries[index]
+}
+
+/// An entry as its JSON.
+fn entry_json(run: &Run, index: usize) -> Json {
+    serde_json::to_value(entry(run, index)).unwrap()
+}
+
+fn text_of(run: &Run, index: usize) -> String {
+    message_text(entry(run, index).message())
+}
+
+fn status(run: &Run) -> ExitStatus {
+    run.output.exit.status
 }
 
 /// The messages of the `index`th request as `role: text` lines.
@@ -205,99 +208,97 @@ fn request(run: &Run, index: usize) -> Vec<String> {
             ),
             Message::User(user) => format!("user: {}", user.content.text()),
             Message::Assistant(assistant) => format!("assistant: {}", assistant.text()),
-            Message::ToolResult(result) => format!(
-                "tool: {}",
-                result
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        delta_ai::types::UserBlock::Text(text) => Some(text.text.as_str()),
-                        delta_ai::types::UserBlock::Image(_) => None,
-                    })
-                    .collect::<String>()
-            ),
+            Message::ToolResult(_) => format!("tool: {}", message_text(message)),
         })
         .collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn submits_and_saves_an_upstream_trajectory() {
-    let run = Setup::toolcall(vec![calls(&["echo hello"]), calls(&[SUBMIT])])
+async fn submits_and_saves_a_trajectory() {
+    let run = Setup::tool_calls(vec![calls(&["echo hello"]), calls(&[SUBMIT])])
         .run()
         .await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
+    assert_eq!(status(&run), ExitStatus::Submitted);
     assert_eq!(run.output.exit.submission, "the patch\n");
     assert_eq!(
-        roles(&run),
-        ["system", "user", "assistant", "tool", "assistant", "tool", "exit"]
+        kinds(&run),
+        ["system", "task", "answer", "observation", "answer", "observation"]
     );
     let trajectory = &run.output.trajectory;
-    assert_eq!(trajectory["trajectory_format"], "mini-swe-agent-1.1");
-    assert_eq!(
-        trajectory["info"]["model_stats"],
-        json!({ "instance_cost": 2.0, "api_calls": 2 })
-    );
-    assert_eq!(trajectory["info"]["exit_status"], "Submitted");
-    assert_eq!(trajectory["info"]["submission"], "the patch\n");
-    assert_eq!(
-        trajectory["info"]["config"]["agent_type"],
-        "minisweagent.agents.default.DefaultAgent"
-    );
-    assert_eq!(
-        trajectory["info"]["config"]["model_type"],
-        "minisweagent.models.test_models.DeterministicToolcallModel"
-    );
-    assert_eq!(
-        trajectory["info"]["config"]["environment_type"],
-        "minisweagent.environments.local.LocalEnvironment"
-    );
-    let assistant = message(&run, 2);
-    assert_eq!(assistant["extra"]["actions"][0]["command"], "echo hello");
-    assert_eq!(assistant["extra"]["cost"], 1.0);
-    let tool = message(&run, 3);
-    assert_eq!(tool["tool_call_id"], assistant["tool_calls"][0]["id"]);
-    assert_eq!(tool["extra"]["raw_output"], "hello\n");
-    assert_eq!(tool["extra"]["returncode"], 0);
-    assert!(tool["content"].as_str().unwrap().contains("hello"));
-    assert_eq!(message(&run, 6)["extra"]["exit_status"], "Submitted");
+    assert_eq!(trajectory.format, "delta-mini/1");
+    assert_eq!((trajectory.stats.calls, trajectory.stats.cost), (2, 2.0));
+    assert_eq!(trajectory.model["provider"], "faux");
+    assert_eq!(trajectory.config["environment"]["type"], "local");
+    assert_eq!(trajectory.config["model"]["actions"], "tool_calls");
+    assert_eq!(trajectory.config["agent"]["mode"], "confirm");
 
-    let saved = delta_mini::trajectory::load(&run.dir.path().join("run.traj.json")).unwrap();
-    assert_eq!(&saved, trajectory);
+    let answer = entry_json(&run, 2);
+    assert_eq!(answer["message"]["role"], "assistant");
+    assert_eq!(answer["actions"][0]["command"], "echo hello");
+    assert_eq!(answer["cost"], 1.0);
+    let call_id = answer["message"]["content"][1]["id"].clone();
+    assert_eq!(answer["actions"][0]["tool_call_id"], call_id);
+    let observation = entry_json(&run, 3);
+    assert_eq!(observation["message"]["role"], "toolResult");
+    assert_eq!(observation["message"]["toolCallId"], call_id);
+    assert_eq!(
+        observation["output"],
+        json!({ "output": "hello\n", "returncode": 0, "exception_info": "" })
+    );
+    assert!(text_of(&run, 3).contains("hello"));
+
+    let saved = Trajectory::load(&run.dir.path().join("run.traj.json")).unwrap();
+    assert_eq!(saved.entries, trajectory.entries);
+    assert_eq!(saved.exit, trajectory.exit);
     assert!(run.dir.path().join("run.harness.db").exists());
 
-    // The model saw the rendered system prompt, the task, and the tool results.
-    let system = message(&run, 0)["content"].as_str().unwrap();
+    // The model saw the rendered system prompt, the task, and the tool results the
+    // trajectory holds.
+    let system = text_of(&run, 0);
     let first = request(&run, 0);
     assert_eq!(first.len(), 2);
     assert!(first[0].contains(system.trim()), "{first:?}");
-    assert!(first[1].starts_with("user: ") && first[1].contains("Fix the bug."));
+    assert_eq!(first[1], format!("user: {}", text_of(&run, 1)));
+    assert!(first[1].contains("Fix the bug."));
     let second = request(&run, 1);
     assert_eq!(second.len(), 4);
-    assert!(
-        second[3].starts_with("tool: ") && second[3].contains("hello"),
-        "{second:?}"
-    );
+    assert_eq!(second[3], format!("tool: {}", text_of(&run, 3)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn repeated_format_errors_end_the_run() {
-    let run = Setup::toolcall(vec![text("a"), text("b"), text("c"), text("d")])
+    let run = Setup::tool_calls(vec![text("a"), text("b"), text("c"), text("d")])
         .run()
         .await;
-    assert_eq!(run.output.exit.exit_status, "RepeatedFormatError");
-    assert_eq!(roles(&run), ["system", "user", "user", "user", "user", "exit"]);
-    let error = message(&run, 2);
-    assert_eq!(error["extra"]["interrupt_type"], "FormatError");
-    assert!(error["content"].as_str().unwrap().contains("No tool calls found"));
-    assert_eq!(run.output.trajectory["info"]["model_stats"]["api_calls"], 3);
+    assert_eq!(status(&run), ExitStatus::FormatErrors);
+    assert_eq!(
+        kinds(&run),
+        [
+            "system",
+            "task",
+            "answer",
+            "format_error",
+            "answer",
+            "format_error",
+            "answer"
+        ]
+    );
+    let error = entry_json(&run, 3);
+    assert_eq!(
+        error["error"],
+        "No tool calls found in the response. Every response MUST include at least one tool call."
+    );
+    assert_eq!(error["message"]["role"], "user");
+    assert_eq!(entry_json(&run, 2)["actions"], json!([]));
+    assert_eq!(run.output.trajectory.stats.calls, 3);
     // The model saw each error as a continuation.
     assert_eq!(run.requests.len(), 3);
-    assert!(request(&run, 1)[3].contains("No tool calls found"));
+    assert_eq!(request(&run, 1)[3], format!("user: {}", text_of(&run, 3)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_format_error_then_a_clean_step_resets_the_count() {
-    let run = Setup::toolcall(vec![
+    let run = Setup::tool_calls(vec![
         text("a"),
         text("b"),
         calls(&["true"]),
@@ -307,86 +308,88 @@ async fn a_format_error_then_a_clean_step_resets_the_count() {
     .agent(json!({ "cost_limit": 0 }))
     .run()
     .await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
+    assert_eq!(status(&run), ExitStatus::Submitted);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_step_limit_ends_the_run_after_the_round() {
-    let run = Setup::toolcall(vec![calls(&["echo one"]), calls(&["echo two"])])
+    let run = Setup::tool_calls(vec![calls(&["echo one"]), calls(&["echo two"])])
         .agent(json!({ "step_limit": 1 }))
         .run()
         .await;
-    assert_eq!(run.output.exit.exit_status, "LimitsExceeded");
-    assert_eq!(roles(&run), ["system", "user", "assistant", "tool", "exit"]);
+    assert_eq!(status(&run), ExitStatus::LimitsExceeded);
+    assert_eq!(kinds(&run), ["system", "task", "answer", "observation"]);
     assert_eq!(run.requests.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_cost_limit_ends_the_run() {
-    let run = Setup::toolcall(vec![calls(&["echo one"]), calls(&["echo two"]), calls(&["echo three"])])
+    let run = Setup::tool_calls(vec![calls(&["echo one"]), calls(&["echo two"]), calls(&["echo three"])])
         .agent(json!({ "cost_limit": 2.0 }))
         .run()
         .await;
-    assert_eq!(run.output.exit.exit_status, "LimitsExceeded");
+    assert_eq!(status(&run), ExitStatus::LimitsExceeded);
     assert_eq!(run.requests.len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_wall_time_limit_ends_the_run() {
-    let run = Setup::toolcall(vec![calls(&["sleep 1.2"]), calls(&["echo late"])])
-        .agent(json!({ "wall_time_limit_seconds": 1 }))
+async fn the_time_limit_ends_the_run() {
+    let run = Setup::tool_calls(vec![calls(&["sleep 1.2"]), calls(&["echo late"])])
+        .agent(json!({ "time_limit": 1 }))
         .run()
         .await;
-    assert_eq!(run.output.exit.exit_status, "TimeExceeded");
+    assert_eq!(status(&run), ExitStatus::TimeExceeded);
     assert_eq!(run.requests.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_submission_mid_round_skips_the_rest() {
-    let run = Setup::toolcall(vec![calls(&["echo a", SUBMIT, "echo c"])]).run().await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
+    let run = Setup::tool_calls(vec![calls(&["echo a", SUBMIT, "echo c"])])
+        .run()
+        .await;
+    assert_eq!(status(&run), ExitStatus::Submitted);
     assert_eq!(
-        roles(&run),
-        ["system", "user", "assistant", "tool", "tool", "tool", "exit"]
+        kinds(&run),
+        ["system", "task", "answer", "observation", "observation", "observation"]
     );
-    assert_eq!(message(&run, 5)["extra"]["exception_info"], "action was not executed");
-    assert_eq!(message(&run, 5)["extra"]["returncode"], -1);
+    assert_eq!(
+        entry_json(&run, 5)["output"],
+        json!({ "output": "", "returncode": -1, "exception_info": "action was not executed" })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn text_based_actions_run_from_fenced_blocks() {
+async fn text_actions_run_from_fenced_blocks() {
     let block = |command: &str| text(&format!("THOUGHT: go.\n\n```mswea_bash_command\n{command}\n```"));
-    let run = Setup::textbased(vec![block("echo hello"), text("no block here"), block(SUBMIT)])
+    let run = Setup::text(vec![block("echo hello"), text("no block here"), block(SUBMIT)])
         .run()
         .await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
+    assert_eq!(status(&run), ExitStatus::Submitted);
     assert_eq!(
-        roles(&run),
+        kinds(&run),
         [
             "system",
-            "user",
-            "assistant",
-            "user",
-            "user",
-            "assistant",
-            "user",
-            "exit"
+            "task",
+            "answer",
+            "observation",
+            "answer",
+            "format_error",
+            "answer",
+            "observation"
         ]
     );
-    assert_eq!(
-        message(&run, 2)["extra"]["actions"],
-        json!([{ "command": "echo hello" }])
-    );
-    assert_eq!(message(&run, 3)["extra"]["raw_output"], "hello\n");
-    assert_eq!(message(&run, 4)["extra"]["interrupt_type"], "FormatError");
-    assert_eq!(message(&run, 4)["extra"]["n_actions"], 0);
+    assert_eq!(entry_json(&run, 2)["actions"], json!([{ "command": "echo hello" }]));
+    let observation = entry_json(&run, 3);
+    assert_eq!(observation["message"]["role"], "user");
+    assert_eq!(observation["output"]["output"], "hello\n");
+    assert_eq!(entry_json(&run, 5)["error"], "Expected exactly 1 action, found 0.");
     // No tools are offered; the observation is the continuation.
-    assert!(request(&run, 1)[3].starts_with("user: ") && request(&run, 1)[3].contains("hello"));
+    assert_eq!(request(&run, 1)[3], format!("user: {}", text_of(&run, 3)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejection_reaches_the_model_and_the_run_goes_on() {
-    let run = Setup::toolcall(vec![calls(&["rm -rf build"]), calls(&[SUBMIT])])
+    let run = Setup::tool_calls(vec![calls(&["rm -rf build"]), calls(&[SUBMIT])])
         .interactive(vec![
             Input::Line("no thanks".to_owned()),
             Input::Line(String::new()),
@@ -394,32 +397,30 @@ async fn a_rejection_reaches_the_model_and_the_run_goes_on() {
         ])
         .run()
         .await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
+    assert_eq!(status(&run), ExitStatus::Submitted);
     assert_eq!(
-        roles(&run),
+        kinds(&run),
         [
             "system",
-            "user",
-            "assistant",
-            "tool",
-            "user",
-            "assistant",
-            "tool",
-            "exit"
+            "task",
+            "answer",
+            "observation",
+            "interrupt",
+            "answer",
+            "observation"
         ]
     );
-    assert_eq!(message(&run, 3)["extra"]["exception_info"], "action was not executed");
-    let rejection = message(&run, 4);
     assert_eq!(
-        rejection["content"],
-        "Commands not executed. The user rejected your commands with the following message: no thanks"
+        entry_json(&run, 3)["output"]["exception_info"],
+        "action was not executed"
     );
-    assert_eq!(rejection["extra"]["interrupt_type"], "UserRejection");
-    let second = request(&run, 1);
-    assert_eq!(
-        second.last().unwrap(),
-        "user: Commands not executed. The user rejected your commands with the following message: no thanks"
-    );
+    let rejection = "Commands not executed. The user rejected your commands with the following message: no thanks";
+    assert_eq!(text_of(&run, 4), rejection);
+    let Entry::Interrupt { reason, .. } = entry(&run, 4) else {
+        panic!("an interrupt");
+    };
+    assert_eq!(*reason, InterruptReason::UserRejection);
+    assert_eq!(request(&run, 1).last().unwrap(), &format!("user: {rejection}"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -428,16 +429,16 @@ async fn whitelisted_and_yolo_actions_run_without_asking() {
         [Input::Line("/y".to_owned()), Input::Line(String::new())],
         true,
     ));
-    let mut setup = Setup::toolcall(vec![calls(&["ls"]), calls(&["echo two"]), calls(&[SUBMIT])])
-        .agent(json!({ "whitelist_actions": ["ls"] }));
+    let mut setup = Setup::tool_calls(vec![calls(&["ls"]), calls(&["echo two"]), calls(&[SUBMIT])])
+        .agent(json!({ "whitelist": ["ls"] }));
     setup.frontend = Some(Arc::clone(&frontend));
     setup.kind = AgentKind::Interactive;
     let run = setup.run().await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
+    assert_eq!(status(&run), ExitStatus::Submitted);
     let prompts: Vec<String> = frontend
         .log()
         .into_iter()
-        .filter(|entry| entry.starts_with("prompt") || entry.starts_with("notice"))
+        .filter(|line| line.starts_with("prompt") || line.starts_with("notice"))
         .collect();
     assert_eq!(
         prompts,
@@ -447,12 +448,18 @@ async fn whitelisted_and_yolo_actions_run_without_asking() {
             "prompt ConfirmExit",
         ]
     );
-    assert_eq!(run.output.trajectory["info"]["config"]["agent"]["mode"], "yolo");
+    assert!(
+        frontend
+            .log()
+            .iter()
+            .any(|line| line.starts_with("entry answer (step 1): Running."))
+    );
+    assert_eq!(run.output.trajectory.config["agent"]["mode"], "yolo");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn human_mode_runs_the_users_commands_then_hands_back() {
-    let run = Setup::toolcall(vec![calls(&[SUBMIT])])
+    let run = Setup::tool_calls(vec![calls(&[SUBMIT])])
         .agent(json!({ "mode": "human" }))
         .interactive(vec![
             Input::Line("echo from-human".to_owned()),
@@ -461,27 +468,26 @@ async fn human_mode_runs_the_users_commands_then_hands_back() {
         ])
         .run()
         .await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
+    assert_eq!(status(&run), ExitStatus::Submitted);
     assert_eq!(
-        roles(&run),
-        ["system", "user", "user", "user", "assistant", "tool", "exit"]
+        kinds(&run),
+        ["system", "task", "human", "observation", "answer", "observation"]
     );
-    assert_eq!(
-        message(&run, 2)["content"],
-        "User command: \n```bash\necho from-human\n```"
-    );
-    assert_eq!(message(&run, 3)["extra"]["raw_output"], "from-human\n");
-    assert!(message(&run, 3).get("tool_call_id").is_none());
+    assert_eq!(text_of(&run, 2), "User command: \n```bash\necho from-human\n```");
+    assert_eq!(entry_json(&run, 2)["command"], "echo from-human");
+    let observation = entry_json(&run, 3);
+    assert_eq!(observation["output"]["output"], "from-human\n");
+    assert_eq!(observation["message"]["role"], "user");
     // The task, the command and its output reached the model before its first answer.
     let first = request(&run, 0);
     assert_eq!(first.len(), 4, "{first:?}");
     assert!(first[3].contains("from-human"));
-    assert_eq!(run.output.trajectory["info"]["model_stats"]["api_calls"], 1);
+    assert_eq!(run.output.trajectory.stats.calls, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_task_instead_of_finishing() {
-    let run = Setup::toolcall(vec![calls(&[SUBMIT]), calls(&[SUBMIT])])
+    let run = Setup::tool_calls(vec![calls(&[SUBMIT]), calls(&[SUBMIT])])
         .agent(json!({ "mode": "yolo" }))
         .interactive(vec![
             Input::Line("also add tests".to_owned()),
@@ -489,75 +495,95 @@ async fn a_new_task_instead_of_finishing() {
         ])
         .run()
         .await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
+    assert_eq!(status(&run), ExitStatus::Submitted);
     assert_eq!(
-        roles(&run),
+        kinds(&run),
         [
             "system",
-            "user",
-            "assistant",
-            "tool",
-            "user",
-            "assistant",
-            "tool",
-            "exit"
+            "task",
+            "answer",
+            "observation",
+            "interrupt",
+            "answer",
+            "observation"
         ]
     );
-    assert_eq!(message(&run, 4)["content"], "The user added a new task: also add tests");
-    assert_eq!(message(&run, 4)["extra"]["interrupt_type"], "UserNewTask");
+    assert_eq!(text_of(&run, 4), "The user added a new task: also add tests");
+    assert_eq!(entry_json(&run, 4)["reason"], "user_new_task");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn new_limits_let_the_run_go_on() {
-    let run = Setup::toolcall(vec![calls(&["echo one"]), calls(&[SUBMIT])])
+    let run = Setup::tool_calls(vec![calls(&["echo one"]), calls(&[SUBMIT])])
         .agent(json!({ "mode": "yolo", "step_limit": 1, "confirm_exit": false }))
         .interactive(vec![Input::Line("5".to_owned()), Input::Line("10".to_owned())])
         .run()
         .await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
-    assert_eq!(run.output.trajectory["info"]["config"]["agent"]["step_limit"], 5);
+    assert_eq!(status(&run), ExitStatus::Submitted);
+    assert_eq!(run.output.trajectory.config["agent"]["step_limit"], 5);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ctrl_c_stops_the_command_and_asks_for_a_comment() {
-    let mut setup = Setup::toolcall(vec![calls(&["sleep 30"]), calls(&[SUBMIT])])
+    let mut setup = Setup::tool_calls(vec![calls(&["sleep 30"]), calls(&[SUBMIT])])
         .agent(json!({ "mode": "yolo", "confirm_exit": false }))
         .interactive(vec![Input::Line("try something faster".to_owned())]);
     setup.interrupt_after = Some(Duration::from_millis(800));
     let run = setup.run().await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
+    assert_eq!(status(&run), ExitStatus::Submitted);
     assert_eq!(
-        roles(&run),
+        kinds(&run),
         [
             "system",
-            "user",
-            "assistant",
-            "tool",
-            "user",
-            "assistant",
-            "tool",
-            "exit"
+            "task",
+            "answer",
+            "observation",
+            "interrupt",
+            "answer",
+            "observation"
         ]
     );
-    assert_eq!(message(&run, 3)["extra"]["exception_info"], "action was not executed");
-    assert_eq!(message(&run, 4)["content"], "Interrupted by user: try something faster");
+    assert_eq!(
+        entry_json(&run, 3)["output"]["exception_info"],
+        "action was not executed"
+    );
+    assert_eq!(text_of(&run, 4), "Interrupted by user: try something faster");
+    assert_eq!(entry_json(&run, 4)["reason"], "user_interruption");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unknown_tool_is_a_format_error() {
+async fn an_unknown_tool_is_a_format_error_the_harness_answers() {
     let mut unknown = calls(&["ls"]);
-    unknown["tool_calls"][0]["function"]["name"] = json!("python");
-    let run = Setup::toolcall(vec![unknown, calls(&[SUBMIT])]).run().await;
-    assert_eq!(run.output.exit.exit_status, "Submitted");
-    assert_eq!(roles(&run), ["system", "user", "user", "assistant", "tool", "exit"]);
-    let error = message(&run, 2);
-    assert_eq!(error["extra"]["interrupt_type"], "FormatError");
-    assert!(
-        error["content"]
-            .as_str()
-            .unwrap()
-            .contains("<error>\nUnknown tool 'python'.\n</error>")
-    );
-    // The model saw the harness's own refusal of the call.
+    unknown["content"][1]["name"] = json!("python");
+    let run = Setup::tool_calls(vec![unknown, calls(&[SUBMIT])]).run().await;
+    assert_eq!(status(&run), ExitStatus::Submitted);
+    // The answer has no actions; the harness answers the call itself, so no format error
+    // entry holds what the model saw.
+    assert_eq!(kinds(&run), ["system", "task", "answer", "answer", "observation"]);
+    assert_eq!(entry_json(&run, 2)["actions"], json!([]));
     assert!(request(&run, 1)[3].contains("python"), "{:?}", request(&run, 1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_malformed_bash_call_gets_the_format_error() {
+    let mut malformed = calls(&["ls", "pwd"]);
+    malformed["content"][2]["arguments"] = json!({ "cmd": "pwd" });
+    let run = Setup::tool_calls(vec![malformed, calls(&[SUBMIT])])
+        .agent(json!({ "cost_limit": 0 }))
+        .run()
+        .await;
+    assert_eq!(status(&run), ExitStatus::Submitted);
+    // The valid call gets the rendered format error; the harness refuses the other.
+    assert_eq!(
+        kinds(&run),
+        ["system", "task", "answer", "format_error", "answer", "observation"]
+    );
+    let error = entry_json(&run, 3);
+    assert_eq!(error["error"], "Missing 'command' argument in bash tool call.");
+    assert_eq!(error["message"]["role"], "toolResult");
+    assert_eq!(
+        error["message"]["toolCallId"],
+        entry_json(&run, 2)["message"]["content"][1]["id"]
+    );
+    assert!(text_of(&run, 3).contains("Missing 'command' argument"));
 }

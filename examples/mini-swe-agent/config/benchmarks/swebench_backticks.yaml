@@ -175,6 +175,7 @@ agent:
   cost_limit: 3.
 
 environment:
+  type: docker
   cwd: "/testbed"
   timeout: 60
   interpreter: ["bash", "-c"]
@@ -184,9 +185,11 @@ environment:
     LESS: -R
     PIP_PROGRESS_BAR: 'off'
     TQDM_DISABLE: '1'
-  environment_class: docker
 
 model:
+  provider: anthropic
+  id: claude-sonnet-4-5-20250929
+  actions: text
   observation_template: |
     {% if output.exception_info -%}
     <exception>{{output.exception_info}}</exception>
@@ -216,8 +219,8 @@ model:
     </output_tail>
     {%- endif -%}
   format_error_template: |
-    {% if finish_reason is defined and finish_reason in ["length", "tool_calls"] -%}
-    Your previous response reached the output token limit (finish_reason={{ finish_reason }}) before you produced a complete action, so it was cut off. Respond more concisely and provide exactly one action in the required format. If you need to think more, do so briefly.
+    {% if stop_reason is defined and stop_reason in ["length", "toolUse"] -%}
+    Your previous response reached the output token limit (stop_reason={{ stop_reason }}) before you produced a complete action, so it was cut off. Respond more concisely and provide exactly one action in the required format. If you need to think more, do so briefly.
     {%- else -%}
     Format error:
 
@@ -242,6 +245,3 @@ model:
     If you have completed your assignment, please consult the first message about how to
     submit your solution (you will not be able to continue working on this task after that).
     {%- endif %}
-  model_name: "anthropic/claude-sonnet-4-5-20250929"
-  model_kwargs:
-    drop_params: true

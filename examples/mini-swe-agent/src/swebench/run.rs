@@ -11,11 +11,12 @@ use serde_json::{Map, Value as Json, json};
 
 use super::{BatchProgress, filter_instances, instance_environment, load_dataset};
 use crate::agent::{AgentKind, StepCallback};
-use crate::cli::{BuildOptions, build_agent};
-use crate::config::{self, Overrides};
-use crate::model::ModelSettings;
+use crate::cli::{BuildOptions, build_agent, credential_store, load_config, with_model};
+use crate::config::Overrides;
+use crate::model::{BatchStats, MiniModelClient, ModelSettings};
+use crate::trajectory::{ExitStatus, now_millis};
 
-/// Run mini-SWE-agent on SWE-bench instances in batch mode.
+/// Run delta-mini on SWE-bench instances in batch mode.
 #[derive(Clone, Debug, clap::Args)]
 pub struct SwebenchArgs {
     /// SWE-bench subset to use or path to a dataset.
@@ -39,24 +40,24 @@ pub struct SwebenchArgs {
     /// Number of instances processed at once.
     #[arg(short = 'w', long, default_value_t = 1)]
     pub workers: usize,
-    /// Model to use.
+    /// Model as provider/model-id, or a model id one provider has.
     #[arg(short = 'm', long)]
     pub model: Option<String>,
-    /// Model class to use (e.g., 'litellm' or 'litellm_textbased').
-    #[arg(long = "model-class")]
-    pub model_class: Option<String>,
     /// Redo existing instances.
     #[arg(long = "redo-existing")]
     pub redo_existing: bool,
-    /// Path to config files, filenames, or key-value pairs; default `swebench.yaml`. Setting
-    /// it replaces the default, so name it too: `-c swebench.yaml -c key=value`.
+    /// Config files and key.path=value pairs; default `swebench.yaml`. Setting it replaces the
+    /// default, so name it too: `-c swebench.yaml -c key=value`.
     #[arg(short = 'c', long = "config")]
     pub config: Vec<String>,
-    /// Environment type to use (`docker`).
-    #[arg(long = "environment-class")]
-    pub environment_class: Option<String>,
+    /// Stop starting model calls once the batch has spent this many USD; 0: no limit.
+    #[arg(long = "total-cost-limit", default_value_t = 0.0)]
+    pub total_cost_limit: f64,
+    /// Stop starting model calls once the batch has made this many; 0: no limit.
+    #[arg(long = "total-call-limit", default_value_t = 0)]
+    pub total_call_limit: u64,
     /// The Hugging Face datasets server.
-    #[arg(long = "datasets-server", hide = true)]
+    #[arg(long = "datasets-server")]
     pub datasets_server: Option<String>,
 }
 
@@ -82,7 +83,7 @@ fn read_preds(path: &Path) -> Map<String, Json> {
         .unwrap_or_default()
 }
 
-/// Records an instance's patch in `preds.json` (upstream's `update_preds_file`).
+/// Records an instance's patch in `preds.json`, in the shape SWE-bench's evaluation reads.
 pub fn preds_update(path: &Path, instance_id: &str, model_name: &str, patch: &str) -> std::io::Result<()> {
     let _guard = PREDS_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut preds = read_preds(path);
@@ -93,7 +94,7 @@ pub fn preds_update(path: &Path, instance_id: &str, model_name: &str, patch: &st
     crate::trajectory::save_json(path, &Json::Object(preds))
 }
 
-/// Removes an instance from `preds.json` (upstream's `remove_from_preds_file`).
+/// Removes an instance from `preds.json`.
 pub fn preds_remove(path: &Path, instance_id: &str) -> std::io::Result<()> {
     let _guard = PREDS_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !path.exists() {
@@ -106,7 +107,7 @@ pub fn preds_remove(path: &Path, instance_id: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Appends timestamped lines to `minisweagent.log`.
+/// Appends timestamped lines to `delta-mini.log`.
 #[derive(Debug)]
 struct Log(Mutex<Option<std::fs::File>>);
 
@@ -119,7 +120,7 @@ impl Log {
     fn line(&self, level: &str, message: &str) {
         let mut file = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(file) = file.as_mut() {
-            let _ = writeln!(file, "{:.3} {level} {message}", crate::trajectory::timestamp());
+            let _ = writeln!(file, "{:.3} {level} {message}", now_millis() as f64 / 1000.0);
         }
     }
 }
@@ -129,7 +130,7 @@ pub async fn run_batch(args: SwebenchArgs) -> Result<BatchSummary, String> {
     let output = PathBuf::from(if args.output.is_empty() { "." } else { &args.output });
     std::fs::create_dir_all(&output).map_err(|error| format!("Could not create {}: {error}", output.display()))?;
     eprintln!("Results will be saved to {}", output.display());
-    let log = Arc::new(Log::open(&output.join("minisweagent.log")));
+    let log = Arc::new(Log::open(&output.join("delta-mini.log")));
 
     eprintln!("Loading dataset {}, split {}...", args.subset, args.split);
     let instances = load_dataset(&args.subset, &args.split, args.datasets_server.as_deref())
@@ -144,29 +145,17 @@ pub async fn run_batch(args: SwebenchArgs) -> Result<BatchSummary, String> {
     }
     eprintln!("Running on {} instances...", instances.len());
 
-    let specs = if args.config.is_empty() {
-        vec!["swebench.yaml".to_owned()]
-    } else {
-        args.config.clone()
-    };
-    eprintln!("Building agent config from specs: {specs:?}");
-    let mut config = config::load(&specs).map_err(|error| error.to_string())?;
-    Overrides::default()
-        .set("environment.environment_class", args.environment_class.clone())
-        .set("model.model_name", args.model.clone())
-        .set("model.model_class", args.model_class.clone())
-        .apply(&mut config);
+    let mut config = load_config(&args.config, "swebench.yaml")?;
+    with_model(Overrides::default(), args.model.as_deref()).apply(&mut config);
     // The model must resolve before any container starts.
-    let model_name = ModelSettings::new(&config["model"], None)
-        .map_err(|error| error.to_string())?
-        .config
-        .model_name;
+    let settings = ModelSettings::new(&config["model"]).map_err(|error| error.to_string())?;
+    let (client, _) = MiniModelClient::new(&settings, &config["providers"], Some(credential_store()))
+        .map_err(|error| error.to_string())?;
+    let model_name = format!("{}/{}", client.resolved().provider, client.resolved().id);
 
-    let report = output.join(format!(
-        "exit_statuses_{}.yaml",
-        crate::template::python_float(crate::trajectory::timestamp())
-    ));
-    let progress = Arc::new(BatchProgress::new(instances.len(), Some(report)));
+    let report = output.join(format!("exit_statuses_{}.yaml", now_millis()));
+    let stats = Arc::new(BatchStats::new(args.total_cost_limit, args.total_call_limit));
+    let progress = Arc::new(BatchProgress::new(instances.len(), Some(report), Arc::clone(&stats)));
     let cancelled = Arc::new(AtomicBool::new(false));
     let interrupts = {
         let cancelled = Arc::clone(&cancelled);
@@ -201,6 +190,7 @@ pub async fn run_batch(args: SwebenchArgs) -> Result<BatchSummary, String> {
         let log = Arc::clone(&log);
         let output = output.clone();
         let model_name = model_name.clone();
+        let stats = Arc::clone(&stats);
         tasks.spawn(async move {
             let Ok(_permit) = workers.acquire_owned().await else {
                 return;
@@ -208,7 +198,15 @@ pub async fn run_batch(args: SwebenchArgs) -> Result<BatchSummary, String> {
             if cancelled.load(Ordering::SeqCst) {
                 return;
             }
-            process_instance(&instance, &output, &config, &model_name, &progress, &log).await;
+            let batch = Batch {
+                output: &output,
+                config: &config,
+                model_name: &model_name,
+                progress: &progress,
+                log: &log,
+                stats: &stats,
+            };
+            process_instance(&instance, &batch).await;
         });
     }
     while let Some(joined) = tasks.join_next().await {
@@ -225,16 +223,26 @@ pub async fn run_batch(args: SwebenchArgs) -> Result<BatchSummary, String> {
     })
 }
 
-/// One instance: its container, the agent, the trajectory and the prediction (upstream's
-/// `process_instance`).
-async fn process_instance(
-    instance: &Json,
-    output: &Path,
-    config: &Json,
-    model_name: &str,
-    progress: &Arc<BatchProgress>,
-    log: &Log,
-) {
+/// What every instance of a batch shares.
+struct Batch<'a> {
+    output: &'a Path,
+    config: &'a Json,
+    model_name: &'a str,
+    progress: &'a Arc<BatchProgress>,
+    log: &'a Log,
+    stats: &'a Arc<BatchStats>,
+}
+
+/// One instance: its container, the agent, the trajectory and the prediction.
+async fn process_instance(instance: &Json, batch: &Batch<'_>) {
+    let Batch {
+        output,
+        config,
+        model_name,
+        progress,
+        log,
+        stats,
+    } = batch;
     let id = instance["instance_id"].as_str().unwrap_or_default().to_owned();
     let instance_dir = output.join(&id);
     let trajectory_path = instance_dir.join(format!("{id}.traj.json"));
@@ -248,11 +256,9 @@ async fn process_instance(
     let (exit_status, submission) = match instance_environment(config, instance).await {
         Err(error) => {
             log.line("ERROR", &format!("Error processing instance {id}: {error}"));
-            ("EnvironmentError".to_owned(), String::new())
+            (ExitStatus::Error, String::new())
         }
         Ok(env) => {
-            let mut config = config.clone();
-            config["agent"]["output_path"] = json!(trajectory_path.display().to_string());
             let on_step: StepCallback = {
                 let progress = Arc::clone(progress);
                 let id = id.clone();
@@ -260,14 +266,18 @@ async fn process_instance(
                     progress.update_instance_status(&id, &format!("Step {step:3} (${cost:.2})"));
                 })
             };
+            let mut extra = Map::new();
+            extra.insert("instance_id".to_owned(), json!(id));
             let result = match build_agent(
-                &config,
+                config,
                 BuildOptions {
-                    default_kind: Some(AgentKind::Default),
+                    kind: AgentKind::Default,
                     default_environment: "docker",
                     env: Some(Arc::clone(&env)),
-                    extra_info: vec![json!({ "instance_id": id })],
+                    output: Some(trajectory_path.clone()),
+                    extra,
                     on_step: Some(on_step),
+                    batch: Some(Arc::clone(stats)),
                     ..BuildOptions::default()
                 },
             )
@@ -275,18 +285,21 @@ async fn process_instance(
             {
                 Err(error) => {
                     log.line("ERROR", &format!("Error processing instance {id}: {error}"));
-                    ("ValueError".to_owned(), String::new())
+                    (ExitStatus::Error, String::new())
                 }
                 Ok(built) => {
                     let task = instance["problem_statement"].as_str().unwrap_or_default();
                     match built.agent.run(task, Map::new()).await {
                         Ok(output) => {
                             log.line("INFO", &format!("Saved trajectory to '{}'", trajectory_path.display()));
-                            (output.exit.exit_status, output.exit.submission)
+                            if let Some(error) = &output.exit.error {
+                                log.line("ERROR", &format!("Instance {id}: {error}"));
+                            }
+                            (output.exit.status, output.exit.submission)
                         }
                         Err(error) => {
                             log.line("ERROR", &format!("Error processing instance {id}: {error}"));
-                            ("RuntimeError".to_owned(), String::new())
+                            (ExitStatus::Error, String::new())
                         }
                     }
                 }
@@ -298,7 +311,7 @@ async fn process_instance(
     if let Err(error) = preds_update(&preds, &id, model_name, &submission) {
         log.line("ERROR", &format!("Could not update {}: {error}", preds.display()));
     }
-    progress.on_instance_end(&id, &exit_status);
+    progress.on_instance_end(&id, exit_status.as_str());
 }
 
 #[cfg(test)]

@@ -1,13 +1,13 @@
 //! What the bash tool, the generation hooks and the driver share: the trajectory, the
-//! counters, the mode and limits, and the steps upstream's agents take (confirm, execute,
-//! observe, submit, check the limits).
+//! counters, the mode and limits, and the steps of a run (confirm, execute, observe, submit,
+//! check the limits).
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use delta_ai::types::{AssistantBlock, AssistantMessage, StopReason};
+use delta_ai::types::{AssistantBlock, AssistantMessage, Message, StopReason};
 use delta_chord::context::Context;
 use regex::Regex;
 use serde_json::{Map, Value as Json, json};
@@ -16,22 +16,24 @@ use tokio::sync::{Notify, OnceCell};
 use super::config::{AgentConfig, AgentKind, Mode};
 use super::frontend::{Frontend, Input, Notice, Prompt};
 use crate::env::{Environment, ExecOutput};
-use crate::model::{ActionFormat, GlobalModelStats, ModelSettings, answer_cost, finish_reason};
-use crate::trajectory::{self, Trajectory, exit_message, extra, observation_message};
+use crate::model::{ActionFormat, BatchStats, ModelSettings};
+use crate::trajectory::{
+    Action, Entry, Exit, ExitStatus, InterruptReason, Stats, Trajectory, tool_result, user_message,
+};
 
-/// One action of a step: a command, and the tool call that asked for it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Action {
-    pub(super) command: String,
-    pub(super) tool_call_id: Option<String>,
+/// An answer whose actions did not parse: the rendered format error the model gets, and why.
+#[derive(Clone, Debug)]
+pub(super) struct Rejection {
+    pub(super) content: String,
+    pub(super) error: String,
 }
 
 /// The actions of the model's latest answer.
 #[derive(Debug)]
 pub(super) struct Round {
     pub(super) actions: Vec<Action>,
-    /// The rendered format error, when the answer did not parse: nothing runs.
-    pub(super) format_error: Option<String>,
+    /// Set when the answer did not parse: nothing runs.
+    pub(super) rejection: Option<Rejection>,
     /// Filled by the first tool call of the round, which runs every action.
     pub(super) outcome: OnceCell<Outcome>,
 }
@@ -52,14 +54,23 @@ pub(super) struct Outcome {
 enum End {
     Interrupt {
         content: String,
-        kind: &'static str,
+        reason: InterruptReason,
     },
     Submitted(String),
-    Exit(&'static str),
+    Exit(ExitStatus),
     /// Ctrl+C at a prompt: the driver asks for a comment.
     Interrupted,
     /// The run was aborted while a command ran.
     Aborted,
+}
+
+impl State {
+    /// Ends the run with `status`, unless it ended already.
+    pub(super) fn exit(&mut self, status: ExitStatus, error: Option<String>) {
+        if self.trajectory.exit.is_none() {
+            self.trajectory.exit = Some(Exit::new(status, error));
+        }
+    }
 }
 
 /// The mutable part.
@@ -84,17 +95,24 @@ pub(super) struct State {
 pub(super) struct Shared {
     pub(super) kind: AgentKind,
     pub(super) model: ModelSettings,
+    /// The resolved delta-ai model, for the trajectory.
+    pub(super) model_info: Json,
+    /// The cost of each scripted answer.
+    pub(super) script_costs: Vec<f64>,
+    /// The config's `providers` section, for the trajectory.
+    pub(super) providers: Json,
     pub(super) env: Arc<dyn Environment>,
     pub(super) frontend: Option<Arc<dyn Frontend>>,
     pub(super) output_path: Option<PathBuf>,
-    /// Parts merged into the saved trajectory.
-    pub(super) extra_info: Vec<Json>,
+    /// The trajectory's `extra`.
+    pub(super) extra: Map<String, Json>,
     pub(super) whitelist: Vec<Regex>,
     pub(super) started: Instant,
     pub(super) state: Mutex<State>,
     /// Asks the driver to abort the run: an exit was decided where no tool can end it.
     pub(super) stop: Notify,
     pub(super) on_step: Option<super::StepCallback>,
+    pub(super) batch: Option<Arc<BatchStats>>,
 }
 
 impl std::fmt::Debug for Shared {
@@ -106,14 +124,9 @@ impl std::fmt::Debug for Shared {
     }
 }
 
-/// An action that did not run (upstream's padding).
+/// An action that did not run.
 fn not_executed() -> ExecOutput {
-    ExecOutput {
-        output: String::new(),
-        returncode: -1,
-        exception_info: "action was not executed".to_owned(),
-        extra: Map::new(),
-    }
+    ExecOutput::exception(String::new(), "action was not executed")
 }
 
 impl Shared {
@@ -126,38 +139,39 @@ impl Shared {
         self.frontend.as_ref().filter(|_| self.kind == AgentKind::Interactive)
     }
 
-    /// Adds `message` to the trajectory and shows it.
-    pub(super) fn push(&self, state: &mut State, message: Json) {
+    /// Adds `entry` to the trajectory and shows it.
+    pub(super) fn push(&self, state: &mut State, entry: Entry) {
         if let Some(frontend) = &self.frontend {
-            frontend.show_message(&message, state.n_calls, state.cost);
+            frontend.show_entry(&entry, state.n_calls, state.cost);
         }
-        state.trajectory.messages.push(message);
+        state.trajectory.entries.push(entry);
     }
 
-    /// Adds a user message for the model (`extra.interrupt_type`) and queues it.
-    pub(super) fn push_user(&self, state: &mut State, content: String, kind: &str) {
-        let message = trajectory::message("user", &content, extra([("interrupt_type", json!(kind))]));
-        self.push(state, message);
+    /// Adds a message from the user that ends a step, and queues it for the model.
+    pub(super) fn push_interrupt(&self, state: &mut State, content: String, reason: InterruptReason) {
+        self.push(
+            state,
+            Entry::Interrupt {
+                message: user_message(&content),
+                reason,
+            },
+        );
         state.queue.push(content);
     }
 
-    /// Ends the run with `status`: an exit message whose content is the status.
-    pub(super) fn exit(&self, state: &mut State, status: &str, more: Map<String, Json>) {
-        self.push(state, exit_message(status, status, "", more));
-    }
-
     pub(super) fn exited(&self) -> bool {
-        self.lock().trajectory.exit().is_some()
+        self.lock().trajectory.exit.is_some()
     }
 
-    /// Upstream's `get_template_vars`: the agent config, the environment's and the model's
-    /// variables, the counters and the run's variables.
+    /// The template variables: the machine's (`system`, `release`, ...), the `agent`,
+    /// `model` and `environment` sections, the counters and the run's variables (`task`).
     pub(super) fn template_vars(&self, state: &State) -> Json {
         crate::template::vars([
-            state.config.dump(self.kind),
-            self.env.template_vars(),
-            self.model.dump(),
+            crate::template::uname(),
             json!({
+                "agent": state.config.dump(),
+                "model": self.model.dump(),
+                "environment": self.env.config(),
                 "n_model_calls": state.n_calls,
                 "model_cost": state.cost,
                 "elapsed_seconds": self.started.elapsed().as_secs(),
@@ -167,52 +181,69 @@ impl Shared {
     }
 
     /// The trajectory document.
-    pub(super) fn serialize(&self, state: &State) -> Json {
-        let parts = [self.model.serialize(), self.env.serialize()]
-            .into_iter()
-            .chain(self.extra_info.iter().cloned());
-        state
-            .trajectory
-            .serialize(state.cost, state.n_calls, &state.config.serialize(self.kind), parts)
+    pub(super) fn serialize(&self, state: &State) -> Trajectory {
+        let mut config = Map::new();
+        config.insert("agent".to_owned(), state.config.dump());
+        config.insert("model".to_owned(), self.model.dump());
+        config.insert("environment".to_owned(), self.env.config());
+        if !self.providers.is_null() {
+            config.insert("providers".to_owned(), self.providers.clone());
+        }
+        Trajectory {
+            stats: Stats {
+                calls: state.n_calls,
+                cost: state.cost,
+                elapsed_seconds: self.started.elapsed().as_secs_f64(),
+            },
+            model: self.model_info.clone(),
+            config: Json::Object(config),
+            extra: self.extra.clone(),
+            ..state.trajectory.clone()
+        }
     }
 
     /// Saves the trajectory when the agent has an output path.
     pub(super) fn save(&self, state: &State) {
         if let Some(path) = &self.output_path
-            && let Err(error) = trajectory::save_json(path, &self.serialize(state))
+            && let Err(error) = self.serialize(state).save(path)
         {
             eprintln!("Could not save the trajectory to {}: {error}", path.display());
         }
     }
 
-    /// The limit the next model call would exceed: `LimitsExceeded` (steps, cost) or
-    /// `TimeExceeded` (wall time).
-    fn exceeded(&self, state: &State) -> Option<&'static str> {
+    /// The run's limit the next model call would exceed.
+    fn run_limit(&self, state: &State) -> Option<ExitStatus> {
         let config = &state.config;
         if (config.step_limit > 0 && config.step_limit <= state.n_calls)
             || (config.cost_limit > 0.0 && config.cost_limit <= state.cost)
         {
-            return Some("LimitsExceeded");
+            return Some(ExitStatus::LimitsExceeded);
         }
-        let limit = config.wall_time_limit_seconds;
-        (limit > 0 && limit <= self.started.elapsed().as_secs()).then_some("TimeExceeded")
+        let limit = config.time_limit;
+        (limit > 0 && limit <= self.started.elapsed().as_secs()).then_some(ExitStatus::TimeExceeded)
     }
 
-    /// Whether another model call may happen. Over the step or cost limit, an interactive
-    /// agent with a person at the terminal asks for new limits; otherwise (and over the wall
-    /// time limit, which new limits cannot lift) the run exits.
+    /// Whether another model call may happen. The batch's limits end the run. Over its own
+    /// step or cost limit, an interactive agent with a person at the terminal asks for new
+    /// limits; otherwise (and over the time limit, which new limits cannot lift) the run
+    /// exits.
     pub(super) async fn check_limits(&self) -> bool {
         let status = {
-            let state = self.lock();
-            if state.trajectory.exit().is_some() {
+            let mut state = self.lock();
+            if state.trajectory.exit.is_some() {
                 return false;
             }
-            match self.exceeded(&state) {
+            if let Some(error) = self.batch.as_ref().and_then(|batch| batch.exceeded()) {
+                state.exit(ExitStatus::LimitsExceeded, Some(error));
+                self.save(&state);
+                return false;
+            }
+            match self.run_limit(&state) {
                 None => return true,
                 Some(status) => status,
             }
         };
-        if status == "LimitsExceeded"
+        if status == ExitStatus::LimitsExceeded
             && let Some(frontend) = self.interactive().filter(|frontend| frontend.is_interactive())
         {
             {
@@ -232,13 +263,13 @@ impl Shared {
                 let mut state = self.lock();
                 state.config.step_limit = step_limit;
                 state.config.cost_limit = cost_limit;
-                if self.exceeded(&state).is_none() {
+                if self.run_limit(&state).is_none() {
                     return true;
                 }
             }
         }
         let mut state = self.lock();
-        self.exit(&mut state, status, Map::new());
+        state.exit(status, None);
         self.save(&state);
         false
     }
@@ -253,9 +284,9 @@ impl Shared {
             .unwrap_or(Input::Eof)
     }
 
-    /// Asks `prompt` and handles the slash commands (upstream's
-    /// `_prompt_and_handle_slash_commands`): `/h` shows help and asks again, `/m` reads
-    /// several lines, a mode command switches the mode (or, when already in it, asks again).
+    /// Asks `prompt` and handles the slash commands: `/h` shows help and asks again, `/m`
+    /// reads several lines, a mode command switches the mode (or, when already in it, asks
+    /// again).
     pub(super) async fn ask_with_commands(&self, prompt: Prompt) -> Input {
         let Some(frontend) = self.frontend.clone() else {
             return Input::Eof;
@@ -290,7 +321,7 @@ impl Shared {
         }
     }
 
-    /// Whether the user must confirm `commands` (upstream's `_should_ask_confirmation`).
+    /// Whether the user must confirm `commands`.
     fn needs_confirmation(&self, commands: &[String]) -> bool {
         self.interactive().is_some()
             && self.lock().config.mode == Mode::Confirm
@@ -299,7 +330,7 @@ impl Shared {
                 .any(|command| !self.whitelist.iter().any(|pattern| pattern.is_match(command)))
     }
 
-    /// Upstream's `_ask_confirmation_or_interrupt`.
+    /// Asks the user to confirm `commands`; `Some` when the round ends instead.
     async fn confirm(&self, commands: &[String]) -> Option<End> {
         if !self.needs_confirmation(commands) {
             return None;
@@ -314,21 +345,21 @@ impl Shared {
                 "" | "/y" => None,
                 "/u" => Some(End::Interrupt {
                     content: "Commands not executed. Switching to human mode".to_owned(),
-                    kind: "UserRejection",
+                    reason: InterruptReason::UserRejection,
                 }),
                 comment => Some(End::Interrupt {
                     content: format!(
                         "Commands not executed. The user rejected your commands with the following message: {comment}"
                     ),
-                    kind: "UserRejection",
+                    reason: InterruptReason::UserRejection,
                 }),
             },
             Input::Interrupted => Some(End::Interrupted),
-            Input::Eof => Some(End::Exit("EOFError")),
+            Input::Eof => Some(End::Exit(ExitStatus::Eof)),
         }
     }
 
-    /// The agent wants to finish: upstream's `_check_for_new_task_or_submit`.
+    /// The agent wants to finish: a new task, or Enter to submit.
     async fn confirm_exit(&self, submission: String) -> End {
         let asks = self.interactive().is_some() && self.lock().config.confirm_exit;
         if !asks {
@@ -341,25 +372,25 @@ impl Shared {
                     "/u" => {
                         return End::Interrupt {
                             content: "Switched to human mode.".to_owned(),
-                            kind: "UserInterruption",
+                            reason: InterruptReason::UserInterruption,
                         };
                     }
                     "/y" | "/c" => {}
                     task => {
                         return End::Interrupt {
                             content: format!("The user added a new task: {task}"),
-                            kind: "UserNewTask",
+                            reason: InterruptReason::UserNewTask,
                         };
                     }
                 },
                 Input::Interrupted => return End::Interrupted,
-                Input::Eof => return End::Exit("EOFError"),
+                Input::Eof => return End::Exit(ExitStatus::Eof),
             }
         }
     }
 
     /// Runs `actions`: confirmation, execution until one submits, the observations (tool
-    /// messages for the model's tool calls, user messages otherwise), then the exit, the
+    /// results for the model's tool calls, user messages otherwise), then the exit, the
     /// interrupt or, for the model's actions, the limits.
     pub(super) async fn run_actions(&self, actions: &[Action], human: bool, ctx: &Context) -> Outcome {
         let commands: Vec<String> = actions.iter().map(|action| action.command.clone()).collect();
@@ -388,11 +419,20 @@ impl Shared {
         outcome
     }
 
+    /// The observation of `action` as the model gets it: the result of its tool call, or a
+    /// user message.
+    fn observation_message(action: &Action, human: bool, content: &str) -> Message {
+        match action.tool_call_id.as_deref().filter(|_| !human) {
+            Some(id) => tool_result(id, content),
+            None => user_message(content),
+        }
+    }
+
     /// Adds a round's observations and its ending to the trajectory.
     fn finish_round(&self, actions: &[Action], outputs: &[ExecOutput], end: Option<End>, human: bool) -> Outcome {
         let mut state = self.lock();
         let vars = self.template_vars(&state);
-        let pad = !human && self.model.class.format == ActionFormat::Toolcall;
+        let pad = !human && self.model.config.actions == ActionFormat::ToolCalls;
         let mut outcome = Outcome::default();
         for (index, action) in actions.iter().enumerate() {
             let output = match outputs.get(index) {
@@ -405,35 +445,40 @@ impl Shared {
             let content = match crate::template::render(&self.model.config.observation_template, &vars) {
                 Ok(content) => content,
                 Err(error) => {
-                    let message = error.to_string();
-                    self.exit(&mut state, "TemplateError", extra([("exception_str", json!(message))]));
+                    let message = format!("observation_template: {error}");
+                    state.exit(ExitStatus::Error, Some(message.clone()));
                     outcome.stop = true;
                     message
                 }
             };
-            let id = if human { None } else { action.tool_call_id.as_deref() };
-            if state.trajectory.exit().is_none() {
-                self.push(&mut state, observation_message(&content, &output, id));
-            }
+            let message = Self::observation_message(action, human, &content);
+            self.push(&mut state, Entry::Observation { message, output });
             outcome.observations.push(content);
         }
         match end {
-            Some(End::Interrupt { content, kind }) => {
-                let message = trajectory::message("user", &content, extra([("interrupt_type", json!(kind))]));
-                self.push(&mut state, message);
+            Some(End::Interrupt { content, reason }) => {
+                self.push(
+                    &mut state,
+                    Entry::Interrupt {
+                        message: user_message(&content),
+                        reason,
+                    },
+                );
                 outcome.interrupt = Some(content);
                 outcome.stop = true;
             }
             Some(End::Submitted(submission)) => {
-                self.push(
-                    &mut state,
-                    exit_message(&submission, "Submitted", &submission, Map::new()),
-                );
+                if state.trajectory.exit.is_none() {
+                    state.trajectory.exit = Some(Exit {
+                        status: ExitStatus::Submitted,
+                        submission,
+                        error: None,
+                    });
+                }
                 outcome.stop = true;
             }
             Some(End::Exit(status)) => {
-                let more = extra([("exception_str", json!(""))]);
-                self.push(&mut state, exit_message("", status, "", more));
+                state.exit(status, None);
                 outcome.stop = true;
             }
             Some(End::Interrupted) => {
@@ -450,9 +495,9 @@ impl Shared {
         outcome
     }
 
-    /// Records an answer (the `after_response` hook): counts the call and its cost, parses
-    /// its actions into the next round, and adds the assistant message, or the format error
-    /// upstream adds instead.
+    /// Records an answer (the `after_response` hook): counts the call and its cost, adds the
+    /// answer, and parses its actions into the next round, or renders the format error the
+    /// model gets instead.
     pub(super) fn record_answer(&self, answer: &AssistantMessage) {
         let mut state = self.lock();
         if matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted) {
@@ -461,101 +506,81 @@ impl Shared {
         }
         state.last_error = None;
         state.round = None;
-        if state.trajectory.exit().is_some() {
+        if state.trajectory.exit.is_some() {
             self.stop.notify_one();
             return;
         }
         // A call the step or cost limit should have prevented: its round skipped the check.
-        if self.exceeded(&state) == Some("LimitsExceeded") {
-            self.exit(&mut state, "LimitsExceeded", Map::new());
+        if self.run_limit(&state) == Some(ExitStatus::LimitsExceeded) {
+            state.exit(ExitStatus::LimitsExceeded, None);
             self.save(&state);
             self.stop.notify_one();
             return;
         }
         state.n_calls += 1;
-        let cost = if self.model.class.deterministic {
-            self.model.deterministic_cost((state.n_calls - 1) as usize)
+        let cost = if self.model.is_scripted() {
+            usize::try_from(state.n_calls - 1)
+                .ok()
+                .and_then(|index| self.script_costs.get(index))
+                .copied()
+                .unwrap_or_default()
         } else {
-            answer_cost(answer)
+            answer.usage.cost.total
         };
-        if cost <= 0.0 && !self.model.class.deterministic && self.model.config.cost_tracking != "ignore_errors" {
-            let message = format!(
-                "Error calculating cost for model {}: the call reported no cost, perhaps the model has no price in delta-ai's catalog? You can ignore this issue from your config file with cost_tracking: 'ignore_errors' or globally with export MSWEA_COST_TRACKING='ignore_errors'.",
-                self.model.config.model_name
-            );
-            let more = extra([("exception_str", json!(message))]);
-            self.push(&mut state, exit_message(&message, "RuntimeError", "", more));
-            self.save(&state);
-            self.stop.notify_one();
-            return;
-        }
         state.cost += cost;
-        if let Err(message) = GlobalModelStats::get().add(cost) {
-            let more = extra([("exception_str", json!(message))]);
-            self.push(&mut state, exit_message(&message, "RuntimeError", "", more));
-            self.save(&state);
-            self.stop.notify_one();
-            return;
+        if let Some(batch) = &self.batch {
+            batch.add(cost);
         }
 
-        let response = serde_json::to_value(answer).unwrap_or(Json::Null);
-        let finish = finish_reason(answer.stop_reason);
-        let (actions, error) = match self.model.class.format {
-            ActionFormat::Toolcall => toolcall_actions(answer),
-            ActionFormat::Textbased => self.textbased_actions(answer),
+        let (actions, error) = match self.model.config.actions {
+            ActionFormat::ToolCalls => toolcall_actions(answer),
+            ActionFormat::Text => self.text_actions(answer),
         };
+        let message = Message::Assistant(answer.clone());
         match error {
             Some(error) => {
-                let mut vars = json!({ "error": error.message, "finish_reason": finish });
-                match self.model.class.format {
-                    ActionFormat::Toolcall => {
-                        vars["actions"] = json!([]);
-                        vars["has_tool_calls"] = json!(error.has_tool_calls);
-                    }
-                    ActionFormat::Textbased => vars["actions"] = json!(error.found),
-                }
+                self.push(
+                    &mut state,
+                    Entry::Answer {
+                        message,
+                        actions: Vec::new(),
+                        cost,
+                    },
+                );
+                let mut vars = self.template_vars(&state);
+                vars["error"] = json!(error.message);
+                vars["stop_reason"] = serde_json::to_value(answer.stop_reason).unwrap_or(Json::Null);
+                vars["has_tool_calls"] = json!(error.has_tool_calls);
+                vars["actions"] = json!(error.found);
                 let content = crate::template::render(&self.model.format_error_template, &vars)
-                    .unwrap_or_else(|render| render.to_string());
-                let mut fields = extra([("interrupt_type", json!("FormatError"))]);
-                if self.model.class.format == ActionFormat::Textbased {
-                    fields.insert("n_actions".to_owned(), json!(error.found.len()));
-                    fields.insert("model_response".to_owned(), json!(answer_text(answer)));
-                }
-                fields.insert("cost".to_owned(), json!(cost));
-                fields.insert("response".to_owned(), response);
-                let message = trajectory::message("user", &content, fields);
-                self.push(&mut state, message);
+                    .unwrap_or_else(|render| format!("format_error_template: {render}"));
                 state.format_errors += 1;
-                let max = state.config.max_consecutive_format_errors;
-                if max > 0 && max <= state.format_errors {
-                    self.exit(&mut state, "RepeatedFormatError", Map::new());
+                let limit = state.config.format_error_limit;
+                if limit > 0 && limit <= state.format_errors {
+                    state.exit(ExitStatus::FormatErrors, None);
                     self.stop.notify_one();
                 }
                 state.round = Some(Arc::new(Round {
                     actions: Vec::new(),
-                    format_error: Some(content),
+                    rejection: Some(Rejection {
+                        content,
+                        error: error.message,
+                    }),
                     outcome: OnceCell::new(),
                 }));
             }
             None => {
-                let listed: Vec<Json> = actions
-                    .iter()
-                    .map(|action| match &action.tool_call_id {
-                        Some(id) => json!({ "command": action.command, "tool_call_id": id }),
-                        None => json!({ "command": action.command }),
-                    })
-                    .collect();
-                let fields = extra([
-                    ("actions", Json::Array(listed)),
-                    ("response", response),
-                    ("cost", json!(cost)),
-                    ("timestamp", json!(trajectory::timestamp())),
-                ]);
-                let message = trajectory::assistant_message(answer, fields);
-                self.push(&mut state, message);
+                self.push(
+                    &mut state,
+                    Entry::Answer {
+                        message,
+                        actions: actions.clone(),
+                        cost,
+                    },
+                );
                 state.round = Some(Arc::new(Round {
                     actions,
-                    format_error: None,
+                    rejection: None,
                     outcome: OnceCell::new(),
                 }));
             }
@@ -563,16 +588,15 @@ impl Shared {
         self.save(&state);
     }
 
-    /// The text-based actions: exactly one match of `action_regex` (upstream's
-    /// `parse_regex_actions`).
-    fn textbased_actions(&self, answer: &AssistantMessage) -> (Vec<Action>, Option<FormatError>) {
+    /// The text actions: exactly one match of `action_regex`.
+    fn text_actions(&self, answer: &AssistantMessage) -> (Vec<Action>, Option<FormatError>) {
         let text = answer_text(answer);
         let found: Vec<String> = self
             .model
             .action_regex
             .captures_iter(&text)
             .map(|captures| {
-                // `re.findall`: the group when there is one, else the whole match.
+                // The first group when there is one, else the whole match.
                 captures
                     .get(1)
                     .or_else(|| captures.get(0))
@@ -603,19 +627,31 @@ impl Shared {
     }
 
     /// Continues a run whose answer called no tool (the `on_yield` hook): the format error,
-    /// or the observation of the text-based action. `None` ends the run.
+    /// or the observation of the text action. `None` ends the run.
     pub(super) async fn continue_after_answer(&self, ctx: &Context) -> Option<String> {
         let round = {
             let state = self.lock();
-            if state.trajectory.exit().is_some() {
+            if state.trajectory.exit.is_some() {
                 return None;
             }
             state.round.clone()?
         };
-        if let Some(error) = &round.format_error {
-            return self.check_limits().await.then(|| error.clone());
+        if let Some(rejection) = &round.rejection {
+            if !self.check_limits().await {
+                return None;
+            }
+            let mut state = self.lock();
+            self.push(
+                &mut state,
+                Entry::FormatError {
+                    message: user_message(&rejection.content),
+                    error: rejection.error.clone(),
+                },
+            );
+            self.save(&state);
+            return Some(rejection.content.clone());
         }
-        if self.model.class.format != ActionFormat::Textbased || round.actions.is_empty() {
+        if self.model.config.actions != ActionFormat::Text || round.actions.is_empty() {
             return None;
         }
         let outcome = self.run_actions(&round.actions, false, ctx).await;
@@ -634,8 +670,17 @@ impl Shared {
         let Some(round) = self.lock().round.clone() else {
             return ("No action to run.".to_owned(), true);
         };
-        if let Some(error) = &round.format_error {
-            return (error.clone(), self.exited());
+        if let Some(rejection) = &round.rejection {
+            let mut state = self.lock();
+            self.push(
+                &mut state,
+                Entry::FormatError {
+                    message: tool_result(call_id, &rejection.content),
+                    error: rejection.error.clone(),
+                },
+            );
+            self.save(&state);
+            return (rejection.content.clone(), state.trajectory.exit.is_some());
         }
         let outcome = round
             .outcome
@@ -664,7 +709,7 @@ impl Shared {
 struct FormatError {
     message: String,
     has_tool_calls: bool,
-    /// The text-based actions found.
+    /// The text actions found.
     found: Vec<String>,
 }
 
@@ -680,8 +725,7 @@ fn answer_text(answer: &AssistantMessage) -> String {
         .join("\n")
 }
 
-/// The tool-call actions (upstream's `parse_toolcall_actions`): every call must be `bash`
-/// with a `command`.
+/// The tool-call actions: every call must be `bash` with a `command`.
 fn toolcall_actions(answer: &AssistantMessage) -> (Vec<Action>, Option<FormatError>) {
     let calls: Vec<_> = answer
         .content
@@ -708,7 +752,7 @@ fn toolcall_actions(answer: &AssistantMessage) -> (Vec<Action>, Option<FormatErr
         if let Some(error) = &call.arguments_error {
             let _ = write!(message, "Error parsing tool call arguments: {error}.");
         }
-        if call.name != "bash" {
+        if call.name != super::BASH_TOOL_NAME {
             let _ = write!(message, "Unknown tool '{}'.", call.name);
         }
         let command = call.arguments.get("command");
@@ -734,4 +778,16 @@ fn toolcall_actions(answer: &AssistantMessage) -> (Vec<Action>, Option<FormatErr
         });
     }
     (actions, None)
+}
+
+/// The observation of an action that did not run, for the trajectory of an interrupted
+/// round.
+pub(super) fn unfinished_observation(shared: &Shared, state: &mut State, action: &Action) {
+    let output = not_executed();
+    let mut vars = shared.template_vars(state);
+    vars["output"] = output.to_json();
+    let content = crate::template::render(&shared.model.config.observation_template, &vars)
+        .unwrap_or_else(|error| format!("observation_template: {error}"));
+    let message = Shared::observation_message(action, false, &content);
+    shared.push(state, Entry::Observation { message, output });
 }

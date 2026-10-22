@@ -1,15 +1,15 @@
-//! The batch runner's progress (upstream's `RunBatchProgressManager`): an overall bar with cost
-//! and ETA, the exit statuses so far, and each running instance's status, redrawn in place on
-//! a terminal; a YAML report of the exit statuses after each instance.
+//! The batch runner's progress: an overall bar with cost and ETA, the exit statuses so far,
+//! and each running instance's status, redrawn in place on a terminal; a YAML report of the
+//! exit statuses after each instance.
 
 use std::io::{IsTerminal as _, Write as _};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value as Json};
 
-use crate::model::GlobalModelStats;
+use crate::model::BatchStats;
 
 #[derive(Debug, Default)]
 struct Inner {
@@ -30,6 +30,7 @@ pub struct BatchProgress {
     report: Option<PathBuf>,
     /// Redraw in place (stderr is a terminal); otherwise one line per finished instance.
     live: bool,
+    stats: Arc<BatchStats>,
     inner: Mutex<Inner>,
 }
 
@@ -53,12 +54,13 @@ fn clock(elapsed: Duration) -> String {
 }
 
 impl BatchProgress {
-    pub fn new(total: usize, report: Option<PathBuf>) -> Self {
+    pub fn new(total: usize, report: Option<PathBuf>, stats: Arc<BatchStats>) -> Self {
         Self {
             total,
             started: Instant::now(),
             report,
             live: std::io::stderr().is_terminal(),
+            stats,
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -106,7 +108,7 @@ impl BatchProgress {
         self.save_report();
     }
 
-    /// The exit statuses as upstream's report holds them.
+    /// The exit statuses and their instances.
     pub fn overview(&self) -> Json {
         let mut overview = Map::new();
         overview.insert(
@@ -140,7 +142,7 @@ impl BatchProgress {
     pub fn lines(&self, width: usize) -> Vec<String> {
         const SPINNER: [char; 8] = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
         let completed = self.completed();
-        let (cost, _) = GlobalModelStats::get().totals();
+        let (cost, _) = self.stats.totals();
         let mut inner = self.lock();
         inner.spinner = (inner.spinner + 1) % SPINNER.len();
         let spinner = SPINNER[inner.spinner];
@@ -224,7 +226,7 @@ mod tests {
     fn statuses_are_counted_and_reported() {
         let dir = tempfile::tempdir().unwrap();
         let report = dir.path().join("exit_statuses.yaml");
-        let progress = BatchProgress::new(3, Some(report.clone()));
+        let progress = BatchProgress::new(3, Some(report.clone()), Arc::default());
         progress.on_instance_start("a__1");
         progress.on_instance_start("b__2");
         progress.update_instance_status("b__2", "Step   2 ($0.10)");
@@ -235,20 +237,20 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("b__2") && line.contains("Step   2 ($0.10)"))
         );
-        progress.on_instance_end("a__1", "Submitted");
-        progress.on_instance_end("b__2", "LimitsExceeded");
+        progress.on_instance_end("a__1", "submitted");
+        progress.on_instance_end("b__2", "limits_exceeded");
         assert_eq!(progress.completed(), 2);
         let lines = progress.lines(120);
         assert!(lines[0].contains("2/3"));
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("Submitted") && line.contains("a__1"))
+                .any(|line| line.starts_with("submitted") && line.contains("a__1"))
         );
         let saved: Json = serde_saphyr::from_str(&std::fs::read_to_string(report).unwrap()).unwrap();
         assert_eq!(
             saved,
-            serde_json::json!({ "instances_by_exit_status": { "Submitted": ["a__1"], "LimitsExceeded": ["b__2"] } })
+            serde_json::json!({ "instances_by_exit_status": { "submitted": ["a__1"], "limits_exceeded": ["b__2"] } })
         );
         assert_eq!(shorten("abcdefghij", 6, true), "...hij");
         assert_eq!(shorten("abcdefghij", 6, false), "abc...");

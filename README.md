@@ -56,7 +56,7 @@ every difference from upstream.
 
 | Example | Upstream | Description |
 |---------|----------|-------------|
-| **[mini-swe-agent](examples/mini-swe-agent)** | [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) | The `mini` agent on delta-harness: upstream's configs, trajectories and trajectory inspector, local and Docker environments, SWE-bench runners. Not published |
+| **[mini-swe-agent](examples/mini-swe-agent)** | [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) | The `mini` agent on delta-harness and delta-ai, with its own config, credentials (pi's `auth.json`) and trajectory format: a trajectory inspector, local and Docker environments, SWE-bench runners. Not published |
 
 ## Permissions & Containerization
 

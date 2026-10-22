@@ -14,7 +14,7 @@ use super::state::Shared;
 /// The tool's name.
 pub const BASH_TOOL_NAME: &str = "bash";
 
-/// Upstream's `BASH_TOOL`.
+/// The tool the model runs commands with.
 static BASH_TOOL: LazyLock<Tool> = LazyLock::new(|| Tool {
     name: BASH_TOOL_NAME.to_owned(),
     description: "Execute a bash command".to_owned(),
@@ -32,8 +32,7 @@ static BASH_TOOL: LazyLock<Tool> = LazyLock::new(|| Tool {
 });
 
 /// Runs the model's commands in the agent's environment. The first call of a round runs
-/// every action of the round, as upstream does, so each call knows whether the round ended
-/// the run.
+/// every action of the round, so each call knows whether the round ended the run.
 #[derive(Debug)]
 pub(super) struct BashTool {
     pub(super) shared: Arc<Shared>,

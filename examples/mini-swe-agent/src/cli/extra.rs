@@ -1,16 +1,18 @@
-//! `mini-extra`: the global config, the inspector and the SWE-bench runners (upstream's
-//! `run/utilities/mini_extra.py`).
+//! `mini-extra`: credentials, models, the global config, the inspector and the SWE-bench
+//! runners.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use delta_ai::auth::AuthType;
 
+use super::account;
 use crate::swebench::{SingleArgs, SwebenchArgs, run_batch, run_single};
 
-/// The central entry point for all extra commands from mini-swe-agent.
+/// delta-mini's extra commands.
 #[derive(Debug, Parser)]
-#[command(name = "mini-extra", version = crate::trajectory::MINI_VERSION)]
+#[command(name = "mini-extra", version)]
 pub struct ExtraArgs {
     #[command(subcommand)]
     pub command: ExtraCommand,
@@ -18,21 +20,39 @@ pub struct ExtraArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ExtraCommand {
-    /// Manage the global config file.
+    /// The global config (`config.yaml` in the home directory).
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Run inspector (browse trajectories).
+    /// Log in to a provider and store the credential in `auth.json`.
+    Login {
+        /// The provider id; asked for when not given.
+        provider: Option<String>,
+        /// Log in with OAuth (the default where the provider has it).
+        #[arg(long, conflicts_with = "api_key")]
+        oauth: bool,
+        /// Store an API key.
+        #[arg(long = "api-key")]
+        api_key: bool,
+    },
+    /// Remove a provider's stored credential.
+    Logout { provider: String },
+    /// List the models whose provider has credentials.
+    Models {
+        /// Only this provider's models.
+        provider: Option<String>,
+        /// Every model, credentials or not.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Browse trajectories.
     #[command(visible_aliases = ["i", "inspector"])]
     Inspect {
-        /// Directory to search for trajectory files or specific trajectory file.
+        /// A trajectory file, or a directory to search for `*.traj.json` files.
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Show reasoning content (the default).
-        #[arg(long, overrides_with = "no_reasoning")]
-        reasoning: bool,
-        /// Hide reasoning content.
+        /// Hide thinking.
         #[arg(long = "no-reasoning")]
         no_reasoning: bool,
     },
@@ -42,42 +62,54 @@ pub enum ExtraCommand {
     SwebenchSingle(SingleArgs),
 }
 
-/// The global config file; you can also edit the `.env` file in the config directory.
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
-    /// Set up the global config file.
+    /// Choose the default model, logging in to its provider when needed.
     Setup,
-    /// Set a key in the global config file.
-    Set { key: Option<String>, value: Option<String> },
-    /// Unset a key in the global config file.
-    Unset { key: Option<String> },
-    /// Edit the global config file.
+    /// Show the home directory, the global config and the stored credentials.
+    Show,
+    /// Edit the global config in `$EDITOR`.
     Edit,
 }
 
-/// Runs `mini-extra`.
-pub async fn run_extra(args: ExtraArgs) -> ExitCode {
-    let io = |result: std::io::Result<()>| match result {
+fn exit(result: Result<(), String>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
-    };
+    }
+}
+
+/// Runs `mini-extra`.
+pub async fn run_extra(args: ExtraArgs) -> ExitCode {
     match args.command {
-        ExtraCommand::Config { command } => io(match command {
-            ConfigCommand::Setup => crate::global::setup(),
-            ConfigCommand::Set { key, value } => crate::global::set(key, value),
-            ConfigCommand::Unset { key } => crate::global::unset(key),
-            ConfigCommand::Edit => crate::global::edit(),
+        ExtraCommand::Config { command } => exit(match command {
+            ConfigCommand::Setup => account::setup_command().await,
+            ConfigCommand::Show => account::show_command().await,
+            ConfigCommand::Edit => crate::home::edit_config().map_err(|error| error.to_string()),
         }),
-        ExtraCommand::Inspect { path, no_reasoning, .. } => match crate::inspector::trajectory_files(&path) {
-            Ok(files) => io(crate::inspector::run(files, !no_reasoning)),
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::FAILURE
-            }
-        },
+        ExtraCommand::Login {
+            provider,
+            oauth,
+            api_key,
+        } => {
+            let method = if oauth {
+                Some(AuthType::OAuth)
+            } else if api_key {
+                Some(AuthType::ApiKey)
+            } else {
+                None
+            };
+            exit(account::login_command(provider, method).await)
+        }
+        ExtraCommand::Logout { provider } => exit(account::logout_command(&provider).await),
+        ExtraCommand::Models { provider, all } => exit(account::models_command(provider.as_deref(), all).await),
+        ExtraCommand::Inspect { path, no_reasoning } => exit(
+            crate::inspector::trajectory_files(&path)
+                .and_then(|files| crate::inspector::run(files, !no_reasoning).map_err(|error| error.to_string())),
+        ),
         ExtraCommand::Swebench(args) => {
             super::startup_banner();
             match run_batch(args).await {

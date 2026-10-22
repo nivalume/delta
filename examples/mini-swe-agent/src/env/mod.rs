@@ -1,5 +1,5 @@
-//! Where actions run: the local machine or a Docker container (upstream's
-//! `environments/local.py` and `environments/docker.py`).
+//! Where actions run: this machine or a Docker container. `environment.type` picks one
+//! (`local` by default); the rest of the section is that environment's config.
 
 mod docker;
 mod local;
@@ -18,32 +18,29 @@ pub use local::{LocalEnvironment, LocalEnvironmentConfig};
 /// The first output line that submits: the rest of the output is the submission.
 pub const SUBMIT_MARKER: &str = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT";
 
-/// What one command produced, as upstream's `execute` returns it.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// What one command produced.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecOutput {
+    /// stdout and stderr, merged in arrival order.
     pub output: String,
+    /// -1 when the command did not finish.
     pub returncode: i64,
+    /// Why the command did not finish (a timeout, an interruption); empty otherwise.
     pub exception_info: String,
-    #[serde(default, skip_serializing_if = "Map::is_empty")]
-    pub extra: Map<String, Json>,
 }
 
 impl ExecOutput {
-    /// A command that did not finish: upstream's `except Exception` branch.
-    pub fn exception(output: String, exception_type: &str, exception: &str) -> Self {
-        let mut extra = Map::new();
-        extra.insert("exception_type".to_owned(), Json::String(exception_type.to_owned()));
-        extra.insert("exception".to_owned(), Json::String(exception.to_owned()));
+    /// A command that did not finish.
+    pub fn exception(output: String, info: impl Into<String>) -> Self {
         Self {
             output,
             returncode: -1,
-            exception_info: format!("An error occurred while executing the command: {exception}"),
-            extra,
+            exception_info: info.into(),
         }
     }
 
     /// The submission, when the output asks to submit: its first non-blank line is the
-    /// marker and the command succeeded (upstream's `_check_finished`).
+    /// marker and the command succeeded.
     pub fn submission(&self) -> Option<String> {
         if self.returncode != 0 {
             return None;
@@ -72,11 +69,9 @@ pub trait Environment: Send + Sync {
         ctx: &'a Context,
     ) -> BoxFuture<'a, ExecOutput>;
 
-    /// The environment's template variables.
-    fn template_vars(&self) -> Json;
-
-    /// Its part of the trajectory: `info.config.environment` and `environment_type`.
-    fn serialize(&self) -> Json;
+    /// The environment's section as it runs, `type` included: the template variable
+    /// `environment` and the trajectory's `config.environment`.
+    fn config(&self) -> Json;
 
     /// Stops what the environment started.
     fn cleanup(&self) -> BoxFuture<'_, ()> {
@@ -95,56 +90,53 @@ pub enum EnvironmentError {
     Start(String),
 }
 
-/// The environment kind `environment_class` names: a short name or upstream's class path.
-pub fn environment_kind(class: &str) -> Result<&'static str, EnvironmentError> {
-    match class {
-        "local" | "minisweagent.environments.local.LocalEnvironment" => Ok("local"),
-        "docker" | "minisweagent.environments.docker.DockerEnvironment" => Ok("docker"),
-        other => Err(EnvironmentError::UnknownType(other.to_owned())),
-    }
+/// The keys of the `environment` section that are not an environment's config.
+const SECTION_KEYS: [&str; 2] = ["type", "startup_command"];
+
+/// The environment type `section` names, `default_type` when it names none.
+pub fn environment_type(section: &Json, default_type: &str) -> String {
+    section["type"]
+        .as_str()
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or(default_type)
+        .to_owned()
 }
 
-/// Builds the environment `config` describes; `environment_class` falls back to
-/// `default_type`.
-pub async fn get_environment(config: &Json, default_type: &str) -> Result<Arc<dyn Environment>, EnvironmentError> {
-    let mut config = match config {
+/// Builds the environment the `environment` section describes.
+pub async fn get_environment(section: &Json, default_type: &str) -> Result<Arc<dyn Environment>, EnvironmentError> {
+    let kind = environment_type(section, default_type);
+    let mut config = match section {
         Json::Object(object) => object.clone(),
         _ => Map::new(),
     };
-    let class = match config.remove("environment_class") {
-        Some(Json::String(class)) if !class.is_empty() => class,
-        _ => default_type.to_owned(),
-    };
-    match environment_kind(&class)? {
+    for key in SECTION_KEYS {
+        config.remove(key);
+    }
+    match kind.as_str() {
         "docker" => {
             let config: DockerEnvironmentConfig = serde_json::from_value(Json::Object(config))?;
             Ok(Arc::new(DockerEnvironment::start(config).await?))
         }
-        _ => {
+        "local" => {
             let config: LocalEnvironmentConfig = serde_json::from_value(Json::Object(config))?;
             Ok(Arc::new(LocalEnvironment::new(config)))
         }
+        other => Err(EnvironmentError::UnknownType(other.to_owned())),
     }
 }
 
-/// `{"info": {"config": {"environment": config, "environment_type": type}}}`.
-fn serialized(config: &Json, environment_type: &str) -> Json {
-    serde_json::json!({
-        "info": {
-            "config": {
-                "environment": config,
-                "environment_type": environment_type,
-            }
-        }
-    })
+/// `config` with its `type` first.
+fn typed(kind: &str, config: Json) -> Json {
+    let mut typed = Map::new();
+    typed.insert("type".to_owned(), Json::String(kind.to_owned()));
+    if let Json::Object(config) = config {
+        typed.extend(config);
+    }
+    Json::Object(typed)
 }
 
-/// How Python prints a `TimeoutExpired`.
-fn timeout_message(command: &str, timeout: Duration) -> String {
-    format!(
-        "Command '{command}' timed out after {} seconds",
-        crate::template::python_float(timeout.as_secs_f64()).trim_end_matches(".0")
-    )
+fn timeout_message(timeout: Duration) -> String {
+    format!("The command timed out after {} seconds", timeout.as_secs_f64())
 }
 
 #[cfg(test)]
@@ -177,15 +169,24 @@ mod tests {
         assert_eq!(output("", 0).submission(), None);
     }
 
-    #[test]
-    fn timeouts_print_as_python() {
+    #[tokio::test]
+    async fn the_type_picks_the_environment() {
+        let local = get_environment(&serde_json::json!({ "timeout": 5, "startup_command": "x" }), "local")
+            .await
+            .unwrap();
+        assert_eq!(local.config()["type"], "local");
+        assert_eq!(local.config()["timeout"], 5);
+        assert!(matches!(
+            get_environment(&serde_json::json!({ "type": "podman" }), "local").await,
+            Err(EnvironmentError::UnknownType(_))
+        ));
+        assert!(matches!(
+            get_environment(&serde_json::json!({ "environment_class": "local" }), "local").await,
+            Err(EnvironmentError::Config(_))
+        ));
         assert_eq!(
-            timeout_message("sleep 9", Duration::from_secs(30)),
-            "Command 'sleep 9' timed out after 30 seconds"
-        );
-        assert_eq!(
-            timeout_message("x", Duration::from_millis(1500)),
-            "Command 'x' timed out after 1.5 seconds"
+            timeout_message(Duration::from_millis(1500)),
+            "The command timed out after 1.5 seconds"
         );
     }
 }

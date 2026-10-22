@@ -1,5 +1,5 @@
 //! SWE-bench: the batch runner (`mini-extra swebench`) and the single-instance runner
-//! (`mini-extra swebench-single`), as upstream's `run/benchmarks/swebench*.py`.
+//! (`mini-extra swebench-single`).
 
 mod dataset;
 mod progress;
@@ -17,7 +17,7 @@ pub use pyrandom::PyRandom;
 pub use run::{SwebenchArgs, preds_remove, preds_update, run_batch};
 pub use single::{SingleArgs, run_single, select_instance};
 
-use crate::env::{Environment, get_environment};
+use crate::env::{Environment, environment_type, get_environment};
 
 /// The Docker image of an instance: its `image_name` or `docker_image`, else SWE-bench's
 /// image for its id (`__` becomes `_1776_`, which Docker allows).
@@ -36,9 +36,10 @@ pub fn docker_image_name(instance: &Json) -> String {
     .to_lowercase()
 }
 
-/// Filters, slices and shuffles instances as upstream's `filter_instances`: shuffling sorts by
-/// id and shuffles with Python's `random.seed(42)`, the filter is a regular expression matched
-/// at the start of the id, the slice is Python's `start:stop:step`.
+/// Filters, slices and shuffles instances: shuffling sorts by id and shuffles with a fixed seed
+/// (Python's `random.seed(42)` and `shuffle`, so the order is reproducible), the filter is a
+/// regular expression matched at the start of the id, the slice is Python's
+/// `start:stop:step`.
 pub fn filter_instances(instances: Vec<Json>, filter: &str, slice: &str, shuffle: bool) -> Result<Vec<Json>, String> {
     let mut instances = instances;
     if shuffle {
@@ -103,33 +104,28 @@ pub fn python_slice<T>(items: Vec<T>, spec: &str) -> Result<Vec<T>, String> {
         .collect())
 }
 
-/// The environment of an instance (upstream's `get_sb_environment`): the config's
-/// `environment` with class `docker` by default and the instance's image, then
-/// `run.env_startup_command` rendered with the instance.
+/// The environment of an instance: the config's `environment`, of type `docker` by default
+/// with the instance's image, then its `startup_command` rendered with the instance's fields.
 pub async fn instance_environment(config: &Json, instance: &Json) -> Result<Arc<dyn Environment>, String> {
-    let mut env_config = match &config["environment"] {
+    let mut section = match &config["environment"] {
         Json::Object(object) => object.clone(),
         _ => Map::new(),
     };
-    let class = env_config
-        .get("environment_class")
-        .and_then(Json::as_str)
-        .unwrap_or("docker")
-        .to_owned();
-    env_config.insert("environment_class".to_owned(), Json::String(class.clone()));
-    if crate::env::environment_kind(&class).map_err(|error| error.to_string())? == "docker" {
-        env_config.insert("image".to_owned(), Json::String(docker_image_name(instance)));
+    let kind = environment_type(&config["environment"], "docker");
+    if kind == "docker" {
+        section.insert("image".to_owned(), Json::String(docker_image_name(instance)));
     }
-    let env = get_environment(&Json::Object(env_config), "docker")
+    section.insert("type".to_owned(), Json::String(kind));
+    let env = get_environment(&Json::Object(section), "docker")
         .await
         .map_err(|error| error.to_string())?;
-    if let Some(command) = config["run"]["env_startup_command"].as_str() {
+    if let Some(command) = config["environment"]["startup_command"].as_str() {
         let command = crate::template::render(command, instance).map_err(|error| error.to_string())?;
         let ctx = delta_chord::context::Context::background();
         let output = env.execute(&command, None, None, &ctx).await;
         if output.returncode != 0 {
             env.cleanup().await;
-            return Err(format!("Error executing startup command: {}", output.to_json()));
+            return Err(format!("The startup command failed: {}", output.to_json()));
         }
     }
     Ok(env)
@@ -165,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn filtering_matches_upstream() {
+    fn filtering_matches_python_s_shuffle() {
         let instances: Vec<Json> = (0..10)
             .map(|index| json!({ "instance_id": format!("repo__{index}") }))
             .collect();

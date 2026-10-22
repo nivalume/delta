@@ -113,6 +113,7 @@ agent:
   cost_limit: 3.
 
 environment:
+  type: docker
   cwd: "/testbed"
   timeout: 60
   interpreter: ["bash", "-c"]
@@ -125,9 +126,10 @@ environment:
     # bash -c is non-login so it won't source ~/.bashrc; point BASH_ENV at it so the
     # image's `conda activate testbed` runs (else commands use the base env, no testbed).
     BASH_ENV: /root/.bashrc
-  environment_class: docker
 
 model:
+  provider: anthropic
+  id: claude-sonnet-4-5-20250929
   observation_template: |
     {% if output.exception_info -%}
     <exception>{{output.exception_info}}</exception>
@@ -157,8 +159,8 @@ model:
     </output_tail>
     {%- endif -%}
   format_error_template: |
-    {% if finish_reason is defined and (finish_reason == "length" or (finish_reason == "tool_calls" and not has_tool_calls)) -%}
-    Your previous response reached the output token limit (finish_reason={{ finish_reason }}) before you produced a tool call, so it was cut off. Respond more concisely and finish with exactly one bash tool call. If you need to think more, do so briefly.
+    {% if stop_reason is defined and (stop_reason == "length" or (stop_reason == "toolUse" and not has_tool_calls)) -%}
+    Your previous response reached the output token limit (stop_reason={{ stop_reason }}) before you produced a tool call, so it was cut off. Respond more concisely and finish with exactly one bash tool call. If you need to think more, do so briefly.
     {%- else -%}
     Tool call error:
 
@@ -177,7 +179,3 @@ model:
     If you have completed your assignment, please consult the first message about how to
     submit your solution (you will not be able to continue working on this task after that).
     {%- endif %}
-  model_name: "anthropic/claude-sonnet-4-5-20250929"
-  model_kwargs:
-    drop_params: true
-    parallel_tool_calls: true

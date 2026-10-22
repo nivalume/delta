@@ -1,261 +1,385 @@
-//! Models: upstream's model config and classes on delta-ai.
+//! Models: the `model` and `providers` sections, on delta-ai.
 //!
-//! Upstream reaches models through litellm; here the name resolves to a delta-ai model
-//! (`anthropic/claude-sonnet-4-5` is provider `anthropic`, model `claude-sonnet-4-5`) and the
-//! harness streams it through [`MiniModelClient`], which adds the sampling options
-//! `model_kwargs` sets. The deterministic class replays scripted outputs through delta-ai's
-//! faux provider.
+//! `model.provider` and `model.id` name a delta-ai model: one of its built-in providers' or
+//! one `providers` defines (built with delta-ai's `create_provider`). The harness streams it
+//! through [`MiniModelClient`], which adds `temperature`, `max_tokens` and `sampling`.
+//! Provider `faux` replays `model.script` through delta-ai's faux provider.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use delta_ai::model::{Model, ThinkingLevel};
+use delta_ai::api::anthropic_messages::AnthropicMessagesApi;
+use delta_ai::api::google_generative_ai::GoogleGenerativeAiApi;
+use delta_ai::api::mistral_conversations::MistralConversationsApi;
+use delta_ai::api::openai_completions::OpenAICompletionsApi;
+use delta_ai::api::openai_responses::OpenAIResponsesApi;
+use delta_ai::model::{AnyModel, Model, ModelThinkingLevel};
 use delta_ai::options::{SimpleStreamOptions, StreamOptions, Transport};
 use delta_ai::providers::builtin::builtin_models;
-use delta_ai::providers::faux::{
-    FauxModelDefinition, FauxOptions, FauxProvider, FauxResponse, faux_assistant_message, faux_text,
+use delta_ai::providers::faux::{FauxModelDefinition, FauxOptions, FauxProvider, FauxResponse, faux_assistant_message};
+use delta_ai::types::{AssistantBlock, AssistantMessage, DeferredHandle, JsonObject};
+use delta_ai::{
+    AssistantMessageEventStream, CreateModelsOptions, CreateProviderOptions, CredentialStore, Models, ProviderApi,
+    ProviderAuth, ProviderStreams, create_provider, env_api_key_auth,
 };
-use delta_ai::types::{AssistantBlock, AssistantMessage, DeferredHandle, JsonObject, StopReason, ToolCall};
-use delta_ai::{AssistantMessageEventStream, CreateModelsOptions, Models};
 use delta_chord::context::Context;
 use delta_harness::model::{ModelClient, ModelError, ModelRef, ModelRequest, ModelsClient};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value as Json};
+use serde_json::{Map, Value as Json, json};
 
-/// The default observation template of upstream's model classes.
+/// The default observation template.
 pub const DEFAULT_OBSERVATION_TEMPLATE: &str = "{% if output.exception_info %}<exception>{{output.exception_info}}</exception>\n{% endif %}<returncode>{{output.returncode}}</returncode>\n<output>\n{{output.output}}</output>";
 
-/// The default format error template of the tool-call classes.
-pub const DEFAULT_TOOLCALL_FORMAT_ERROR_TEMPLATE: &str = "{{ error }}";
+/// The default format error template of tool-call actions.
+pub const DEFAULT_TOOL_CALLS_FORMAT_ERROR_TEMPLATE: &str = "{{ error }}";
 
-/// The default format error template of the text-based classes.
-pub const DEFAULT_TEXTBASED_FORMAT_ERROR_TEMPLATE: &str =
+/// The default format error template of text actions.
+pub const DEFAULT_TEXT_FORMAT_ERROR_TEMPLATE: &str =
     "Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.";
 
-/// The default `action_regex` of the text-based classes.
+/// The default `action_regex` of text actions.
 pub const DEFAULT_ACTION_REGEX: &str = r"```mswea_bash_command\s*\n(.*?)\n```";
 
+/// The provider whose answers `model.script` holds.
+pub const FAUX_PROVIDER: &str = "faux";
+
 /// How the model states its actions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionFormat {
     /// Calls of the `bash` tool.
-    Toolcall,
+    #[default]
+    ToolCalls,
     /// One fenced block matched by `action_regex`.
-    Textbased,
-}
-
-/// A model class: upstream's `model_class` shortcuts and class paths.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ModelClass {
-    pub format: ActionFormat,
-    /// Scripted outputs instead of a provider.
-    pub deterministic: bool,
-    /// Every name is an OpenRouter model id.
-    pub openrouter: bool,
-    /// Upstream's class path, for `info.config.model_type`.
-    pub path: &'static str,
-}
-
-impl ModelClass {
-    /// The class `model_class` names; empty: the default (litellm, tool calls).
-    pub fn parse(model_class: &str) -> Result<Self, ModelConfigError> {
-        use ActionFormat::{Textbased, Toolcall};
-        let class = |format, deterministic, openrouter, path| Self {
-            format,
-            deterministic,
-            openrouter,
-            path,
-        };
-        Ok(match model_class {
-            "" | "litellm" | "minisweagent.models.litellm_model.LitellmModel" => {
-                class(Toolcall, false, false, "minisweagent.models.litellm_model.LitellmModel")
-            }
-            "litellm_response" | "minisweagent.models.litellm_response_model.LitellmResponseModel" => class(
-                Toolcall,
-                false,
-                false,
-                "minisweagent.models.litellm_response_model.LitellmResponseModel",
-            ),
-            "litellm_textbased" | "minisweagent.models.litellm_textbased_model.LitellmTextbasedModel" => class(
-                Textbased,
-                false,
-                false,
-                "minisweagent.models.litellm_textbased_model.LitellmTextbasedModel",
-            ),
-            "openrouter" | "minisweagent.models.openrouter_model.OpenRouterModel" => class(
-                Toolcall,
-                false,
-                true,
-                "minisweagent.models.openrouter_model.OpenRouterModel",
-            ),
-            "openrouter_response" | "minisweagent.models.openrouter_response_model.OpenRouterResponseModel" => class(
-                Toolcall,
-                false,
-                true,
-                "minisweagent.models.openrouter_response_model.OpenRouterResponseModel",
-            ),
-            "openrouter_textbased" | "minisweagent.models.openrouter_textbased_model.OpenRouterTextbasedModel" => {
-                class(
-                    Textbased,
-                    false,
-                    true,
-                    "minisweagent.models.openrouter_textbased_model.OpenRouterTextbasedModel",
-                )
-            }
-            "portkey" | "minisweagent.models.portkey_model.PortkeyModel" => {
-                class(Toolcall, false, false, "minisweagent.models.portkey_model.PortkeyModel")
-            }
-            "requesty" | "minisweagent.models.requesty_model.RequestyModel" => class(
-                Toolcall,
-                false,
-                false,
-                "minisweagent.models.requesty_model.RequestyModel",
-            ),
-            "deterministic" | "minisweagent.models.test_models.DeterministicModel" => class(
-                Textbased,
-                true,
-                false,
-                "minisweagent.models.test_models.DeterministicModel",
-            ),
-            "deterministic_toolcall" | "minisweagent.models.test_models.DeterministicToolcallModel" => class(
-                Toolcall,
-                true,
-                false,
-                "minisweagent.models.test_models.DeterministicToolcallModel",
-            ),
-            other => return Err(ModelConfigError::UnknownClass(other.to_owned())),
-        })
-    }
+    Text,
 }
 
 /// Why a model could not be set up.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelConfigError {
-    #[error(
-        "Unknown model class: {0} (available: litellm, litellm_textbased, litellm_response, openrouter, openrouter_textbased, openrouter_response, portkey, requesty, deterministic, deterministic_toolcall)"
-    )]
-    UnknownClass(String),
-    #[error("No default model set. Please run `mini-extra config setup` to set one.")]
+    #[error("No model configured. Run `mini-extra config setup`, or pass `-m provider/model-id`.")]
     NoModel,
-    #[error("Unknown model {0}: no provider of delta-ai serves it")]
+    #[error("Unknown provider {provider} (providers: {available})")]
+    UnknownProvider { provider: String, available: String },
+    #[error("No provider has a model {0}; `mini-extra models --all` lists them")]
     UnknownModel(String),
+    #[error("Several providers have a model {id}: {candidates}; name one as provider/{id}")]
+    AmbiguousModel { id: String, candidates: String },
     #[error("Invalid model config: {0}")]
-    Invalid(#[from] serde_json::Error),
-    #[error("Invalid model_kwargs.{key}: {reason}")]
-    Kwarg { key: String, reason: String },
+    Invalid(serde_json::Error),
+    #[error("Invalid provider {id}: {reason}")]
+    Provider { id: String, reason: String },
+    #[error("Invalid model.action_regex: {0}")]
+    ActionRegex(String),
+    #[error("Invalid model.script[{index}]: {reason}")]
+    Script { index: usize, reason: String },
 }
 
 /// The `model` section of a config.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelConfig {
+    /// A delta-ai provider id: built in, defined under `providers`, or `faux`.
     #[serde(default)]
-    pub model_name: String,
-    #[serde(default, skip_serializing)]
-    pub model_class: String,
-    /// Options for the API: `temperature`, `max_tokens` / `max_completion_tokens`,
-    /// `reasoning_effort`, and sampling options passed through to OpenAI-compatible APIs.
+    pub provider: String,
+    /// The model id in the provider's catalog.
     #[serde(default)]
-    pub model_kwargs: Map<String, Json>,
+    pub id: String,
+    /// The conversation's thinking level; unset: the harness's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ModelThinkingLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// The output token limit of each call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    /// Sampling parameters added to the request body (`top_p`, `seed`, ...).
+    #[serde(default, skip_serializing_if = "JsonObject::is_empty")]
+    pub sampling: JsonObject,
+    /// Replaces the model's base URL (a proxy, a local server).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Headers added to the model's.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
     #[serde(default)]
-    pub litellm_model_registry: Option<String>,
-    /// Accepted for compatibility; delta-ai places cache markers itself.
-    #[serde(default)]
-    pub set_cache_control: Option<String>,
-    #[serde(default = "default_cost_tracking")]
-    pub cost_tracking: String,
-    #[serde(default)]
-    pub format_error_template: Option<String>,
+    pub actions: ActionFormat,
+    /// Text actions: the pattern of an action; its first group is the command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_regex: Option<String>,
     #[serde(default = "default_observation_template")]
     pub observation_template: String,
-    /// Accepted for compatibility; multimodal content is not extracted.
-    #[serde(default)]
-    pub multimodal_regex: String,
-    #[serde(default)]
-    pub action_regex: Option<String>,
-    /// The deterministic class's scripted outputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_error_template: Option<String>,
+    /// Provider `faux`: the answers, in order. Each is `{content: [AssistantBlock], cost}`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub outputs: Vec<Json>,
-    #[serde(default = "default_cost_per_call")]
-    pub cost_per_call: f64,
-}
-
-fn default_cost_tracking() -> String {
-    crate::global::env_var("MSWEA_COST_TRACKING").unwrap_or_else(|| "default".to_owned())
+    pub script: Vec<Json>,
 }
 
 fn default_observation_template() -> String {
     DEFAULT_OBSERVATION_TEMPLATE.to_owned()
 }
 
-fn default_cost_per_call() -> f64 {
-    1.0
+/// A provider the config defines: delta-ai's `create_provider` with one implementation per
+/// API its models use.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    /// Display name; default: the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The API of models that name none: `openai-completions`, `openai-responses`,
+    /// `anthropic-messages`, `google-generative-ai` or `mistral-conversations`.
+    pub api: String,
+    /// The base URL of models that name none.
+    pub base_url: String,
+    /// Variables holding the API key, first set wins; a key stored with `mini-extra login`
+    /// wins over them. Without any, the provider needs no key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_key_env: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// delta-ai model definitions (camelCase JSON); every field but `id` has a default.
+    #[serde(default)]
+    pub models: Vec<Json>,
 }
 
-/// A model config resolved for a run: class, name, templates and options.
+/// The APIs a config's provider can use.
+pub const PROVIDER_APIS: [&str; 5] = [
+    "openai-completions",
+    "openai-responses",
+    "anthropic-messages",
+    "google-generative-ai",
+    "mistral-conversations",
+];
+
+fn provider_streams(api: &str) -> Option<Arc<dyn ProviderStreams>> {
+    Some(match api {
+        "openai-completions" => Arc::new(OpenAICompletionsApi),
+        "openai-responses" => Arc::new(OpenAIResponsesApi),
+        "anthropic-messages" => Arc::new(AnthropicMessagesApi),
+        "google-generative-ai" => Arc::new(GoogleGenerativeAiApi),
+        "mistral-conversations" => Arc::new(MistralConversationsApi),
+        _ => return None,
+    })
+}
+
+impl ProviderConfig {
+    /// The provider `id` this config defines.
+    pub fn build(&self, id: &str) -> Result<delta_ai::provider::BuiltProvider, ModelConfigError> {
+        let invalid = |reason: String| ModelConfigError::Provider {
+            id: id.to_owned(),
+            reason,
+        };
+        if self.models.is_empty() {
+            return Err(invalid("no models".to_owned()));
+        }
+        let mut models = Vec::new();
+        for definition in &self.models {
+            let model_id = definition
+                .get("id")
+                .and_then(Json::as_str)
+                .ok_or_else(|| invalid("a model without an id".to_owned()))?;
+            let mut model = json!({
+                "id": model_id,
+                "name": model_id,
+                "api": self.api,
+                "provider": id,
+                "baseUrl": self.base_url,
+                "input": ["text"],
+                "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0 },
+                "reasoning": false,
+                "contextWindow": 128_000,
+                "maxTokens": 16_384,
+            });
+            crate::config::merge(&mut model, definition.clone());
+            model["provider"] = json!(id);
+            let model: Model =
+                serde_json::from_value(model).map_err(|error| invalid(format!("model {model_id}: {error}")))?;
+            models.push(model);
+        }
+        let mut apis = BTreeMap::new();
+        for api in models.iter().map(|model| model.api.clone()).collect::<BTreeSet<_>>() {
+            let streams = provider_streams(&api)
+                .ok_or_else(|| invalid(format!("unknown api {api} (available: {})", PROVIDER_APIS.join(", "))))?;
+            apis.insert(api, streams);
+        }
+        let name = self.name.clone().unwrap_or_else(|| id.to_owned());
+        let auth = if self.api_key_env.is_empty() {
+            ProviderAuth::keyless(name.clone())
+        } else {
+            let vars: Vec<&str> = self.api_key_env.iter().map(String::as_str).collect();
+            ProviderAuth::api_key(env_api_key_auth(format!("{name} API key"), &vars))
+        };
+        let mut options = CreateProviderOptions::new(
+            id,
+            auth,
+            models.into_iter().map(AnyModel::Chat).collect(),
+            ProviderApi::ByApi(apis.into_iter().collect()),
+        )
+        .name(name)
+        .base_url(self.base_url.clone());
+        if !self.headers.is_empty() {
+            options.headers = Some(
+                self.headers
+                    .iter()
+                    .map(|(name, value)| (name.clone(), Some(value.clone())))
+                    .collect(),
+            );
+        }
+        Ok(create_provider(options))
+    }
+}
+
+/// The `providers` section.
+pub fn provider_configs(section: &Json) -> Result<BTreeMap<String, ProviderConfig>, ModelConfigError> {
+    match section {
+        Json::Null => Ok(BTreeMap::new()),
+        section => serde_json::from_value(section.clone()).map_err(|error| ModelConfigError::Provider {
+            id: "providers".to_owned(),
+            reason: error.to_string(),
+        }),
+    }
+}
+
+/// delta-ai's built-in providers and the ones `providers` defines (which replace a built-in
+/// provider of the same id), with credentials from `credentials` (in memory when `None`).
+pub fn build_models(
+    providers: &Json,
+    credentials: Option<Arc<dyn CredentialStore>>,
+) -> Result<Models, ModelConfigError> {
+    let models = builtin_models(CreateModelsOptions {
+        credentials,
+        ..CreateModelsOptions::default()
+    });
+    for (id, config) in provider_configs(providers)? {
+        models.set_provider(config.build(&id)?);
+    }
+    Ok(models)
+}
+
+/// `-m`'s value as provider and model id: `provider/id`, split at the first `/`, or a bare
+/// id (an empty provider).
+pub fn split_model_ref(spec: &str) -> (String, String) {
+    match spec.split_once('/') {
+        Some((provider, id)) if !provider.is_empty() && !id.is_empty() => (provider.to_owned(), id.to_owned()),
+        _ => (String::new(), spec.to_owned()),
+    }
+}
+
+/// The model `provider` and `id` name, and a warning to print about it.
+///
+/// - No provider: the one model with that id across every provider.
+/// - A known provider: its model, or, for an id its catalog lacks, its first model's API and
+///   base URL with that id and no price.
+/// - An unknown provider: `provider/id` as a bare id, which covers ids that hold a `/`.
+pub fn resolve_model(models: &Models, provider: &str, id: &str) -> Result<(Model, Option<String>), ModelConfigError> {
+    if id.is_empty() {
+        return Err(ModelConfigError::NoModel);
+    }
+    if provider.is_empty() {
+        return find_bare(models, id).map(|model| (model, None));
+    }
+    if models.provider(provider).is_none() {
+        return find_bare(models, &format!("{provider}/{id}"))
+            .map(|model| (model, None))
+            .map_err(|_| ModelConfigError::UnknownProvider {
+                provider: provider.to_owned(),
+                available: models
+                    .providers()
+                    .iter()
+                    .map(|provider| provider.id().to_owned())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            });
+    }
+    if let Some(model) = models.get_model(provider, id) {
+        return Ok((model, None));
+    }
+    let template = models
+        .get_models(Some(provider))
+        .into_iter()
+        .next()
+        .ok_or_else(|| ModelConfigError::UnknownModel(format!("{provider}/{id}")))?;
+    let warning = format!(
+        "{provider} has no model {id} in its catalog; sending it with the API of {} and no price",
+        template.id
+    );
+    Ok((
+        Model {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            cost: delta_ai::model::ModelCost::default(),
+            ..template
+        },
+        Some(warning),
+    ))
+}
+
+fn find_bare(models: &Models, id: &str) -> Result<Model, ModelConfigError> {
+    let mut found: Vec<Model> = models
+        .get_models(None)
+        .into_iter()
+        .filter(|model| model.id == id)
+        .collect();
+    match found.len() {
+        0 => Err(ModelConfigError::UnknownModel(id.to_owned())),
+        1 => Ok(found.remove(0)),
+        _ => Err(ModelConfigError::AmbiguousModel {
+            id: id.to_owned(),
+            candidates: found
+                .iter()
+                .map(|model| format!("{}/{}", model.provider, model.id))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }),
+    }
+}
+
+/// A `model` section resolved for a run: its config with the defaults its action format
+/// implies.
 #[derive(Clone, Debug)]
 pub struct ModelSettings {
     pub config: ModelConfig,
-    pub class: ModelClass,
     pub format_error_template: String,
     pub action_regex: regex::Regex,
-    pub kwargs: StreamKwargs,
 }
 
 impl ModelSettings {
-    /// Resolves `config` (the `model` section) with the model name from the command line,
-    /// the config or `MSWEA_MODEL_NAME`, in that order.
-    pub fn new(config: &Json, cli_model_name: Option<&str>) -> Result<Self, ModelConfigError> {
-        let mut config: ModelConfig = serde_json::from_value(if config.is_object() {
-            config.clone()
+    pub fn new(section: &Json) -> Result<Self, ModelConfigError> {
+        let config: ModelConfig = serde_json::from_value(if section.is_object() {
+            section.clone()
         } else {
             Json::Object(Map::new())
-        })?;
-        let class = ModelClass::parse(&config.model_class)?;
-        let given = cli_model_name
-            .filter(|name| !name.is_empty())
-            .or(Some(config.model_name.as_str()).filter(|name| !name.is_empty()))
-            .map(str::to_owned);
-        config.model_name = match given {
-            Some(name) => name,
-            None if class.deterministic => "deterministic".to_owned(),
-            None => crate::global::env_var("MSWEA_MODEL_NAME").ok_or(ModelConfigError::NoModel)?,
-        };
-        let lower = config.model_name.to_lowercase();
-        if config.set_cache_control.is_none()
-            && ["anthropic", "sonnet", "opus", "claude"]
-                .iter()
-                .any(|name| lower.contains(name))
-        {
-            config.set_cache_control = Some("default_end".to_owned());
-        }
+        })
+        .map_err(ModelConfigError::Invalid)?;
         let format_error_template = config.format_error_template.clone().unwrap_or_else(|| {
-            match class.format {
-                ActionFormat::Toolcall => DEFAULT_TOOLCALL_FORMAT_ERROR_TEMPLATE,
-                ActionFormat::Textbased => DEFAULT_TEXTBASED_FORMAT_ERROR_TEMPLATE,
+            match config.actions {
+                ActionFormat::ToolCalls => DEFAULT_TOOL_CALLS_FORMAT_ERROR_TEMPLATE,
+                ActionFormat::Text => DEFAULT_TEXT_FORMAT_ERROR_TEMPLATE,
             }
             .to_owned()
         });
-        let pattern = config.action_regex.as_deref().unwrap_or(DEFAULT_ACTION_REGEX);
-        // Python's `re.DOTALL`.
-        let action_regex = regex::RegexBuilder::new(pattern)
+        // `.` matches line breaks: a command may span lines.
+        let action_regex = regex::RegexBuilder::new(config.action_regex.as_deref().unwrap_or(DEFAULT_ACTION_REGEX))
             .dot_matches_new_line(true)
             .build()
-            .map_err(|error| ModelConfigError::Kwarg {
-                key: "action_regex".to_owned(),
-                reason: error.to_string(),
-            })?;
-        let kwargs = StreamKwargs::parse(&config.model_kwargs)?;
+            .map_err(|error| ModelConfigError::ActionRegex(error.to_string()))?;
         Ok(Self {
             config,
-            class,
             format_error_template,
             action_regex,
-            kwargs,
         })
     }
 
-    /// The config as upstream's `model_dump` prints it, for templates and the trajectory.
+    /// Whether `model.script` answers instead of a provider.
+    pub fn is_scripted(&self) -> bool {
+        self.config.provider == FAUX_PROVIDER
+    }
+
+    /// The config as the run uses it, for templates and the trajectory.
     pub fn dump(&self) -> Json {
         let mut dump = serde_json::to_value(&self.config).unwrap_or(Json::Null);
         if let Some(object) = dump.as_object_mut() {
@@ -263,228 +387,71 @@ impl ModelSettings {
                 "format_error_template".to_owned(),
                 Json::String(self.format_error_template.clone()),
             );
-            if self.class.format == ActionFormat::Toolcall {
-                object.remove("action_regex");
-            } else {
+            if self.config.actions == ActionFormat::Text {
                 object.insert(
                     "action_regex".to_owned(),
                     Json::String(self.action_regex.as_str().to_owned()),
                 );
             }
-            if !self.class.deterministic {
-                object.remove("cost_per_call");
-            }
         }
         dump
     }
 
-    /// `{"info": {"config": {"model": ..., "model_type": ...}}}`.
-    pub fn serialize(&self) -> Json {
-        serde_json::json!({
-            "info": {
-                "config": {
-                    "model": self.dump(),
-                    "model_type": self.class.path,
-                }
-            }
-        })
-    }
-
-    /// The cost of the `index`th call of a deterministic model: its output's `extra.cost`,
-    /// else `cost_per_call`.
-    pub fn deterministic_cost(&self, index: usize) -> f64 {
+    /// The scripted answers and their costs.
+    pub fn script(&self) -> Result<Vec<(AssistantMessage, f64)>, ModelConfigError> {
         self.config
-            .outputs
-            .get(index)
-            .and_then(|output| output.pointer("/extra/cost"))
-            .and_then(Json::as_f64)
-            .unwrap_or(self.config.cost_per_call)
+            .script
+            .iter()
+            .enumerate()
+            .map(|(index, item)| script_answer(index, item))
+            .collect()
     }
 }
 
-/// What `model_kwargs` sets on each request.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct StreamKwargs {
-    pub temperature: Option<f64>,
-    pub max_tokens: Option<u64>,
-    pub reasoning: Option<ThinkingLevel>,
-    /// Passed into the request body of OpenAI-compatible APIs.
-    pub sampling_params: Option<JsonObject>,
-    /// Keys nothing here understands, reported once.
-    pub ignored: Vec<String>,
-}
-
-/// Sampling options merged into OpenAI-compatible request bodies as they are.
-const PASSED_THROUGH: [&str; 7] = [
-    "top_p",
-    "top_k",
-    "seed",
-    "stop",
-    "presence_penalty",
-    "frequency_penalty",
-    "min_p",
-];
-
-impl StreamKwargs {
-    pub fn parse(kwargs: &Map<String, Json>) -> Result<Self, ModelConfigError> {
-        let invalid = |key: &str, reason: &str| ModelConfigError::Kwarg {
-            key: key.to_owned(),
-            reason: reason.to_owned(),
-        };
-        let mut parsed = Self::default();
-        let mut sampling = JsonObject::new();
-        for (key, value) in kwargs {
-            match key.as_str() {
-                "temperature" => {
-                    parsed.temperature = Some(value.as_f64().ok_or_else(|| invalid(key, "not a number"))?);
-                }
-                "max_tokens" | "max_completion_tokens" | "max_output_tokens" => {
-                    parsed.max_tokens = Some(value.as_u64().ok_or_else(|| invalid(key, "not a whole number"))?);
-                }
-                "reasoning_effort" => {
-                    let expected = "expected none, minimal, low, medium, high, xhigh or max";
-                    parsed.reasoning = match value {
-                        Json::Null => None,
-                        Json::String(level) => match level.as_str() {
-                            "none" => None,
-                            "minimal" => Some(ThinkingLevel::Minimal),
-                            "low" => Some(ThinkingLevel::Low),
-                            "medium" => Some(ThinkingLevel::Medium),
-                            "high" => Some(ThinkingLevel::High),
-                            "xhigh" => Some(ThinkingLevel::Xhigh),
-                            "max" => Some(ThinkingLevel::Max),
-                            _ => return Err(invalid(key, expected)),
-                        },
-                        _ => return Err(invalid(key, expected)),
-                    };
-                }
-                // litellm's own switches.
-                "drop_params" | "num_retries" => {}
-                key if PASSED_THROUGH.contains(&key) => {
-                    sampling.insert(key.to_owned(), value.clone());
-                }
-                _ => parsed.ignored.push(key.clone()),
+/// One `model.script` item: `{content: [AssistantBlock], cost}`. A tool call without an id
+/// gets `call_<item>_<block>`, one without arguments `{}`.
+pub fn script_answer(index: usize, item: &Json) -> Result<(AssistantMessage, f64), ModelConfigError> {
+    let invalid = |reason: String| ModelConfigError::Script { index, reason };
+    let object = item.as_object().ok_or_else(|| invalid("not an object".to_owned()))?;
+    if let Some(key) = object.keys().find(|key| !["content", "cost"].contains(&key.as_str())) {
+        return Err(invalid(format!("unknown field {key}")));
+    }
+    let mut content = object.get("content").cloned().unwrap_or_else(|| json!([]));
+    for (block_index, block) in content.as_array_mut().into_iter().flatten().enumerate() {
+        if block["type"] == "toolCall" {
+            if block.get("id").is_none() {
+                block["id"] = json!(format!("call_{index}_{block_index}"));
+            }
+            if block.get("arguments").is_none() {
+                block["arguments"] = json!({});
             }
         }
-        parsed.sampling_params = (!sampling.is_empty()).then_some(sampling);
-        Ok(parsed)
     }
-}
-
-/// litellm provider prefixes whose delta-ai provider has another id.
-const PROVIDER_ALIASES: [(&str, &str); 9] = [
-    ("gemini", "google"),
-    ("vertex_ai", "google-vertex"),
-    ("vertex_ai_beta", "google-vertex"),
-    ("bedrock", "amazon-bedrock"),
-    ("bedrock_converse", "amazon-bedrock"),
-    ("fireworks_ai", "fireworks"),
-    ("moonshot", "moonshotai"),
-    ("azure_ai", "azure"),
-    ("together_ai", "together"),
-];
-
-/// The delta-ai model `name` names for `class`.
-///
-/// - OpenRouter classes: the name (without an `openrouter/` prefix) is an OpenRouter id.
-/// - `provider/id`: the provider (litellm prefixes mapped) and the id.
-/// - A bare id: the first provider whose catalog has it.
-///
-/// An id a known provider's catalog lacks gets that provider's API and endpoint, with no
-/// price (litellm passes unknown ids through as well).
-pub fn resolve_model(models: &Models, name: &str, class: ModelClass) -> Result<Model, ModelConfigError> {
-    let (provider, id) = if class.openrouter {
-        (
-            "openrouter".to_owned(),
-            name.strip_prefix("openrouter/").unwrap_or(name),
-        )
-    } else if let Some((prefix, id)) = name.split_once('/') {
-        let provider = PROVIDER_ALIASES
-            .iter()
-            .find(|(alias, _)| *alias == prefix)
-            .map_or(prefix, |(_, provider)| provider);
-        if models.provider(provider).is_some() {
-            (provider.to_owned(), id)
-        } else {
-            return find_bare(models, name);
-        }
-    } else {
-        return find_bare(models, name);
+    let blocks: Vec<AssistantBlock> = serde_json::from_value(content).map_err(|error| invalid(error.to_string()))?;
+    let cost = match object.get("cost") {
+        None => 0.0,
+        Some(cost) => cost
+            .as_f64()
+            .ok_or_else(|| invalid("cost is not a number".to_owned()))?,
     };
-    if let Some(model) = models.get_model(&provider, id) {
-        return Ok(model);
-    }
-    let template = models
-        .get_models(Some(&provider))
-        .into_iter()
-        .next()
-        .ok_or_else(|| ModelConfigError::UnknownModel(name.to_owned()))?;
-    Ok(Model {
-        id: id.to_owned(),
-        name: id.to_owned(),
-        cost: delta_ai::model::ModelCost::default(),
-        ..template
-    })
+    Ok((faux_assistant_message(blocks), cost))
 }
 
-fn find_bare(models: &Models, name: &str) -> Result<Model, ModelConfigError> {
-    models
-        .get_models(None)
-        .into_iter()
-        .find(|model| model.id == name)
-        .ok_or_else(|| ModelConfigError::UnknownModel(name.to_owned()))
+/// What the client adds to every request.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct RequestSettings {
+    temperature: Option<f64>,
+    max_tokens: Option<u64>,
+    sampling: Option<JsonObject>,
 }
 
-/// A deterministic class's scripted output as a delta-ai answer: its `content` as text and its
-/// OpenAI-format `tool_calls` as tool calls.
-pub fn scripted_answer(output: &Json) -> AssistantMessage {
-    let mut blocks = Vec::new();
-    if let Some(text) = output
-        .get("content")
-        .and_then(Json::as_str)
-        .filter(|text| !text.is_empty())
-    {
-        blocks.push(faux_text(text));
-    }
-    for call in output.get("tool_calls").and_then(Json::as_array).into_iter().flatten() {
-        let function = call.get("function").unwrap_or(&Json::Null);
-        let arguments_text = function.get("arguments").and_then(Json::as_str).unwrap_or("{}");
-        let (arguments, arguments_error) = match serde_json::from_str::<Json>(arguments_text) {
-            Ok(Json::Object(arguments)) => (arguments, None),
-            Ok(_) => (
-                JsonObject::new(),
-                Some("Tool call arguments are not a JSON object".to_owned()),
-            ),
-            Err(error) => (JsonObject::new(), Some(error.to_string())),
-        };
-        blocks.push(AssistantBlock::ToolCall(ToolCall {
-            id: call
-                .get("id")
-                .and_then(Json::as_str)
-                .map_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple()), str::to_owned),
-            name: function
-                .get("name")
-                .and_then(Json::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            arguments,
-            arguments_error,
-            ..ToolCall::default()
-        }));
-    }
-    faux_assistant_message(blocks)
-}
-
-/// The provider id of deterministic models.
-pub const DETERMINISTIC_PROVIDER: &str = "deterministic";
-
-/// The harness's model access for one run: the resolved model, streamed with the
-/// `model_kwargs` options.
+/// The harness's model access for one run: the resolved model, streamed with the `model`
+/// section's request settings.
 pub struct MiniModelClient {
     models: Models,
     inner: ModelsClient,
     model: Model,
-    kwargs: StreamKwargs,
+    settings: RequestSettings,
 }
 
 impl std::fmt::Debug for MiniModelClient {
@@ -497,43 +464,58 @@ impl std::fmt::Debug for MiniModelClient {
 }
 
 impl MiniModelClient {
-    /// The client for `settings`: delta-ai's built-in providers (credentials from the
-    /// environment), or the scripted outputs of a deterministic class.
-    pub fn new(settings: &ModelSettings) -> Result<Self, ModelConfigError> {
-        if settings.class.deterministic {
+    /// The client for `settings`, over the built-in providers and `providers`, with
+    /// `credentials`; or the faux provider with the script. Also returns a warning to print.
+    pub fn new(
+        settings: &ModelSettings,
+        providers: &Json,
+        credentials: Option<Arc<dyn CredentialStore>>,
+    ) -> Result<(Self, Option<String>), ModelConfigError> {
+        let config = &settings.config;
+        let request = RequestSettings {
+            temperature: config.temperature,
+            max_tokens: config.max_tokens,
+            sampling: (!config.sampling.is_empty()).then(|| config.sampling.clone()),
+        };
+        if settings.is_scripted() {
+            let id = if config.id.is_empty() { "scripted" } else { &config.id };
             let faux = FauxProvider::new(FauxOptions {
-                provider: Some(DETERMINISTIC_PROVIDER.to_owned()),
-                models: vec![FauxModelDefinition::new(settings.config.model_name.clone())],
+                provider: Some(FAUX_PROVIDER.to_owned()),
+                models: vec![FauxModelDefinition::new(id)],
                 ..FauxOptions::default()
             });
             faux.set_responses(
                 settings
-                    .config
-                    .outputs
-                    .iter()
-                    .map(|output| FauxResponse::from(scripted_answer(output)))
+                    .script()?
+                    .into_iter()
+                    .map(|(answer, _)| FauxResponse::from(answer))
                     .collect(),
             );
             let model = faux.model();
             let models = Models::default();
             models.set_provider(faux);
-            return Ok(Self::over(models, model, settings.kwargs.clone()));
+            return Ok((Self::over(models, model, request), None));
         }
-        let models = builtin_models(CreateModelsOptions {
-            auth_context: Some(Arc::new(crate::global::DotenvAuthContext)),
-            ..CreateModelsOptions::default()
-        });
-        let model = resolve_model(&models, &settings.config.model_name, settings.class)?;
-        Ok(Self::over(models, model, settings.kwargs.clone()))
+        let models = build_models(providers, credentials)?;
+        let (mut model, warning) = resolve_model(&models, &config.provider, &config.id)?;
+        if let Some(base_url) = &config.base_url {
+            model.base_url.clone_from(base_url);
+        }
+        if !config.headers.is_empty() {
+            let headers = model.headers.get_or_insert_with(Default::default);
+            for (name, value) in &config.headers {
+                headers.insert(name.clone(), value.clone());
+            }
+        }
+        Ok((Self::over(models, model, request), warning))
     }
 
-    /// A client over `models` that streams `model`.
-    pub fn over(models: Models, model: Model, kwargs: StreamKwargs) -> Self {
+    fn over(models: Models, model: Model, settings: RequestSettings) -> Self {
         Self {
             inner: ModelsClient::new(models.clone()),
             models,
             model,
-            kwargs,
+            settings,
         }
     }
 
@@ -542,6 +524,7 @@ impl MiniModelClient {
         ModelRef::new(&self.model.provider, &self.model.id)
     }
 
+    /// The model this client streams.
     pub fn resolved(&self) -> &Model {
         &self.model
     }
@@ -567,13 +550,13 @@ impl ModelClient for MiniModelClient {
             cache_retention: options.cache_retention,
             session_id: request.session_id.map(str::to_owned),
             metadata: options.metadata.clone(),
-            max_tokens: self.kwargs.max_tokens.or(request.max_tokens),
-            temperature: self.kwargs.temperature,
-            sampling_params: self.kwargs.sampling_params.clone(),
+            max_tokens: self.settings.max_tokens.or(request.max_tokens),
+            temperature: self.settings.temperature,
+            sampling_params: self.settings.sampling.clone(),
             ..StreamOptions::default()
         };
         let mut simple = SimpleStreamOptions::from(base);
-        simple.reasoning = self.kwargs.reasoning.or_else(|| request.thinking_level.reasoning());
+        simple.reasoning = request.thinking_level.reasoning();
         let context = delta_ai::types::Context::new(request.messages);
         self.models.stream_simple(request.model, &context, simple)
     }
@@ -597,54 +580,42 @@ impl ModelClient for MiniModelClient {
     }
 }
 
-/// The cost of an answer: delta-ai's price of its usage.
-pub fn answer_cost(message: &AssistantMessage) -> f64 {
-    message.usage.cost.total
+/// Whether `model` has a price: without one, calls cost nothing and a cost limit never trips.
+pub fn has_price(model: &Model) -> bool {
+    let cost = &model.cost;
+    cost.input > 0.0 || cost.output > 0.0 || cost.cache_read > 0.0 || cost.cache_write > 0.0
 }
 
-/// upstream's `finish_reason` for a stop reason.
-pub fn finish_reason(stop_reason: StopReason) -> &'static str {
-    match stop_reason {
-        StopReason::Length => "length",
-        StopReason::ToolUse => "tool_calls",
-        StopReason::Error | StopReason::Aborted => "error",
-        _ => "stop",
-    }
-}
-
-/// Every call and its cost in this process, with upstream's optional limits
-/// (`MSWEA_GLOBAL_COST_LIMIT`, `MSWEA_GLOBAL_CALL_LIMIT`).
-#[derive(Debug)]
-pub struct GlobalModelStats {
+/// The calls and the cost of a whole batch, with its limits.
+#[derive(Debug, Default)]
+pub struct BatchStats {
     totals: Mutex<(f64, u64)>,
     cost_limit: f64,
     call_limit: u64,
 }
 
-impl GlobalModelStats {
-    /// The process's stats.
-    pub fn get() -> &'static Arc<Self> {
-        static STATS: OnceLock<Arc<GlobalModelStats>> = OnceLock::new();
-        STATS.get_or_init(|| {
-            let parse = |name: &str| crate::global::env_var(name).and_then(|value| value.parse::<f64>().ok());
-            Arc::new(Self {
-                totals: Mutex::new((0.0, 0)),
-                cost_limit: parse("MSWEA_GLOBAL_COST_LIMIT").unwrap_or(0.0),
-                call_limit: parse("MSWEA_GLOBAL_CALL_LIMIT").unwrap_or(0.0) as u64,
-            })
-        })
+impl BatchStats {
+    /// Stats with limits; 0: no limit.
+    pub fn new(cost_limit: f64, call_limit: u64) -> Self {
+        Self {
+            totals: Mutex::new((0.0, 0)),
+            cost_limit,
+            call_limit,
+        }
     }
 
-    /// Adds a call; an error once a limit is exceeded.
-    pub fn add(&self, cost: f64) -> Result<(), String> {
+    /// Adds a call.
+    pub fn add(&self, cost: f64) {
         let mut totals = self.totals.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         totals.0 += cost;
         totals.1 += 1;
-        let (cost, calls) = *totals;
-        if (self.cost_limit > 0.0 && cost > self.cost_limit) || (self.call_limit > 0 && calls + 1 > self.call_limit) {
-            return Err(format!("Global cost/call limit exceeded: ${cost:.4} / {calls}"));
-        }
-        Ok(())
+    }
+
+    /// Why the batch may start no more calls: a limit is reached.
+    pub fn exceeded(&self) -> Option<String> {
+        let (cost, calls) = self.totals();
+        ((self.cost_limit > 0.0 && cost >= self.cost_limit) || (self.call_limit > 0 && calls >= self.call_limit))
+            .then(|| format!("The batch's limits are reached: ${cost:.4} in {calls} calls"))
     }
 
     /// Total cost and calls so far.
@@ -655,101 +626,173 @@ impl GlobalModelStats {
 
 #[cfg(test)]
 mod tests {
+    use delta_ai::types::StopReason;
+
     use super::*;
 
     #[test]
-    fn names_resolve_to_delta_models() {
-        let models = builtin_models(CreateModelsOptions::default());
-        let toolcall = ModelClass::parse("").unwrap();
+    fn model_refs_split_at_the_first_slash() {
+        assert_eq!(
+            split_model_ref("anthropic/claude-sonnet-4-5"),
+            ("anthropic".to_owned(), "claude-sonnet-4-5".to_owned())
+        );
+        assert_eq!(
+            split_model_ref("openrouter/minimax/minimax-m2"),
+            ("openrouter".to_owned(), "minimax/minimax-m2".to_owned())
+        );
+        assert_eq!(split_model_ref("gpt-5"), (String::new(), "gpt-5".to_owned()));
+        assert_eq!(split_model_ref("/x"), (String::new(), "/x".to_owned()));
+    }
+
+    #[test]
+    fn models_resolve_by_provider_and_id() {
+        let models = build_models(&Json::Null, None).unwrap();
         let anthropic = models.get_models(Some("anthropic")).into_iter().next().unwrap();
-        let resolved = resolve_model(&models, &format!("anthropic/{}", anthropic.id), toolcall).unwrap();
+        let (resolved, warning) = resolve_model(&models, "anthropic", &anthropic.id).unwrap();
+        assert_eq!((resolved.provider.as_str(), warning), ("anthropic", None));
+
+        let routed = models
+            .get_models(Some("openrouter"))
+            .into_iter()
+            .find(|model| model.id.contains('/'))
+            .unwrap();
+        let (provider, id) = split_model_ref(&format!("openrouter/{}", routed.id));
+        assert_eq!(resolve_model(&models, &provider, &id).unwrap().0.id, routed.id);
+
+        let (unknown, warning) = resolve_model(&models, "anthropic", "claude-from-the-future").unwrap();
         assert_eq!(
-            (resolved.provider.as_str(), resolved.id.as_str()),
-            ("anthropic", anthropic.id.as_str())
+            (unknown.id.as_str(), unknown.api.as_str(), has_price(&unknown)),
+            ("claude-from-the-future", anthropic.api.as_str(), false)
         );
-        let bare = resolve_model(&models, &anthropic.id, toolcall).unwrap();
-        assert_eq!(bare.provider, "anthropic");
-        let google = models.get_models(Some("google")).into_iter().next().unwrap();
-        assert_eq!(
-            resolve_model(&models, &format!("gemini/{}", google.id), toolcall)
-                .unwrap()
-                .provider,
-            "google"
-        );
-        let unknown = resolve_model(&models, "anthropic/claude-from-the-future", toolcall).unwrap();
-        assert_eq!(
-            (unknown.id.as_str(), unknown.api.as_str(), unknown.cost.input),
-            ("claude-from-the-future", anthropic.api.as_str(), 0.0)
-        );
-        let openrouter = ModelClass::parse("openrouter").unwrap();
-        let routed = resolve_model(&models, "minimax/minimax-m2", openrouter).unwrap();
-        assert_eq!(
-            (routed.provider.as_str(), routed.id.as_str()),
-            ("openrouter", "minimax/minimax-m2")
-        );
+        assert!(warning.unwrap().contains("no model claude-from-the-future"));
+
+        // An id two providers serve needs its provider.
+        let mut by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for model in models.get_models(None) {
+            by_id.entry(model.id).or_default().push(model.provider);
+        }
+        let (shared, _) = by_id.iter().find(|(_, providers)| providers.len() > 1).unwrap();
         assert!(matches!(
-            resolve_model(&models, "no-such-model", toolcall),
+            resolve_model(&models, "", shared),
+            Err(ModelConfigError::AmbiguousModel { .. })
+        ));
+        let (unique, _) = by_id.iter().find(|(_, providers)| providers.len() == 1).unwrap();
+        assert_eq!(resolve_model(&models, "", unique).unwrap().0.id, *unique);
+        assert!(matches!(
+            resolve_model(&models, "", "no-such-model"),
             Err(ModelConfigError::UnknownModel(_))
         ));
-    }
-
-    #[test]
-    fn kwargs_become_stream_options() {
-        let kwargs = serde_json::json!({
-            "temperature": 0.0, "max_tokens": 1000, "reasoning_effort": "high",
-            "top_p": 0.9, "drop_params": true, "custom_llm_provider": "x",
-        });
-        let parsed = StreamKwargs::parse(kwargs.as_object().unwrap()).unwrap();
-        assert_eq!(parsed.temperature, Some(0.0));
-        assert_eq!(parsed.max_tokens, Some(1000));
-        assert_eq!(parsed.reasoning, Some(ThinkingLevel::High));
-        assert_eq!(parsed.sampling_params.unwrap()["top_p"], 0.9);
-        assert_eq!(parsed.ignored, ["custom_llm_provider"]);
-        assert!(StreamKwargs::parse(serde_json::json!({ "temperature": "hot" }).as_object().unwrap()).is_err());
-    }
-
-    #[test]
-    fn classes_pick_their_defaults() {
-        let settings = ModelSettings::new(
-            &serde_json::json!({ "model_name": "anthropic/claude-sonnet-4-5", "model_class": "litellm_textbased" }),
-            None,
-        )
-        .unwrap();
-        assert_eq!(settings.class.format, ActionFormat::Textbased);
-        assert_eq!(settings.format_error_template, DEFAULT_TEXTBASED_FORMAT_ERROR_TEMPLATE);
-        assert_eq!(settings.config.set_cache_control.as_deref(), Some("default_end"));
-        assert_eq!(settings.dump()["action_regex"], DEFAULT_ACTION_REGEX);
-        let overridden = ModelSettings::new(&serde_json::json!({ "model_name": "a/b" }), Some("openai/gpt-5")).unwrap();
-        assert_eq!(overridden.config.model_name, "openai/gpt-5");
-        assert_eq!(overridden.format_error_template, "{{ error }}");
-        assert!(overridden.dump().get("action_regex").is_none());
         assert!(matches!(
-            ModelSettings::new(&serde_json::json!({ "model_class": "anthropic" }), Some("x")),
-            Err(ModelConfigError::UnknownClass(_))
+            resolve_model(&models, "no-such-provider", "x"),
+            Err(ModelConfigError::UnknownProvider { .. })
+        ));
+        assert!(matches!(resolve_model(&models, "", ""), Err(ModelConfigError::NoModel)));
+    }
+
+    #[test]
+    fn providers_are_built_from_the_config() {
+        let providers = json!({
+            "local": {
+                "name": "Local server",
+                "api": "openai-completions",
+                "base_url": "http://localhost:8000/v1",
+                "models": [
+                    { "id": "qwen3-coder", "contextWindow": 32768, "cost": { "input": 1.0 } },
+                    { "id": "other", "api": "anthropic-messages", "baseUrl": "http://localhost:9000" },
+                ],
+            },
+        });
+        let models = build_models(&providers, None).unwrap();
+        let provider = models.provider("local").unwrap();
+        assert_eq!(provider.name(), "Local server");
+        let qwen = models.get_model("local", "qwen3-coder").unwrap();
+        assert_eq!(
+            (
+                qwen.api.as_str(),
+                qwen.base_url.as_str(),
+                qwen.context_window,
+                qwen.cost.input,
+                qwen.cost.output
+            ),
+            ("openai-completions", "http://localhost:8000/v1", 32768, 1.0, 0.0)
+        );
+        assert_eq!(models.get_model("local", "other").unwrap().api, "anthropic-messages");
+        assert!(models.provider("anthropic").is_some(), "the built-in providers stay");
+
+        let invalid = |providers: Json| build_models(&providers, None).unwrap_err().to_string();
+        assert!(
+            invalid(json!({ "x": { "api": "nope", "base_url": "u", "models": [{ "id": "m" }] } }))
+                .contains("unknown api nope")
+        );
+        assert!(
+            invalid(json!({ "x": { "api": "openai-completions", "base_url": "u", "models": [] } }))
+                .contains("no models")
+        );
+        assert!(
+            invalid(json!({ "x": { "api": "openai-completions", "base_url": "u", "model": [] } }))
+                .contains("unknown field")
+        );
+    }
+
+    #[test]
+    fn settings_take_their_format_s_defaults() {
+        let text = ModelSettings::new(&json!({ "provider": "anthropic", "id": "x", "actions": "text" })).unwrap();
+        assert_eq!(text.format_error_template, DEFAULT_TEXT_FORMAT_ERROR_TEMPLATE);
+        assert_eq!(text.dump()["action_regex"], DEFAULT_ACTION_REGEX);
+        let calls = ModelSettings::new(&json!({ "provider": "anthropic", "id": "x", "thinking": "high" })).unwrap();
+        assert_eq!(calls.config.actions, ActionFormat::ToolCalls);
+        assert_eq!(calls.config.thinking, Some(ModelThinkingLevel::High));
+        assert_eq!(calls.format_error_template, "{{ error }}");
+        assert!(calls.dump().get("action_regex").is_none());
+        assert!(matches!(
+            ModelSettings::new(&json!({ "model_name": "a/b" })),
+            Err(ModelConfigError::Invalid(_))
+        ));
+        assert!(matches!(
+            ModelSettings::new(&json!({ "actions": "text", "action_regex": "(" })),
+            Err(ModelConfigError::ActionRegex(_))
         ));
     }
 
     #[test]
-    fn scripted_outputs_become_answers() {
-        let answer = scripted_answer(&serde_json::json!({
-            "role": "assistant",
-            "content": "Let me look.",
-            "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "bash", "arguments": "{\"command\": \"ls\"}" } }],
-        }));
-        assert_eq!(answer.stop_reason, StopReason::ToolUse);
+    fn script_items_become_answers() {
+        let (answer, cost) = script_answer(
+            2,
+            &json!({
+                "content": [
+                    { "type": "text", "text": "Let me look." },
+                    { "type": "toolCall", "name": "bash", "arguments": { "command": "ls" } },
+                ],
+                "cost": 0.5,
+            }),
+        )
+        .unwrap();
+        assert_eq!((answer.stop_reason, cost), (StopReason::ToolUse, 0.5));
         let AssistantBlock::ToolCall(call) = &answer.content[1] else {
             panic!("a tool call");
         };
         assert_eq!(
             (call.id.as_str(), call.arguments["command"].as_str()),
-            ("call_1", Some("ls"))
+            ("call_2_1", Some("ls"))
         );
-        let broken = scripted_answer(&serde_json::json!({
-            "tool_calls": [{ "id": "c", "function": { "name": "bash", "arguments": "{" } }],
-        }));
-        let AssistantBlock::ToolCall(call) = &broken.content[0] else {
-            panic!("a tool call");
-        };
-        assert!(call.arguments_error.is_some());
+        let (text, cost) = script_answer(0, &json!({ "content": [{ "type": "text", "text": "done" }] })).unwrap();
+        assert_eq!((text.stop_reason, cost), (StopReason::Stop, 0.0));
+        assert!(script_answer(0, &json!({ "content": [], "outputs": 1 })).is_err());
+        assert!(script_answer(0, &json!({ "content": [{ "type": "image" }] })).is_err());
+    }
+
+    #[test]
+    fn batch_limits_are_reached_at_their_value() {
+        let stats = BatchStats::new(1.0, 5);
+        stats.add(0.4);
+        stats.add(0.4);
+        assert_eq!(stats.exceeded(), None);
+        stats.add(0.4);
+        assert!(stats.exceeded().unwrap().contains("$1.2000 in 3 calls"));
+        let calls = BatchStats::new(0.0, 1);
+        assert_eq!(calls.exceeded(), None);
+        calls.add(0.0);
+        assert!(calls.exceeded().is_some());
+        assert_eq!(BatchStats::default().exceeded(), None);
     }
 }

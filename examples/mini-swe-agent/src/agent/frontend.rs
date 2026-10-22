@@ -1,6 +1,6 @@
-//! What the interactive agent shows and asks: messages as they are added, the prompts of
-//! upstream's `InteractiveAgent`, and the answers. [`Terminal`] talks to a terminal;
-//! [`Scripted`] answers from a list, for tests.
+//! What the interactive agent shows and asks: entries as they are added, its prompts, and
+//! the answers. [`Terminal`] talks to a terminal; [`Scripted`] answers from a list, for
+//! tests.
 
 use std::collections::VecDeque;
 use std::io::{IsTerminal as _, Write as _};
@@ -8,10 +8,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crossterm::style::Stylize as _;
-use serde_json::Value as Json;
 
 use super::Mode;
-use crate::trajectory::content_string;
+use crate::trajectory::{Entry, message_text};
 
 /// One answer to a prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,8 +66,8 @@ pub enum Notice {
 
 /// The interactive agent's terminal.
 pub trait Frontend: Send + Sync {
-    /// Shows a message as the agent adds it; `step` and `cost` are the counts so far.
-    fn show_message(&self, message: &Json, step: u64, cost: f64);
+    /// Shows an entry as the agent adds it; `step` and `cost` are the counts so far.
+    fn show_entry(&self, entry: &Entry, step: u64, cost: f64);
 
     fn notice(&self, notice: Notice);
 
@@ -82,7 +81,7 @@ pub trait Frontend: Send + Sync {
     fn is_interactive(&self) -> bool;
 }
 
-/// A terminal: colored messages, prompts with history in the global config directory.
+/// A terminal: colored entries, prompts with history in the home directory.
 pub struct Terminal {
     editor: Mutex<rustyline::DefaultEditor>,
     history: Option<PathBuf>,
@@ -141,29 +140,30 @@ fn mode_name(mode: Mode) -> &'static str {
     }
 }
 
+/// An entry's kind as a heading: `format_error` is `Format error`.
+pub fn kind_title(entry: &Entry) -> String {
+    let mut title = entry.kind().replace('_', " ");
+    if let Some(first) = title.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    title
+}
+
 impl Frontend for Terminal {
-    fn show_message(&self, message: &Json, step: u64, cost: f64) {
-        let role = message["role"]
-            .as_str()
-            .or_else(|| message["type"].as_str())
-            .unwrap_or("unknown");
-        let header = if role == "assistant" {
+    fn show_entry(&self, entry: &Entry, step: u64, cost: f64) {
+        let header = if matches!(entry, Entry::Answer { .. }) {
             format!(
                 "\n{} (step {}, {}):\n",
-                "mini-swe-agent".bold(),
+                "delta-mini".bold(),
                 step.to_string().bold(),
                 format!("${cost:.2}").bold()
             )
             .red()
             .to_string()
         } else {
-            let mut name = role.to_owned();
-            if let Some(first) = name.get_mut(0..1) {
-                first.make_ascii_uppercase();
-            }
-            format!("\n{}:\n", name.bold().green())
+            format!("\n{}:\n", kind_title(entry).bold().green())
         };
-        Self::print(&format!("{header}{}\n", content_string(message)));
+        Self::print(&format!("{header}{}\n", message_text(entry.message())));
     }
 
     fn notice(&self, notice: Notice) {
@@ -187,8 +187,7 @@ impl Frontend for Terminal {
                 steps,
                 cost,
             } => format!(
-                "Limits exceeded. Limits: {step_limit} steps, ${}.\nCurrent spend: {steps} steps, ${cost:.2}.\n",
-                crate::template::python_float(cost_limit)
+                "Limits exceeded. Limits: {step_limit} steps, ${cost_limit}.\nCurrent spend: {steps} steps, ${cost:.2}.\n"
             ),
             Notice::Rule => {
                 let width = crossterm::terminal::size().map_or(80, |(columns, _)| usize::from(columns));
@@ -271,8 +270,8 @@ impl Scripted {
         Self::new(lines.map(|line| Input::Line(line.to_owned())), true)
     }
 
-    /// What was shown and asked, one entry each: `message <role>: <content>`, `notice ...`,
-    /// `prompt ...`.
+    /// What was shown and asked, one line each: `entry <kind> (step N): <text>`,
+    /// `notice ...`, `prompt ...`.
     pub fn log(&self) -> Vec<String> {
         self.log
             .lock()
@@ -305,9 +304,12 @@ impl Scripted {
 }
 
 impl Frontend for Scripted {
-    fn show_message(&self, message: &Json, step: u64, _cost: f64) {
-        let role = message["role"].as_str().unwrap_or("unknown");
-        self.record(format!("message {role} (step {step}): {}", content_string(message)));
+    fn show_entry(&self, entry: &Entry, step: u64, _cost: f64) {
+        self.record(format!(
+            "entry {} (step {step}): {}",
+            entry.kind(),
+            message_text(entry.message())
+        ));
     }
 
     fn notice(&self, notice: Notice) {

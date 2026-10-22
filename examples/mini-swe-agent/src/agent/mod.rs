@@ -1,11 +1,11 @@
-//! The agent: upstream's `DefaultAgent` and `InteractiveAgent` on a harness conversation.
+//! The agent on a harness conversation.
 //!
 //! Each run opens a Harness with one root conversation whose instructions are the rendered
 //! system template. The task is the first input; the harness runs model turns and tool
 //! rounds, and this module's `harness` pieces (the `bash` tool, the generation hooks) keep
-//! upstream's step semantics and record the trajectory. Whatever ends a harness run without
-//! ending the agent (a rejection, a new task, human mode, Ctrl+C) queues a message, and the
-//! driver delivers it as the next run's input.
+//! mini-swe-agent's step semantics and record the trajectory. Whatever ends a harness run
+//! without ending the agent (a rejection, a new task, human mode, Ctrl+C) queues a message,
+//! and the driver delivers it as the next run's input.
 
 mod config;
 mod frontend;
@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use delta_ai::model::Model;
 use delta_ai::types::{Message, UserMessage};
 use delta_chord::context::Context;
 use delta_harness::agent::{
@@ -30,18 +31,18 @@ use delta_harness::registry::{Extension, Registry};
 use delta_harness::storage::{MemoryStorage, SqliteOptions, SqliteStorage, Storage};
 use delta_harness::tool::ToolExecutionMode;
 use regex::Regex;
-use serde_json::{Map, Value as Json, json};
+use serde_json::{Map, Value as Json};
 use tokio::sync::Notify;
 
 pub use config::{AgentConfig, AgentKind, Mode};
-pub use frontend::{Frontend, Input, Notice, Prompt, Scripted, Terminal};
+pub use frontend::{Frontend, Input, Notice, Prompt, Scripted, Terminal, kind_title};
 pub use harness::BASH_TOOL_NAME;
 
 use self::harness::{BashTool, Hooks};
-use self::state::{Action, Shared, State};
+use self::state::{Shared, State, unfinished_observation};
 use crate::env::Environment;
-use crate::model::{ActionFormat, ModelSettings};
-use crate::trajectory::{self, ExitInfo, Trajectory, exit_message, extra};
+use crate::model::{ActionFormat, BatchStats, ModelSettings};
+use crate::trajectory::{Action, Entry, Exit, ExitStatus, InterruptReason, Trajectory, system_message, user_message};
 
 /// Why a run could not start or continue.
 #[derive(Debug, thiserror::Error)]
@@ -62,24 +63,27 @@ impl AgentError {
 
 /// What an agent is built from.
 pub struct AgentOptions {
-    /// The `agent` section of the config.
+    /// The merged config: its `agent` section, and its `providers` for the trajectory.
     pub config: Json,
-    /// The agent when `agent_class` names none.
-    pub default_kind: AgentKind,
+    pub kind: AgentKind,
     pub model: ModelSettings,
-    /// Model access for the harness, and the model it streams.
+    /// The delta-ai model the client streams.
+    pub resolved: Model,
+    /// Model access for the harness.
     pub client: Arc<dyn ModelClient>,
-    pub model_ref: ModelRef,
     pub env: Arc<dyn Environment>,
-    /// Shows messages and asks the interactive agent's questions.
+    /// Shows entries and asks the interactive agent's questions.
     pub frontend: Option<Arc<dyn Frontend>>,
-    /// Parts merged into the saved trajectory (upstream's `extra_dicts`).
-    pub extra_info: Vec<Json>,
+    /// Where the trajectory is saved after every step; with it, the harness database beside.
+    pub output: Option<PathBuf>,
+    /// The trajectory's `extra`.
+    pub extra: Map<String, Json>,
     /// Ctrl+C interrupts the agent instead of ending the process.
     pub handle_ctrl_c: bool,
-    /// Called before each model call with the step about to run and the cost so far
-    /// (upstream's `ProgressTrackingAgent`).
+    /// Called before each model call with the step about to run and the cost so far.
     pub on_step: Option<StepCallback>,
+    /// The batch this run belongs to, with its limits.
+    pub batch: Option<Arc<BatchStats>>,
 }
 
 /// A callback taking the step about to run and the cost so far.
@@ -88,8 +92,8 @@ pub type StepCallback = Arc<dyn Fn(u64, f64) + Send + Sync>;
 impl std::fmt::Debug for AgentOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentOptions")
-            .field("default_kind", &self.default_kind)
-            .field("model_ref", &self.model_ref)
+            .field("kind", &self.kind)
+            .field("model", &self.resolved.id)
             .finish_non_exhaustive()
     }
 }
@@ -97,9 +101,9 @@ impl std::fmt::Debug for AgentOptions {
 /// How a run ended.
 #[derive(Clone, Debug)]
 pub struct RunOutput {
-    pub exit: ExitInfo,
+    pub exit: Exit,
     /// The trajectory document, as saved.
-    pub trajectory: Json,
+    pub trajectory: Trajectory,
 }
 
 /// An agent: one task at a time.
@@ -133,19 +137,21 @@ pub fn harness_db_path(output: &Path) -> PathBuf {
 
 impl Agent {
     pub fn new(options: AgentOptions) -> Result<Self, AgentError> {
-        let (config, kind) =
-            AgentConfig::from_section(&options.config, options.default_kind).map_err(AgentError::Config)?;
+        let config = AgentConfig::from_section(&options.config["agent"]).map_err(AgentError::Config)?;
         let whitelist = config
-            .whitelist_actions
+            .whitelist
             .iter()
             .map(|pattern| Regex::new(&format!("^(?:{pattern})")))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| AgentError::Config(format!("Invalid whitelist_actions: {error}")))?;
-        let output_path = config
-            .output_path
-            .as_ref()
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from);
+            .map_err(|error| AgentError::Config(format!("Invalid agent.whitelist: {error}")))?;
+        let script_costs = options
+            .model
+            .script()
+            .map_err(|error| AgentError::Config(error.to_string()))?
+            .into_iter()
+            .map(|(_, cost)| cost)
+            .collect();
+        let model_ref = ModelRef::new(&options.resolved.provider, &options.resolved.id);
         let state = State {
             config,
             trajectory: Trajectory::default(),
@@ -160,20 +166,24 @@ impl Agent {
         };
         Ok(Self {
             shared: Arc::new(Shared {
-                kind,
+                kind: options.kind,
                 model: options.model,
+                model_info: serde_json::to_value(&options.resolved).unwrap_or(Json::Null),
+                script_costs,
+                providers: options.config["providers"].clone(),
                 env: options.env,
                 frontend: options.frontend,
-                output_path,
-                extra_info: options.extra_info,
+                output_path: options.output,
+                extra: options.extra,
                 whitelist,
                 started: Instant::now(),
                 state: Mutex::new(state),
                 stop: Notify::new(),
                 on_step: options.on_step,
+                batch: options.batch,
             }),
             client: options.client,
-            model_ref: options.model_ref,
+            model_ref,
             handle_ctrl_c: options.handle_ctrl_c,
             interrupt: Arc::new(Notify::new()),
         })
@@ -184,13 +194,12 @@ impl Agent {
         Arc::clone(&self.interrupt)
     }
 
-    /// The agent's kind, as its config resolved it.
     pub fn kind(&self) -> AgentKind {
         self.shared.kind
     }
 
     /// The trajectory document so far.
-    pub fn serialize(&self) -> Json {
+    pub fn serialize(&self) -> Trajectory {
         let state = self.shared.lock();
         self.shared.serialize(&state)
     }
@@ -207,10 +216,18 @@ impl Agent {
             let template_vars = self.shared.template_vars(&state);
             let system = crate::template::render(&state.config.system_template, &template_vars)?;
             let instance = crate::template::render(&state.config.instance_template, &template_vars)?;
-            self.shared
-                .push(&mut state, trajectory::message("system", &system, Map::new()));
-            self.shared
-                .push(&mut state, trajectory::message("user", &instance, Map::new()));
+            self.shared.push(
+                &mut state,
+                Entry::System {
+                    message: system_message(&system),
+                },
+            );
+            self.shared.push(
+                &mut state,
+                Entry::Task {
+                    message: user_message(&instance),
+                },
+            );
             state.queue = vec![instance];
             self.shared.save(&state);
             system
@@ -221,11 +238,16 @@ impl Agent {
         let _ = harness.close(&ctx).await;
         result?;
 
-        let state = self.shared.lock();
+        let mut state = self.shared.lock();
+        state.exit(ExitStatus::Error, Some("The run ended without an exit.".to_owned()));
         self.shared.save(&state);
+        let trajectory = self.shared.serialize(&state);
         Ok(RunOutput {
-            exit: state.trajectory.exit().unwrap_or_default(),
-            trajectory: self.shared.serialize(&state),
+            exit: trajectory
+                .exit
+                .clone()
+                .unwrap_or_else(|| Exit::new(ExitStatus::Error, None)),
+            trajectory,
         })
     }
 
@@ -249,13 +271,13 @@ impl Agent {
             }
             None => Arc::new(MemoryStorage::new()),
         };
-        let mut extension = Extension::new("mini-swe-agent").with_hooks(
+        let mut extension = Extension::new("delta-mini").with_hooks(
             GENERATION_TASK,
             Arc::new(Hooks {
                 shared: Arc::clone(&self.shared),
             }) as Arc<dyn delta_harness::registry::GenerationHooks>,
         );
-        if self.shared.model.class.format == ActionFormat::Toolcall {
+        if self.shared.model.config.actions == ActionFormat::ToolCalls {
             extension = extension.with_tool(Arc::new(BashTool {
                 shared: Arc::clone(&self.shared),
             }));
@@ -283,6 +305,7 @@ impl Agent {
     async fn drive(&self, harness: &Harness, system: String, ctx: &Context) -> Result<(), AgentError> {
         let agent = AgentChange {
             model: Change::Set(self.model_ref.clone()),
+            thinking_level: self.shared.model.config.thinking.map_or(Change::Keep, Change::Set),
             instructions: Change::Set(system),
             ..AgentChange::default()
         };
@@ -310,14 +333,14 @@ impl Agent {
             }
             let inputs = std::mem::take(&mut self.shared.lock().queue);
             let Some((last, earlier)) = inputs.split_last() else {
-                self.end_with_error("RuntimeError", "The agent has no message for the model.");
+                self.end_with_error("The agent has no message for the model.");
                 return Ok(());
             };
             for text in earlier {
                 let entry = EntryDraft {
                     model: Some(vec![Message::User(UserMessage {
                         content: text.clone().into(),
-                        timestamp: now_millis(),
+                        timestamp: crate::trajectory::now_millis(),
                     })]),
                     ..EntryDraft::new(USER_ENTRY)
                 };
@@ -373,72 +396,58 @@ impl Agent {
                             .error_message
                             .clone()
                             .unwrap_or_else(|| "The model call failed".to_owned());
-                        let status = classify_error(&answer, &message);
-                        self.end_with_error(status, &message);
+                        self.end_with_error(&format!("The model call failed: {message}"));
                     }
-                    None => self.end_with_error("RuntimeError", "The run ended without an exit."),
+                    None => self.end_with_error("The run ended without an exit."),
                 }
                 return Ok(());
             }
         }
     }
 
-    /// The run ended in a way upstream reports as an uncaught exception.
-    fn end_with_error(&self, status: &str, message: &str) {
+    /// The run failed.
+    fn end_with_error(&self, message: &str) {
         let mut state = self.shared.lock();
-        let more = extra([("exception_str", json!(message))]);
-        self.shared.push(&mut state, exit_message(message, status, "", more));
+        state.exit(ExitStatus::Error, Some(message.to_owned()));
+        self.shared.save(&state);
+    }
+
+    /// Ends the run with `status`.
+    fn end(&self, status: ExitStatus) {
+        let mut state = self.shared.lock();
+        state.exit(status, None);
         self.shared.save(&state);
     }
 
     /// After Ctrl+C during a round whose commands never reported: their observations are
-    /// "not executed", as upstream's `finally` adds them.
+    /// "not executed", so every tool call has its result.
     fn pad_unfinished_round(&self) {
         let round = self.shared.lock().round.take();
         let Some(round) = round else { return };
-        if round.format_error.is_some() || round.outcome.initialized() {
+        if round.rejection.is_some() || round.outcome.initialized() {
             return;
         }
-        if self.shared.model.class.format != ActionFormat::Toolcall {
+        if self.shared.model.config.actions != ActionFormat::ToolCalls {
             return;
         }
         let mut state = self.shared.lock();
-        let vars = self.shared.template_vars(&state);
         for action in &round.actions {
-            let output = crate::env::ExecOutput {
-                returncode: -1,
-                exception_info: "action was not executed".to_owned(),
-                ..crate::env::ExecOutput::default()
-            };
-            let mut vars = vars.clone();
-            vars["output"] = output.to_json();
-            let content = crate::template::render(&self.shared.model.config.observation_template, &vars)
-                .unwrap_or_else(|error| error.to_string());
-            let message = trajectory::observation_message(&content, &output, action.tool_call_id.as_deref());
-            self.shared.push(&mut state, message);
+            unfinished_observation(&self.shared, &mut state, action);
         }
         self.shared.save(&state);
     }
 
-    /// After Ctrl+C: a comment for the model (upstream's `step` handler). An agent nobody
-    /// can ask exits as upstream's does on `KeyboardInterrupt`.
+    /// After Ctrl+C: a comment for the model. An agent nobody can ask exits.
     async fn interrupt_prompt(&self) {
         if self.shared.kind != AgentKind::Interactive || self.shared.frontend.is_none() {
-            let mut state = self.shared.lock();
-            let more = extra([("exception_str", json!(""))]);
-            self.shared
-                .push(&mut state, exit_message("", "KeyboardInterrupt", "", more));
-            self.shared.save(&state);
+            self.end(ExitStatus::Interrupted);
             return;
         }
         let comment = match self.shared.ask_with_commands(Prompt::Interrupted).await {
             Input::Line(line) => line.trim().to_owned(),
             Input::Interrupted => String::new(),
             Input::Eof => {
-                let mut state = self.shared.lock();
-                let more = extra([("exception_str", json!(""))]);
-                self.shared.push(&mut state, exit_message("", "EOFError", "", more));
-                self.shared.save(&state);
+                self.end(ExitStatus::Eof);
                 return;
             }
         };
@@ -448,16 +457,15 @@ impl Agent {
             comment
         };
         let mut state = self.shared.lock();
-        self.shared.push_user(
+        self.shared.push_interrupt(
             &mut state,
             format!("Interrupted by user: {comment}"),
-            "UserInterruption",
+            InterruptReason::UserInterruption,
         );
         self.shared.save(&state);
     }
 
-    /// Human mode: the user's command runs and its observation queues for the model
-    /// (upstream's `InteractiveAgent.query` in human mode).
+    /// Human mode: the user's command runs and its observation queues for the model.
     async fn human_step(&self, ctx: &Context) {
         let command = match self.shared.ask_with_commands(Prompt::Human).await {
             Input::Line(command) => command,
@@ -466,10 +474,7 @@ impl Agent {
                 return;
             }
             Input::Eof => {
-                let mut state = self.shared.lock();
-                let more = extra([("exception_str", json!(""))]);
-                self.shared.push(&mut state, exit_message("", "EOFError", "", more));
-                self.shared.save(&state);
+                self.end(ExitStatus::Eof);
                 return;
             }
         };
@@ -479,8 +484,13 @@ impl Agent {
         {
             let mut state = self.shared.lock();
             let content = format!("User command: \n```bash\n{command}\n```");
-            let message = trajectory::message("user", &content, extra([("actions", json!([{ "command": command }]))]));
-            self.shared.push(&mut state, message);
+            self.shared.push(
+                &mut state,
+                Entry::Human {
+                    message: user_message(&content),
+                    command: command.clone(),
+                },
+            );
             state.queue.push(content);
         }
         let action = Action {
@@ -491,25 +501,5 @@ impl Agent {
         let mut state = self.shared.lock();
         state.queue.extend(outcome.observations);
         state.queue.extend(outcome.interrupt);
-    }
-}
-
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as i64)
-}
-
-/// An exit status for a failed model call, named as litellm's exceptions are.
-fn classify_error(answer: &delta_ai::types::AssistantMessage, message: &str) -> &'static str {
-    let lower = message.to_lowercase();
-    if lower.contains("401") || lower.contains("authentication") || lower.contains("api key") {
-        "AuthenticationError"
-    } else if delta_ai::overflow::is_context_overflow(answer, None) {
-        "ContextWindowExceededError"
-    } else if lower.contains("429") || lower.contains("rate limit") {
-        "RateLimitError"
-    } else {
-        "APIError"
     }
 }

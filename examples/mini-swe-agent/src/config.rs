@@ -1,12 +1,11 @@
-//! Configs: YAML files merged in order, with `key.path=value` overrides, found the way
-//! upstream finds them (`minisweagent/config/__init__.py`). The configs upstream ships are
-//! built in, so `-c mini.yaml` or `-c swebench.yaml` works from anywhere.
+//! Configs: YAML files merged in order, with `key.path=value` overrides. The configs this
+//! crate ships are built in, so `-c mini.yaml` or `-c swebench.yaml` works from anywhere.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-/// The configs upstream ships, by their path under its `config/` directory.
+/// The built-in configs, by their path under `config/`.
 pub const BUILTIN_CONFIGS: [(&str, &str); 6] = [
     ("mini.yaml", include_str!("../config/mini.yaml")),
     ("default.yaml", include_str!("../config/default.yaml")),
@@ -69,36 +68,31 @@ pub fn builtin_config(name: &str) -> Option<(&'static str, &'static str)> {
     };
     BUILTIN_CONFIGS
         .iter()
-        .find(|(path, _)| {
-            *path == name
-                || ["extra/", "benchmarks/"]
-                    .iter()
-                    .any(|dir| *path == format!("{dir}{name}"))
-        })
+        .find(|(path, _)| *path == name || *path == format!("benchmarks/{name}"))
         .map(|(path, text)| (*path, *text))
 }
 
-/// Resolves a config file spec as upstream's `get_config_path`: the path itself, then
-/// `$MSWEA_CONFIG_DIR`, then the built-in configs (also under `extra/` and `benchmarks/`).
-/// A spec without the `.yaml` suffix gets it.
+/// Resolves a config file spec: the file itself (also with `.yaml` added), else a built-in
+/// config (also under `benchmarks/`).
 pub fn config_source(spec: &str) -> Result<ConfigSource, ConfigError> {
-    let mut path = PathBuf::from(spec);
-    if path.extension().is_none_or(|extension| extension != "yaml") {
+    let given = PathBuf::from(spec);
+    let mut path = given.clone();
+    if path
+        .extension()
+        .is_none_or(|extension| extension != "yaml" && extension != "yml")
+    {
         path.set_extension("yaml");
     }
-    let config_dir = std::env::var_os("MSWEA_CONFIG_DIR").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    let candidates = [path.clone(), config_dir.join(&path)];
-    if let Some(found) = candidates.iter().find(|candidate| candidate.is_file()) {
+    if let Some(found) = [&given, &path].into_iter().find(|candidate| candidate.is_file()) {
         return Ok(ConfigSource::File(found.clone()));
     }
     let name = path.to_string_lossy();
     if let Some((builtin, _)) = builtin_config(&name) {
         return Ok(ConfigSource::Builtin(builtin));
     }
-    let tried: Vec<String> = candidates
-        .iter()
-        .map(|candidate| candidate.display().to_string())
-        .chain(["builtin", "builtin/extra", "builtin/benchmarks"].map(|dir| format!("{dir}/{name}")))
+    let tried: Vec<String> = [path.display().to_string()]
+        .into_iter()
+        .chain(["builtin", "builtin/benchmarks"].map(|dir| format!("{dir}/{name}")))
         .collect();
     Err(ConfigError::NotFound {
         spec: spec.to_owned(),
@@ -119,8 +113,8 @@ pub fn parse_yaml(text: &str, path: &str) -> Result<Value, ConfigError> {
     Ok(value)
 }
 
-/// A block scalar (`|`, `>`) that ends the file without a line break has none to keep, as
-/// PyYAML reads it; saphyr adds one. Upstream's `default.yaml` ends that way.
+/// A block scalar (`|`, `>`) that ends the file without a line break has none to keep, as the
+/// YAML spec reads it (clip chomping keeps only a line break that is there); saphyr adds one.
 fn drop_invented_line_break(text: &str, value: &mut Value) {
     if text.ends_with('\n') {
         return;
@@ -225,7 +219,7 @@ pub fn merge(base: &mut Value, overlay: Value) {
     }
 }
 
-/// Merges `configs` in order, later ones winning (upstream's `recursive_merge`).
+/// Merges `configs` in order, later ones winning.
 pub fn merge_all(configs: impl IntoIterator<Item = Value>) -> Value {
     let mut merged = Value::Object(Map::new());
     for config in configs {
@@ -243,8 +237,7 @@ pub fn load(specs: &[String]) -> Result<Value, ConfigError> {
     Ok(merge_all(configs))
 }
 
-/// Command-line overrides: each `Some` value lands at its path; `None` changes nothing
-/// (upstream's `UNSET`).
+/// Command-line overrides: each `Some` value lands at its path; `None` changes nothing.
 #[derive(Clone, Debug, Default)]
 pub struct Overrides(Vec<(&'static str, Value)>);
 
@@ -280,10 +273,10 @@ mod tests {
 
     #[test]
     fn specs_are_files_builtins_or_key_values() {
-        let overlay = config_from_spec("model.model_kwargs.temperature=0.5").unwrap();
+        let overlay = config_from_spec("model.sampling.top_p=0.5").unwrap();
         assert_eq!(
             overlay,
-            serde_json::json!({ "model": { "model_kwargs": { "temperature": 0.5 } } })
+            serde_json::json!({ "model": { "sampling": { "top_p": 0.5 } } })
         );
         assert_eq!(
             config_from_spec("agent.mode=yolo").unwrap(),
@@ -300,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn block_scalars_read_as_pyyaml_reads_them() {
+    fn block_scalars_keep_only_the_line_breaks_they_have() {
         let parse = |text: &str| parse_yaml(text, "test").unwrap()["a"].clone();
         assert_eq!(parse("a: |\n  x"), "x");
         assert_eq!(parse("a: |\n  x\n"), "x\n");
@@ -329,7 +322,7 @@ mod tests {
         let mut config = merged;
         Overrides::default()
             .set("agent.cost_limit", Some(1.5))
-            .set("model.model_name", None::<String>)
+            .set("model.id", None::<String>)
             .apply(&mut config);
         assert_eq!(config["agent"]["cost_limit"], 1.5);
     }
