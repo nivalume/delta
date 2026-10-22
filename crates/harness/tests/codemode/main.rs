@@ -1041,10 +1041,12 @@ impl ModelClient for Media {
                 running.2 += 1;
                 running.2 <= MAX_CONCURRENT_MODEL_CALLS
             };
-            // The first calls wait until as many as the limit allows run at once, so a fifth
-            // would join them if the limit did not hold.
+            // The first calls wait until as many as the limit allows have run at once, so a
+            // fifth would join them if the limit did not hold. They wait on the peak: the
+            // count drops again as soon as one of them ends, and a call that only looked
+            // while it was lower would wait for good.
             let deadline = tokio::time::Instant::now() + PATIENCE;
-            while first && self.running.lock().unwrap().0 < MAX_CONCURRENT_MODEL_CALLS {
+            while first && self.running.lock().unwrap().1 < MAX_CONCURRENT_MODEL_CALLS {
                 assert!(tokio::time::Instant::now() < deadline, "the first calls run at once");
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
