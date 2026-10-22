@@ -8,7 +8,7 @@ use std::fmt;
 use std::str::FromStr;
 
 pub use bash::split_command;
-pub use path::{Anchor, Anchors, PathPattern};
+pub use path::{Anchor, Anchors, PathPattern, rule_path, windows_rule_path};
 
 use crate::tool::{PathAccess, PermissionSubject};
 

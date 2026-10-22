@@ -1,5 +1,7 @@
 //! Path patterns for rule matching: anchors and segment globs, matched lexically.
 
+use std::borrow::Cow;
+
 /// What a path pattern is relative to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Anchor {
@@ -69,6 +71,46 @@ impl PathPattern {
         let pattern = segments(&glob);
         let path = segments(path);
         match_segments(&pattern, &path)
+    }
+}
+
+/// `path` as rules see it. On Windows that is Claude Code's POSIX form: `\` becomes `/`, a
+/// drive `C:\x` becomes `/c/x` and a verbatim `\\?\` prefix is dropped (see
+/// [`windows_rule_path`]); elsewhere the path as it is.
+pub fn rule_path(path: &str) -> Cow<'_, str> {
+    if cfg!(windows) {
+        Cow::Owned(windows_rule_path(path))
+    } else {
+        Cow::Borrowed(path)
+    }
+}
+
+/// A Windows path in rule form: `C:\Users\me` is `/c/Users/me`, `\\?\C:\x` is `/c/x`,
+/// `\\server\share\x` and `\\?\UNC\server\share\x` are `//server/share/x`.
+pub fn windows_rule_path(path: &str) -> String {
+    let slashed = path.replace('\\', "/");
+    let path = if let Some(rest) = slashed
+        .strip_prefix("//?/UNC/")
+        .or_else(|| slashed.strip_prefix("//./UNC/"))
+    {
+        format!("//{rest}")
+    } else if let Some(rest) = slashed.strip_prefix("//?/").or_else(|| slashed.strip_prefix("//./")) {
+        rest.to_owned()
+    } else {
+        slashed
+    };
+    let mut chars = path.chars();
+    match (chars.next(), chars.next()) {
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic() => {
+            let rest = &path[2..];
+            let separator = if rest.is_empty() || rest.starts_with('/') {
+                ""
+            } else {
+                "/"
+            };
+            format!("/{}{separator}{rest}", drive.to_ascii_lowercase())
+        }
+        _ => path,
     }
 }
 
@@ -167,6 +209,25 @@ mod tests {
         assert!(matches("file?.txt", "/work/project/file1.txt"));
         assert!(!matches("file?.txt", "/work/project/file10.txt"));
         assert!(matches("src/../docs", "/work/project/docs/x"));
+    }
+
+    #[test]
+    fn windows_paths_take_the_posix_form() {
+        assert_eq!(windows_rule_path(r"C:\Users\me\a.txt"), "/c/Users/me/a.txt");
+        assert_eq!(windows_rule_path(r"\\?\D:\work"), "/d/work");
+        assert_eq!(windows_rule_path("C:"), "/c");
+        assert_eq!(windows_rule_path(r"C:\"), "/c/");
+        assert_eq!(windows_rule_path(r"\\server\share\x"), "//server/share/x");
+        assert_eq!(windows_rule_path(r"\\?\UNC\server\share\x"), "//server/share/x");
+        assert_eq!(windows_rule_path("/already/posix"), "/already/posix");
+        let pattern = PathPattern::parse("./secret.txt");
+        let cwd = windows_rule_path(r"C:\Users\me\work");
+        let anchors = Anchors {
+            cwd: Some(&cwd),
+            ..Anchors::default()
+        };
+        assert!(pattern.matches(&windows_rule_path(r"C:\Users\me\work\secret.txt"), anchors));
+        assert!(is_within(&windows_rule_path(r"C:\Users\me\work\a\b"), &cwd));
     }
 
     #[test]

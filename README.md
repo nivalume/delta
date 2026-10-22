@@ -52,6 +52,12 @@ Chord's host runtime (objects, links, hot reload) is not ported; see
 Each crate has design notes in `crates/<crate>/docs/design/`. They describe the modules and list
 every difference from upstream.
 
+## Examples
+
+| Example | Upstream | Description |
+|---------|----------|-------------|
+| **[mini-swe-agent](examples/mini-swe-agent)** | [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) | The `mini` agent on delta-harness and delta-ai, with its own config, credentials (pi's `auth.json`) and trajectory format: a trajectory inspector, local and Docker environments, SWE-bench runners. Not published |
+
 ## Permissions & Containerization
 
 Delta does not include a permission system for restricting filesystem, process, network, or

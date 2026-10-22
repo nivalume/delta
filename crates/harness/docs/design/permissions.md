@@ -82,7 +82,9 @@ A rule is `Tool` or `Tool(specifier)`; `Tool(*)` is `Tool`.
   directory, `/path` is below the policy's `root` (a rule using it without a root is
   invalid), `./path` and `path` are below the call's `cwd`. In the rest, `*` matches within
   one path segment, `**` any number of segments, `?` one character. A pattern matches a
-  path equal to it or below it. Matching is lexical (no symbolic links resolved).
+  path equal to it or below it. Matching is lexical (no symbolic links resolved). On
+  Windows, paths are matched in Claude Code's POSIX form (`rules::rule_path`): `C:\Users\me`
+  is `/c/Users/me`, so a rule names it `//c/Users/me/**`; proposed rules use the same form.
 - `Edit`/`Write` rules apply to write subjects and `Read` rules to read subjects; a `Read`
   deny or ask rule also applies to writes of the paths it names.
 
