@@ -253,9 +253,17 @@ async fn timezone_probe() {
     let sandbox = sandbox();
     let run = start(&sandbox, code, options(), None);
     assert_eq!(value(&run.result().await), json!([0, 0, "undefined", "undefined"]));
-    // execute() is unchanged: the host's timezone and every intrinsic.
-    let executed = sandbox.execute(code, ExecuteOptions::default()).await;
-    assert_eq!(value(&executed), json!([5, -330, "function", "function"]));
+    // execute() is unchanged: every intrinsic, and the host's timezone. On Windows QuickJS
+    // reads the system time zone (`GetTimeZoneInformation`), not `TZ`, so only Unix shows the
+    // child's timezone.
+    let executed = value(&sandbox.execute(code, ExecuteOptions::default()).await);
+    assert_eq!(
+        executed.as_array().unwrap()[2..],
+        [json!("function"), json!("function")]
+    );
+    if cfg!(unix) {
+        assert_eq!(executed, json!([5, -330, "function", "function"]));
+    }
 }
 
 #[test]
