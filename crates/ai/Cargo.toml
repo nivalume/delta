@@ -43,6 +43,7 @@ jsonschema.workspace = true
 reqwest.workspace = true
 # zstd request bodies of the OpenAI Codex SSE transport.
 ruzstd.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -1,0 +1,116 @@
+//! The agent layer's cleanup in the scheduler's own commits: outcomes the scheduler writes
+//! (`faulted`, `orphaned`) and withdrawals of queued inputs (spec §5.4).
+
+use delta_chord::json::Json;
+use futures::future::BoxFuture;
+
+use super::GENERATION_TASK;
+use super::live::{convert_partial, edit_live, end_run, live_state};
+use super::slots::{SlotProgress, SlotStatus};
+use crate::compaction::COMPACTION_TASK;
+use crate::inbox::withdraw_inputs;
+use crate::records::{
+    ConversationId, SubmissionRecord, SubmissionSettlement, TaskId, TaskOutcome, TaskRecord, TaskState,
+};
+use crate::scheduler::SchedulerHooks;
+use crate::session::{Tx, TxError};
+use crate::tool::TOOL_TASK;
+
+/// The [`SchedulerHooks`] of a Harness. It handles the agent layer's task kinds and ignores
+/// every other, so it never creates `delta.live` for a task it does not know:
+///
+/// - a run generation: a committed partial becomes an aborted entry, the run's inputs
+///   settle `unanswered` (`faulted` with the message, or the orphaning reason), and the run
+///   marker is removed;
+/// - a tool task: its slot is marked done without an entry (context derivation synthesizes
+///   the missing result; a nested caller reads the missing result as `faulted` or
+///   `orphaned`) and the nested slots below it are removed.
+///
+/// - a compaction: its status is removed and recorded as `delta.live.compaction_failure`
+///   with the fault's message or the orphaning reason.
+///
+/// Queued inputs the scheduler withdraws also leave `delta.inbox`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AgentSchedulerHooks;
+
+impl SchedulerHooks for AgentSchedulerHooks {
+    fn settle_scheduler_outcome<'a>(
+        &'a self,
+        tx: &'a mut Tx<'_>,
+        record: &'a TaskRecord,
+    ) -> BoxFuture<'a, Result<(), TxError>> {
+        Box::pin(async move {
+            match record.kind.as_str() {
+                GENERATION_TASK => settle_generation(tx, record).await,
+                TOOL_TASK => settle_tool(tx, record.conversation_id, record.id).await,
+                COMPACTION_TASK => settle_compaction(tx, record).await,
+                _ => Ok(()),
+            }
+        })
+    }
+
+    fn withdraw_inputs<'a>(
+        &'a self,
+        tx: &'a mut Tx<'_>,
+        conversation: ConversationId,
+        queued: &'a [SubmissionRecord],
+    ) -> BoxFuture<'a, Result<(), TxError>> {
+        Box::pin(withdraw_inputs(tx, conversation, queued))
+    }
+}
+
+async fn settle_generation(tx: &mut Tx<'_>, record: &TaskRecord) -> Result<(), TxError> {
+    let conversation = record.conversation_id;
+    let owns_run = live_state(tx, conversation)
+        .await?
+        .run
+        .is_some_and(|run| run.task_id == record.id);
+    if !owns_run {
+        return Ok(());
+    }
+    let settlement = match &record.state {
+        TaskState::Terminal {
+            outcome: TaskOutcome::Faulted { error },
+        } => SubmissionSettlement::Unanswered {
+            reason: "faulted".to_owned(),
+            detail: Some(Json::from(error.message.clone())),
+        },
+        TaskState::Terminal {
+            outcome: TaskOutcome::Orphaned { reason },
+        } => SubmissionSettlement::Unanswered {
+            reason: reason.clone(),
+            detail: None,
+        },
+        _ => return Ok(()),
+    };
+    convert_partial(tx, conversation).await?;
+    end_run(tx, conversation, record.id, &settlement).await
+}
+
+async fn settle_tool(tx: &mut Tx<'_>, conversation: ConversationId, task: TaskId) -> Result<(), TxError> {
+    edit_live(tx, conversation, |live| {
+        if let Some(slot) = live.tool_slot_mut(task) {
+            slot.finish();
+        }
+        if let Some(slot) = live.nested_slot_mut(task) {
+            slot.status = SlotStatus::Done;
+            slot.progress = SlotProgress::default();
+        }
+        live.remove_nested_below(task);
+    })
+    .await
+}
+
+async fn settle_compaction(tx: &mut Tx<'_>, record: &TaskRecord) -> Result<(), TxError> {
+    let error = match &record.state {
+        TaskState::Terminal {
+            outcome: TaskOutcome::Faulted { error },
+        } => error.message.clone(),
+        TaskState::Terminal {
+            outcome: TaskOutcome::Orphaned { reason },
+        } => reason.clone(),
+        _ => return Ok(()),
+    };
+    let task = record.id;
+    edit_live(tx, record.conversation_id, |live| live.fail_compaction(task, error)).await
+}

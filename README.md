@@ -1,11 +1,11 @@
 # Delta
 
-Delta is a Rust port of the libraries behind [pi](https://github.com/earendil-works/pi), a minimal,
+Delta is a Rust implementation of the libraries behind [pi](https://github.com/earendil-works/pi), a minimal,
 extensible agent harness. It provides a unified LLM API across providers and a stateful agent runtime
 with tool calling.
 
 Messages, models and credentials keep upstream's JSON shape, so transcripts and `auth.json` entries
-move between pi, [pi-py](https://github.com/nivalume/pi-py) and delta.
+move between pi and delta.
 
 Both crates are published on crates.io: [delta-ai](https://crates.io/crates/delta-ai) and
 [delta-agent](https://crates.io/crates/delta-agent).
@@ -38,8 +38,15 @@ This workspace contains one crate per ported upstream package.
 |-------|--------|----------|-------------|
 | **[delta-ai](crates/ai)** | `delta_ai` | `@earendil-works/pi-ai` | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
 | **[delta-agent](crates/agent)** | `delta_agent` | `@earendil-works/pi-agent-core` | Agent runtime with tool calling and state management |
+| **[delta-chord](crates/chord)** | `delta_chord` | `@earendil-works/chord` (base library) | JSON revisions with op batches, replicated state, contexts, bounded output, SQLite helpers. Not published yet |
+| **[delta-harness](crates/harness)** | `delta_harness` | `@earendil-works/pi-durable` | Durable agent harness: storage-first conversations, resumable turns and tool calls, durable approvals, built-in coding tools. Not published yet |
+| **[delta-claude-hooks](crates/claude-hooks)** | `delta_claude_hooks` | Claude Code hooks (no upstream package) | Claude Code's command and HTTP hooks over delta-harness's hook seams. Not published yet |
+| **[delta-codemode](crates/codemode)** | `delta_codemode` | `@earendil-works/pi-codemode` | Model-written JavaScript in a QuickJS sandbox whose only capability is calling injected tools, with deterministic runs a host can replay. Not published yet |
+| **[delta-protocol](crates/protocol)** | `delta_protocol` | Codex app-server v2 (no upstream package) | The UI protocol: a Codex app-server v2 compatible subset plus `delta/` methods (types only). Not published yet |
+| **[delta-app-server](crates/app-server)** | `delta_app_server` | Codex app-server (no upstream package) | A JSON-RPC server speaking delta-protocol over any reader and writer, for UI clients of a delta harness. Not published yet |
 
-Not ported yet: `@earendil-works/chord`, `@earendil-works/pi-telemetry`, `@earendil-works/pi-durable`,
+Chord's host runtime (objects, links, hot reload) is not ported; see
+[docs/research/chord.md](docs/research/chord.md). Not ported yet: `@earendil-works/pi-telemetry`,
 `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`.
 
 Each crate has design notes in `crates/<crate>/docs/design/`. They describe the modules and list

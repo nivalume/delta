@@ -61,7 +61,7 @@ use crate::types::{
 const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 const DEFAULT_MAX_RETRIES: u32 = 0;
 const BASE_DELAY_MS: u64 = 1000;
-const DEFAULT_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+const DEFAULT_MAX_RETRY_DELAY: Duration = Duration::from_mins(1);
 const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const CODEX_TOOL_CALL_PROVIDERS: [&str; 3] = ["openai", "openai-codex", "opencode"];
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE: u16 = 1009;

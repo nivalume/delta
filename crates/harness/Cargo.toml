@@ -1,0 +1,69 @@
+[package]
+name = "delta-harness"
+description = "Durable agent harness: storage-first conversations, resumable turns and tool calls, documents, approvals (counterpart of pi-durable)"
+readme = "README.md"
+keywords = ["llm", "agent", "harness", "durable"]
+categories = ["asynchronous"]
+include = ["src/**", "docs/**", "README.md", "LICENSE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+name = "delta_harness"
+
+[features]
+default = ["schemars"]
+# Typed tools: parameter schemas generated from Rust types.
+schemars = ["dep:schemars"]
+# `ImageCrateProcessor`: resizing and converting images `read` sends.
+images = ["dep:image"]
+# The `codemode` tool: scripts that call the conversation's tools (`delta-codemode`).
+codemode = ["dep:delta-codemode"]
+
+[dependencies]
+# The base64 of images `read` sends.
+base64.workspace = true
+delta-ai.workspace = true
+delta-chord = { workspace = true, features = ["sqlite"] }
+delta-codemode = { workspace = true, optional = true }
+futures.workspace = true
+image = { workspace = true, optional = true }
+indexmap.workspace = true
+# Structured tool output against its declared schema.
+jsonschema.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+# `edit`'s diff and patch.
+similar.workspace = true
+thiserror.workspace = true
+# `fs`, `process` and `io-util`: the local execution environment (`env::local`).
+tokio = { workspace = true, features = ["fs", "process", "io-util"] }
+tokio-util.workspace = true
+# NFKC and NFD in the built-in tools' path and text matching.
+unicode-normalization.workspace = true
+# `file://` paths in `env::local`.
+url.workspace = true
+# Random names of temporary files and directories in `env::local`.
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+[[test]]
+name = "codemode"
+path = "tests/codemode/main.rs"
+required-features = ["codemode"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true

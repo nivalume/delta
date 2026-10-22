@@ -14,11 +14,11 @@ use crate::options::{ProviderResponse, StreamOptions};
 use crate::types::ProviderHeaders;
 
 /// Default request timeout, as the vendor SDKs use.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(10);
 /// Default client-side retries.
 pub const DEFAULT_MAX_RETRIES: u32 = 2;
 /// Default cap on server-requested retry delays.
-pub const DEFAULT_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+pub const DEFAULT_MAX_RETRY_DELAY: Duration = Duration::from_mins(1);
 /// Longest error body kept in error messages.
 pub const MAX_PROVIDER_ERROR_BODY_CHARS: usize = 4000;
 

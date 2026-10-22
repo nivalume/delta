@@ -13,6 +13,12 @@ homepage = "https://github.com/nivalume/pi-rs"
 
 [workspace.dependencies]
 delta-ai = { path = "crates/ai", version = "1.0.0" }
+delta-chord = { path = "crates/chord", version = "1.0.0" }
+delta-harness = { path = "crates/harness", version = "1.0.0" }
+delta-claude-hooks = { path = "crates/claude-hooks", version = "1.0.0" }
+delta-codemode = { path = "crates/codemode", version = "1.0.0" }
+delta-protocol = { path = "crates/protocol", version = "1.0.0" }
+delta-app-server = { path = "crates/app-server", version = "1.0.0" }
 
 aws-config = { version = "1.12", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client", "credentials-process", "sso"] }
 aws-sdk-bedrockruntime = { version = "1.148", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
@@ -27,19 +33,27 @@ getrandom = "0.4"
 google-cloud-aiplatform-v1 = { version = "1.17", default-features = false, features = ["prediction-service"] }
 google-cloud-auth = "1.17"
 http = "1.5"
+# The optional image processor of delta-harness (`images`): decoders and encoders only.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 indexmap = { version = "2.14", features = ["serde"] }
 jsonschema = { version = "0.59", default-features = false }
 schemars = "1.2"
+# QuickJS for delta-codemode: no loader, no futures; the VM thread drives jobs itself.
+rquickjs = "0.14"
+rusqlite = { version = "0.40", features = ["bundled"] }
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+regex = "1.13"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "http2", "system-proxy", "charset"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11"
+similar = "3.2"
 thiserror = "2.0"
 tokio = { version = "1.53", features = ["rt", "sync", "time", "macros"] }
 tokio-util = "0.7.20"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tracing = "0.1.44"
+unicode-normalization = "0.1.26"
 url = "2.5"
 uuid = { version = "1.28", features = ["v4"] }
 

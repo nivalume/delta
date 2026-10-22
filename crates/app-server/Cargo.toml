@@ -1,0 +1,42 @@
+[package]
+name = "delta-app-server"
+description = "A Codex app-server v2 compatible JSON-RPC server for delta-harness"
+readme = "README.md"
+keywords = ["llm", "agent", "json-rpc", "app-server"]
+categories = ["asynchronous"]
+include = ["src/**", "docs/**", "README.md", "LICENSE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+name = "delta_app_server"
+
+[dependencies]
+# `data:` URLs and local images in user input.
+base64.workspace = true
+delta-ai.workspace = true
+delta-chord.workspace = true
+delta-harness.workspace = true
+delta-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# `io-util`: line framing over any reader and writer; `fs`: local images.
+tokio = { workspace = true, features = ["io-util", "fs"] }
+
+[dev-dependencies]
+delta-claude-hooks.workspace = true
+pretty_assertions.workspace = true
+reqwest.workspace = true
+# `io-std`: the README's stdio example.
+tokio = { workspace = true, features = ["rt-multi-thread", "io-std"] }
+wiremock.workspace = true
+
+[lints]
+workspace = true

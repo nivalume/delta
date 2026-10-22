@@ -499,7 +499,7 @@ fn text_of(message: &AssistantMessage) -> String {
 async fn run(model: &Model, context: &TranscriptContext, options: StreamOptions) -> AssistantMessage {
     // Longer than the retry delays of the paused-clock tests.
     tokio::time::timeout(
-        Duration::from_secs(300),
+        Duration::from_mins(5),
         openai_codex_responses::stream(model, context, options).result(),
     )
     .await
@@ -1092,7 +1092,7 @@ async fn uses_retry_after_seconds_for_sse_retries() {
     };
     let result = run_paused(&model(&server.base_url()), &context("Say hello"), options).await;
     assert_eq!(text_of(&result), "Hello");
-    assert!(approx(gaps(&times)[0], Duration::from_secs(60)), "{:?}", gaps(&times));
+    assert!(approx(gaps(&times)[0], Duration::from_mins(1)), "{:?}", gaps(&times));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1366,7 +1366,7 @@ async fn falls_back_to_sse_when_the_websocket_does_not_open_before_the_connect_t
     let session = "codex-ws-connect-timeout";
     let server = CodexServer::start_with(sse_server_handler(), no_ws(), true).await;
     let options = StreamOptions {
-        timeout: Some(Duration::from_secs(300)),
+        timeout: Some(Duration::from_mins(5)),
         websocket_connect_timeout: Some(Duration::from_millis(50)),
         ..ws_options(&mock_token("acc"), Transport::Auto, Some(session))
     };

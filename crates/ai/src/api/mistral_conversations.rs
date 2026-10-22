@@ -32,7 +32,7 @@ use crate::types::{
 const MISTRAL_TOOL_CALL_ID_LENGTH: usize = 9;
 const MAX_MISTRAL_ERROR_BODY_CHARS: usize = 4000;
 /// Upstream default of `timeoutMs` for this API. It bounds only the wait for response headers.
-const DEFAULT_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_HEADER_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// The `mistral-conversations` API.
 #[derive(Clone, Copy, Debug, Default)]

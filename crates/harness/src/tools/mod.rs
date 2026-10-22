@@ -1,0 +1,140 @@
+//! The built-in tools: the coding tools `read`, `write`, `edit` and `bash`, and
+//! `tool_search`, which loads deferred tools ([`tool_search_extension`]).
+//!
+//! Each coding tool is a plain [`HarnessTool`](crate::tool::HarnessTool) that reaches files and commands
+//! only through the call's [`ExecutionEnv`], so it runs wherever the conversation does. A
+//! call without an environment fails `No execution environment is configured`. All four are
+//! not replay-safe and callable by the model and by tools. `write` and `edit` of one file run
+//! one at a time through a shared [`FileMutationQueue`]. [`coding_tools`] bundles the four;
+//! nothing installs it automatically.
+//!
+//! Corresponds to upstream `src/tools/` and `src/truncate.ts`. See `docs/design/tools.md`.
+
+mod bash;
+mod edit;
+mod edit_diff;
+mod image;
+mod mutation;
+mod paths;
+mod read;
+mod tool_search;
+mod truncate;
+mod write;
+
+use std::sync::Arc;
+
+use delta_ai::types::JsonObject;
+use delta_chord::context::Context;
+use serde::de::DeserializeOwned;
+
+pub use bash::{BashExecution, BashOptions, BashPrepare, BashTool};
+pub use edit::EditTool;
+#[cfg(feature = "images")]
+pub use image::ImageCrateProcessor;
+pub use image::{
+    DEFAULT_IMAGE_LIMITS, Dimensions, INLINE_IMAGE_TYPES, ImageLimits, ImageProcessor, PreparedImage, base64_len,
+    detect_image_type, image_dimensions, is_inline,
+};
+pub use mutation::FileMutationQueue;
+pub use paths::{normalize_tool_path, resolve_read_path, resolve_tool_path};
+pub use read::{ReadOptions, ReadTool};
+pub use tool_search::{
+    DEFAULT_TOOL_SEARCH_LIMIT, TOOL_SEARCH_EXTENSION, TOOL_SEARCH_TOOL_NAME, ToolSearchDetails, ToolSearchTool,
+    tool_search_extension,
+};
+pub use truncate::{
+    DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Limit, Totals, Truncation, format_size, truncate_head, truncate_head_of,
+};
+pub use write::WriteTool;
+
+use crate::env::ExecutionEnv;
+use crate::registry::Extension;
+use crate::tool::{PathAccess, PermissionSubject, ToolApi, ToolError};
+
+/// The name of the [`coding_tools`] extension.
+pub const CODING_TOOLS: &str = "coding-tools";
+
+/// How [`coding_tools`] builds its tools.
+#[derive(Clone, Debug, Default)]
+pub struct CodingToolsOptions {
+    pub bash: BashOptions,
+    pub read: ReadOptions,
+}
+
+impl From<BashOptions> for CodingToolsOptions {
+    fn from(bash: BashOptions) -> Self {
+        Self {
+            bash,
+            read: ReadOptions::default(),
+        }
+    }
+}
+
+/// `read`, `write`, `edit` and `bash`, with one mutation queue for `write` and `edit`.
+pub fn coding_tools(options: impl Into<CodingToolsOptions>) -> Extension {
+    let CodingToolsOptions { bash, read } = options.into();
+    let queue = FileMutationQueue::new();
+    Extension::new(CODING_TOOLS)
+        .with_tool(Arc::new(ReadTool::with_options(read)))
+        .with_tool(Arc::new(WriteTool::new(queue.clone())))
+        .with_tool(Arc::new(EditTool::new(queue)))
+        .with_tool(Arc::new(BashTool::new(bash)))
+}
+
+/// The call's environment.
+fn require_env<'a>(api: &'a ToolApi<'_>) -> Result<&'a dyn ExecutionEnv, ToolError> {
+    api.env()
+        .map(|env| &**env)
+        .ok_or_else(|| "No execution environment is configured".into())
+}
+
+/// The subject of a call on the file `arguments.path`: absolute through `env`, or as
+/// written when it is absolute already.
+fn path_subject(
+    arguments: &JsonObject,
+    env: Option<&dyn ExecutionEnv>,
+    access: PathAccess,
+) -> Option<PermissionSubject> {
+    let path = arguments.get("path")?.as_str()?;
+    let path = match env {
+        Some(env) => resolve_tool_path(env, path).ok()?,
+        None => Some(normalize_tool_path(path)).filter(|path| path.starts_with('/'))?,
+    };
+    Some(PermissionSubject::Path { path, access })
+}
+
+/// The validated arguments as the tool's type.
+fn parse<T: DeserializeOwned>(arguments: JsonObject) -> Result<T, ToolError> {
+    Ok(serde_json::from_value(serde_json::Value::Object(arguments))?)
+}
+
+/// Fails once the call is cancelled, between the steps of a mutation.
+fn check_aborted(ctx: &Context) -> Result<(), ToolError> {
+    if ctx.is_cancelled() {
+        return Err("Operation aborted".into());
+    }
+    Ok(())
+}
+
+/// A number as JavaScript prints it in the common cases: integers without a fraction.
+fn js_number(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_owned()
+    } else if value.fract() == 0.0 && value.abs() < 1e21 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::js_number;
+
+    #[test]
+    fn numbers_print_as_upstream() {
+        assert_eq!(js_number(3.0), "3");
+        assert_eq!(js_number(2.5), "2.5");
+        assert_eq!(js_number(-0.0), "0");
+    }
+}

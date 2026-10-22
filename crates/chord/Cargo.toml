@@ -1,0 +1,42 @@
+[package]
+name = "delta-chord"
+description = "JSON revisions with op batches, replicated state, explicit contexts, bounded output and SQLite helpers for delta (counterpart of pi's chord base library)"
+readme = "README.md"
+keywords = ["json", "delta", "state", "replication"]
+categories = ["data-structures", "asynchronous"]
+include = ["src/**", "docs/**", "README.md", "LICENSE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "delta_chord"
+
+[features]
+# The `sqlite` module, on rusqlite with the bundled SQLite.
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+futures.workspace = true
+indexmap.workspace = true
+rusqlite = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tokio-test.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true
