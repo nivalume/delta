@@ -1414,7 +1414,8 @@ impl OutputFile for RunFiles<'_> {
             let Some(env) = self.api.env() else {
                 return Err("no execution environment".to_owned());
             };
-            let path = format!("{dir}/{name}");
+            // The environment's separator: `\` on Windows, so the path reads as one.
+            let path = env.join_path(&[&dir, name]).map_err(|error| error.to_string())?;
             env.write_file(&path, data, self.ctx)
                 .await
                 .map_err(|error| error.to_string())?;
