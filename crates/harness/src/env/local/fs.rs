@@ -125,9 +125,9 @@ pub(super) async fn truncate_file(path: &Path, size: u64, ctx: &Context) -> File
 }
 
 pub(super) async fn flush_file(path: &Path, ctx: &Context) -> FileResult<()> {
-    let file = mutating(ctx, path, fs::OpenOptions::new().read(true).write(true).open(path)).await?;
-    // POSIX refuses to open a directory for writing; Windows opens it, so check explicitly.
-    let metadata = mutating(ctx, path, file.metadata()).await?;
+    // POSIX refuses to open a directory for writing and Windows to open one at all (access
+    // denied), so check first and answer the same everywhere.
+    let metadata = mutating(ctx, path, fs::metadata(path)).await?;
     if metadata.is_dir() {
         return Err(FileError::new(
             FileErrorCode::IsDirectory,
@@ -135,6 +135,7 @@ pub(super) async fn flush_file(path: &Path, ctx: &Context) -> FileResult<()> {
         )
         .with_path(path));
     }
+    let file = mutating(ctx, path, fs::OpenOptions::new().read(true).write(true).open(path)).await?;
     mutating(ctx, path, file.sync_all()).await
 }
 

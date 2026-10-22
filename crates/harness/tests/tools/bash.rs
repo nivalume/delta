@@ -40,7 +40,9 @@ async fn output_and_exit_codes(backend: Backend) {
     assert_eq!(called.text(), "oops\n");
     assert_eq!(called.diagnostic("exit_code").message, "Command exited with code 3");
 
-    let called = workspace.call("bash", serde_json::json!({ "command": "pwd" })).await;
+    // Git Bash's `pwd` prints `/c/...`; `pwd -W` prints the Windows path.
+    let pwd = if cfg!(windows) { "pwd -W" } else { "pwd" };
+    let called = workspace.call("bash", serde_json::json!({ "command": pwd })).await;
     let cwd = std::fs::canonicalize(workspace.dir.path()).unwrap();
     let printed = std::fs::canonicalize(called.text().trim_end()).unwrap();
     assert_eq!(printed, cwd);

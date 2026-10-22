@@ -394,11 +394,20 @@ async fn runs_commands_in_cwd_with_env_overrides() {
     shell_env.insert("DELTA_ENV_CONFIGURED".to_owned(), "configured".to_owned());
     shell_env.insert("DELTA_ENV_SHADOWED".to_owned(), "stale".to_owned());
     let env = dir.env().with_shell_env(shell_env);
-    let script = r#"printf '%s|%s|%s|%s' "$PWD" "$DELTA_ENV_CONFIGURED" "${DELTA_ENV_SHADOWED-unset}" "${HOME+home}""#;
+    // Git Bash's `$PWD` is `/c/...`; `pwd -W` prints the Windows path.
+    let pwd = if cfg!(windows) { "$(pwd -W)" } else { "$PWD" };
+    let script = format!(
+        r#"printf '%s|%s|%s|%s' "{pwd}" "$DELTA_ENV_CONFIGURED" "${{DELTA_ENV_SHADOWED-unset}}" "${{HOME+home}}""#
+    );
     let options = ExecOptions::default().with_env("DELTA_ENV_SHADOWED", "");
-    let (result, output) = run(&env, script, options).await;
+    let (result, output) = run(&env, &script, options).await;
     assert_eq!(result, Ok(0));
-    assert_eq!(output, format!("{}|configured||home", dir.path().display()));
+    let (cwd, rest) = output.split_once('|').unwrap();
+    assert_eq!(
+        std::fs::canonicalize(cwd).unwrap(),
+        std::fs::canonicalize(dir.path()).unwrap()
+    );
+    assert_eq!(rest, "configured||home");
 
     let isolated = ExecOptions {
         inherit_env: false,
@@ -564,7 +573,8 @@ async fn cleanup_terminates_running_commands() {
     let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(running, stop) })
         .await
         .expect("cleanup ends the command");
-    assert_eq!(result.unwrap().exit_code, 128 + 9);
+    // Killed by SIGKILL; Windows has no signals and `TerminateProcess` leaves exit code 1.
+    assert_eq!(result.unwrap().exit_code, if cfg!(windows) { 1 } else { 128 + 9 });
 }
 
 #[tokio::test]
