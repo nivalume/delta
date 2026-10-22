@@ -413,8 +413,11 @@ async fn runs_commands_in_cwd_with_env_overrides() {
         inherit_env: false,
         ..ExecOptions::default().with_env("DELTA_ENV_EXPLICIT", "explicit")
     };
-    let script = r#"printf '%s:%s:%s' "${HOME-}" "${DELTA_ENV_CONFIGURED-}" "$DELTA_ENV_EXPLICIT""#;
-    let (result, output) = run(&env, script, isolated).await;
+    // An inherited variable must not reach the command. Git Bash fills in `HOME` itself when it
+    // is missing, so Windows probes `USERPROFILE`.
+    let inherited = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let script = format!(r#"printf '%s:%s:%s' "${{{inherited}-}}" "${{DELTA_ENV_CONFIGURED-}}" "$DELTA_ENV_EXPLICIT""#);
+    let (result, output) = run(&env, &script, isolated).await;
     assert_eq!((result, output.as_str()), (Ok(0), "::explicit"));
 }
 
