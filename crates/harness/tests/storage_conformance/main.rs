@@ -1,5 +1,6 @@
-//! The storage conformance suite: every case runs against the memory backend and the SQLite
-//! backend (in memory, in a file, and in a file under a table prefix).
+//! The storage conformance suite: every case runs against the memory backend, the SQLite
+//! backend (in memory, in a file, and in a file under a table prefix) and the JSONL backend
+//! (as it is, and reopened after every commit).
 //!
 //! Ported from upstream `src/testing/storage-conformance.ts`; the cases after
 //! `rejects_after_close` are delta's additions (storage.md, "Conformance suite"). The cases
@@ -45,6 +46,12 @@ macro_rules! conformance {
         }
         mod sqlite_prefixed {
             $(#[tokio::test] async fn $case() { super::$case(super::Backend::SqlitePrefixed.open().await).await; })*
+        }
+        mod jsonl {
+            $(#[tokio::test] async fn $case() { super::$case(super::Backend::Jsonl.open().await).await; })*
+        }
+        mod jsonl_reopening {
+            $(#[tokio::test] async fn $case() { super::$case(super::Backend::JsonlReopening.open().await).await; })*
         }
     };
 }

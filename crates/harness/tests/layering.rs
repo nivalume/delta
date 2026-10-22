@@ -1,5 +1,6 @@
 //! Each layer names only the layers below it (README.md, "Architecture and seams"): the
-//! kernel names no agent, surface or side module; the agent layer names no surface module;
+//! kernel names no agent or surface module, and of the side layer only `env` (the JSONL
+//! storage writes through its `FileSystem`); the agent layer names no surface module;
 //! `env` and `search` name nothing else in the crate, and `tools` names only them and the tool
 //! seams (`tool`, `registry`). Scans the sources for `crate::` paths into a layer a module may
 //! not reach.
@@ -132,7 +133,12 @@ fn offending(modules: &[&str], forbidden: &[&str]) -> Vec<String> {
 
 #[test]
 fn kernel_modules_do_not_name_upper_layers() {
-    let upper: Vec<&str> = AGENT.iter().chain(&SURFACE).chain(&SIDE).copied().collect();
+    let upper: Vec<&str> = AGENT
+        .iter()
+        .chain(&SURFACE)
+        .chain(SIDE.iter().filter(|module| **module != "env"))
+        .copied()
+        .collect();
     let offending = offending(&KERNEL, &upper);
     assert!(
         offending.is_empty(),

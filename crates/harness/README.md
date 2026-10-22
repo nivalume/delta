@@ -8,8 +8,8 @@ The design notes are in [`docs/design/`](docs/design/README.md).
 
 What it provides:
 
-- Storage: a `Storage` trait with memory and SQLite backends, and a conformance suite both
-  pass.
+- Storage: a `Storage` trait with memory, SQLite and JSONL backends, and a conformance suite
+  all three pass.
 - Conversations with an inbox (steer, follow-up and write submissions), forks, and a
   transcript of entries that hold `delta_ai` messages.
 - Durable tasks: generation (streaming, retries, deferred responses, tool rounds), one task
@@ -99,6 +99,21 @@ std::fs::remove_dir_all(&dir)?;
 
 `Harness::open` reconciles what a previous process left and stays paused until a call that
 needs progress (here `wait`) or `Harness::resume`.
+
+The JSONL backend keeps the same state in a directory of append-only JSON Lines files
+instead of a database (`fsync: true` flushes each commit to the disk before it returns):
+
+```rust
+# #[tokio::main(flavor = "multi_thread")]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+use delta_harness::storage::{JsonlOptions, JsonlStorage};
+
+let dir = std::env::temp_dir().join(format!("delta-harness-jsonl-{}", std::process::id()));
+let storage = JsonlStorage::open_local(&dir, JsonlOptions { fsync: true }).await?;
+# std::fs::remove_dir_all(&dir)?;
+# Ok(())
+# }
+```
 
 ## Approvals
 
@@ -209,4 +224,4 @@ kinds use delta's own `delta.*` names and a SQLite schema of their own. Messages
 entries stay `delta_ai` types, which are wire compatible with pi. Each design note lists
 its other differences from upstream.
 
-Not in this version: code mode, remote environments, JSONL storage.
+Not in this version: remote environments.

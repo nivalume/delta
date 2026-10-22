@@ -5,9 +5,11 @@
 mod durable;
 pub mod fixture;
 pub mod model;
+mod reopening;
 pub mod tools;
 
 pub use durable::Durable;
+pub use reopening::ReopeningJsonl;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,7 +22,9 @@ use delta_harness::records::{
     ConversationId, ConversationRecord, EntryId, EntryRecord, Page, ROOT_CONVERSATION_ID, RecordId, Seq, StorageWrite,
     TaskId, TaskRecord, TaskState,
 };
-use delta_harness::storage::{MemoryStorage, SqliteOptions, SqliteStorage, Storage, StorageError};
+use delta_harness::storage::{
+    JsonlOptions, JsonlStorage, MemoryStorage, SqliteOptions, SqliteStorage, Storage, StorageError,
+};
 
 /// A directory under the system temp directory, removed on drop.
 #[derive(Debug)]
@@ -58,6 +62,9 @@ pub enum Backend {
     SqliteInMemory,
     SqliteFile,
     SqlitePrefixed,
+    Jsonl,
+    /// JSONL, closed and reopened after every commit.
+    JsonlReopening,
 }
 
 /// One open storage for one case, with what the case needs to know about its backend.
@@ -98,6 +105,49 @@ impl Backend {
                     dir: Some(dir),
                 }
             }
+            Self::Jsonl => {
+                let dir = TempDir::new();
+                let storage = JsonlStorage::open_local(dir.path().join("storage"), JsonlOptions::default())
+                    .await
+                    .unwrap();
+                Fixture {
+                    storage: Arc::new(storage),
+                    max_id: u64::MAX,
+                    dir: Some(dir),
+                }
+            }
+            Self::JsonlReopening => {
+                let dir = TempDir::new();
+                let storage = ReopeningJsonl::open(&dir.path().join("storage")).await;
+                Fixture {
+                    storage: Arc::new(storage),
+                    max_id: u64::MAX,
+                    dir: Some(dir),
+                }
+            }
+        }
+    }
+
+    /// Opens the files [`Backend::open`] created in `dir` again, as a new process would.
+    pub async fn reopen(self, dir: &TempDir) -> Arc<dyn Storage> {
+        match self {
+            Self::SqliteFile | Self::SqlitePrefixed => {
+                let options = SqliteOptions {
+                    prefix: matches!(self, Self::SqlitePrefixed).then(|| "delta_".to_owned()),
+                    ..SqliteOptions::default()
+                };
+                Arc::new(
+                    SqliteStorage::open(dir.path().join("storage.sqlite"), options)
+                        .await
+                        .unwrap(),
+                )
+            }
+            Self::Jsonl | Self::JsonlReopening => Arc::new(
+                JsonlStorage::open_local(dir.path().join("storage"), JsonlOptions::default())
+                    .await
+                    .unwrap(),
+            ),
+            Self::Memory | Self::SqliteInMemory => panic!("{self:?} keeps no files"),
         }
     }
 }

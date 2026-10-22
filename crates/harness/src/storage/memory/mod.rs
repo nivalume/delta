@@ -11,7 +11,7 @@ use futures::FutureExt;
 
 use self::tables::Tables;
 use super::ancestry;
-use super::batch::plan;
+use super::batch::{Batch, plan};
 use super::error::StorageError;
 use super::scan::ScanStart;
 use super::{Storage, StorageFuture};
@@ -36,6 +36,24 @@ struct Inner {
     next_id: u64,
     next_seq: u64,
     closed: bool,
+}
+
+impl Inner {
+    /// Applies a planned batch at `seq` and advances `next_id` and `next_seq` past it.
+    fn apply(&mut self, batch: Batch, seq: Seq) {
+        if let Some(highest) = batch.highest_id {
+            self.next_id = self.next_id.max(highest.saturating_add(1));
+        }
+        self.tables.apply(batch, seq);
+        self.next_seq = self.next_seq.max(seq.0 + 1);
+    }
+}
+
+/// A batch planned against the committed state at its sequence, not applied yet.
+#[derive(Debug)]
+pub(crate) struct Prepared {
+    pub(crate) seq: Seq,
+    pub(crate) batch: Batch,
 }
 
 impl MemoryStorage {
@@ -74,12 +92,38 @@ impl MemoryStorage {
         }
         let batch = plan(writes, &mut &inner.tables)?;
         let seq = Seq(inner.next_seq);
-        if let Some(highest) = batch.highest_id {
-            inner.next_id = inner.next_id.max(highest.saturating_add(1));
-        }
-        inner.tables.apply(batch, seq);
-        inner.next_seq += 1;
+        inner.apply(batch, seq);
         Ok(seq)
+    }
+
+    /// Plans `writes` against the committed state without changing it: the first half of a
+    /// commit whose backend persists the batch before it becomes visible. The caller
+    /// serializes commits, so the state is unchanged when it [`publish`](Self::publish)es.
+    pub(crate) fn prepare(&self, writes: Vec<StorageWrite>) -> Result<Prepared, StorageError> {
+        let inner = self.lock();
+        if inner.closed {
+            return Err(StorageError::Closed);
+        }
+        let batch = plan(writes, &mut &inner.tables)?;
+        Ok(Prepared {
+            seq: Seq(inner.next_seq),
+            batch,
+        })
+    }
+
+    /// Makes a prepared batch visible to reads; its sequence.
+    pub(crate) fn publish(&self, prepared: Prepared) -> Seq {
+        let mut inner = self.lock();
+        inner.apply(prepared.batch, prepared.seq);
+        prepared.seq
+    }
+
+    /// Plans and applies `writes` at a sequence a backend persisted earlier: recovery.
+    pub(crate) fn replay(&self, writes: Vec<StorageWrite>, seq: Seq) -> Result<(), StorageError> {
+        let mut inner = self.lock();
+        let batch = plan(writes, &mut &inner.tables)?;
+        inner.apply(batch, seq);
+        Ok(())
     }
 
     fn mint_now(&self) -> Result<RawId, StorageError> {

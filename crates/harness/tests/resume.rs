@@ -1,7 +1,8 @@
 //! End to end: one conversation with the built-in tools over durable storage, across a
 //! clean close and a crash while a command runs. Each reopened Harness continues where the
 //! last one stopped: committed turns stay, the interrupted call settles `interrupted` with
-//! the output it had published, and the next request carries the whole transcript.
+//! the output it had published, and the next request carries the whole transcript. A
+//! file-backed storage is reopened from its files at each restart.
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
 
@@ -29,6 +30,11 @@ async fn memory() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sqlite() {
     a_conversation_resumes_across_restarts(Backend::SqliteFile).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jsonl() {
+    a_conversation_resumes_across_restarts(Backend::Jsonl).await;
 }
 
 /// Drops every handle without closing, as a crash.
@@ -96,6 +102,7 @@ async fn a_conversation_resumes_across_restarts(backend: Backend) {
     );
     drop(conversation);
     harness.close(&ctx()).await.unwrap();
+    fixture.restart().await;
 
     // Turn 2: the process dies while a command runs, after it published some output.
     fixture.model.push([Reply::calls_with(&[(
@@ -121,6 +128,7 @@ async fn a_conversation_resumes_across_restarts(backend: Backend) {
     .await;
     drop((submission, conversation));
     crash(harness).await;
+    fixture.restart().await;
 
     // Reopened: `bash` is not replay-safe, so the call settles `interrupted` with the
     // output it had published, and the turn goes on to the model's answer.
