@@ -9,7 +9,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
 use super::policy::{ApprovalCall, ApprovalPolicy, PolicyDecision, PolicyError};
-use super::rules::{Anchors, Rule, RuleCall, RuleError, allowed_by, is_within, propose};
+use super::rules::{Anchors, Rule, RuleCall, RuleError, allowed_by, is_within, propose, rule_path};
 use crate::agent::Change;
 use crate::documents::{
     CheckpointInfo, ConversationScope, DocAddress, DocDefinition, ForkAsOf, Rewindable, SessionScope,
@@ -336,14 +336,25 @@ impl RulesPolicy {
         directories: &[String],
     ) -> Memoized {
         let tool = call.call.call.name.as_str();
-        let subject = call.subject.as_ref();
+        // Paths and anchors in rule form, so Windows paths match as `/c/...`.
+        let subject = call.subject.as_ref().map(|subject| match subject {
+            PermissionSubject::Path { path, access } => PermissionSubject::Path {
+                path: rule_path(path).into_owned(),
+                access: *access,
+            },
+            command @ PermissionSubject::Command { .. } => command.clone(),
+        });
+        let subject = subject.as_ref();
+        let cwd = call.cwd.map(rule_path);
+        let home = self.defaults.home.as_deref().map(rule_path);
+        let root = self.defaults.root.as_deref().map(rule_path);
         let rule_call = RuleCall {
             tool,
             subject,
             anchors: Anchors {
-                cwd: call.cwd,
-                home: self.defaults.home.as_deref(),
-                root: self.defaults.root.as_deref(),
+                cwd: cwd.as_deref(),
+                home: home.as_deref(),
+                root: root.as_deref(),
             },
         };
         if let Some(rule) = sources
@@ -391,13 +402,13 @@ impl RulesPolicy {
         }
         if let Some(PermissionSubject::Path { path, access }) = subject {
             let reachable = *access == PathAccess::Read || mode == PermissionMode::AcceptEdits;
-            let inside = call.cwd.is_some_and(|cwd| is_within(path, cwd, None))
+            let inside = cwd.as_deref().is_some_and(|cwd| is_within(path, cwd, None))
                 || self
                     .defaults
                     .directories
                     .iter()
                     .chain(directories)
-                    .any(|directory| is_within(path, directory, call.cwd));
+                    .any(|directory| is_within(path, &rule_path(directory), cwd.as_deref()));
             if reachable && inside {
                 return Memoized::Allow;
             }

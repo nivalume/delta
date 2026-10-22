@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use delta_chord::context::Context;
 use delta_chord::json::Json;
 use delta_harness::agent::LocalEnvBuilder;
+use delta_harness::approval::rules::rule_path;
 use delta_harness::approval::{
     ApprovalCall, ApprovalError, ApprovalPolicy, ApprovalRequest, PermissionDefaults, PermissionMode, PermissionRules,
     PermissionsChange, PolicyDecision, PolicyError, ReviewDecision, RulesPolicy,
@@ -143,7 +144,9 @@ async fn the_default_mode_reads_inside_and_asks_for_the_rest(backend: Backend) {
         serde_json::json!({ "path": far.to_str().unwrap() }),
     )
     .await;
-    let directory = outside.path().to_str().unwrap().trim_start_matches('/');
+    // Rules name paths in POSIX form: `C:\x` on Windows is `/c/x`.
+    let directory = rule_path(outside.path().to_str().unwrap());
+    let directory = directory.trim_start_matches('/');
     assert_eq!(request.proposed_rule, Some(format!("Read(//{directory}/**)")));
     workspace
         .conversation
@@ -159,7 +162,8 @@ async fn the_default_mode_reads_inside_and_asks_for_the_rest(backend: Backend) {
         serde_json::json!({ "path": "new.txt", "content": "x" }),
     )
     .await;
-    let cwd = workspace.dir.path().to_str().unwrap().trim_start_matches('/');
+    let cwd = rule_path(workspace.dir.path().to_str().unwrap());
+    let cwd = cwd.trim_start_matches('/');
     assert_eq!(request.proposed_rule, Some(format!("Edit(//{cwd}/**)")));
     let (_, bash) = (submission, request);
     workspace
