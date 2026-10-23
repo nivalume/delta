@@ -1,4 +1,4 @@
-//! Durable storage: the [`Storage`] contract and its memory and SQLite backends.
+//! Durable storage: the [`Storage`] contract and its memory, SQLite and JSONL backends.
 //!
 //! The Session commits one batch of [`StorageWrite`]s per transaction; storage makes it
 //! atomic, stamps it with a sequence, keeps one id namespace, materializes documents from a
@@ -10,6 +10,7 @@
 mod ancestry;
 mod batch;
 mod error;
+mod jsonl;
 mod memory;
 mod replay;
 mod scan;
@@ -19,6 +20,7 @@ use delta_chord::context::Context;
 use futures::future::BoxFuture;
 
 pub use error::StorageError;
+pub use jsonl::{JSONL_FORMAT_VERSION, JsonlOptions, JsonlStorage};
 pub use memory::MemoryStorage;
 pub use sqlite::{CURRENT_SCHEMA_VERSION, Schema, SqliteOptions, SqliteStorage, migrations};
 

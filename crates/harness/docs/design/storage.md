@@ -1,10 +1,10 @@
 # Storage (`storage`)
 
 Follows spec §4 (storage ownership), §10 (storage contract), §10.1 (failures, the storage
-side), §11.1 (memory) and §11.2 (SQLite); §11.3 (JSONL) is deferred. Corresponds to upstream
+side), §11.1 (memory), §11.2 (SQLite) and §11.3 (JSONL). Corresponds to upstream
 `src/types.ts` (`Storage`), `src/storage/scan.ts`, `src/storage/memory.ts`,
-`src/storage/sqlite/{schema,migrations,storage}.ts` and
-`src/testing/storage-conformance.ts`.
+`src/storage/sqlite/{schema,migrations,storage}.ts`, `src/storage/jsonl/{storage,node}.ts`
+and `src/testing/storage-conformance.ts`.
 
 ## Problem
 
@@ -13,9 +13,9 @@ creations, changes, copies and retirements. Storage makes the batch atomic, stam
 sequence, keeps one id namespace, materializes documents from a base and its delta tail, and
 answers keyed lookups and cursor scans in id order. Upstream defines this as an async
 interface with a reference implementation (memory) and two persistent ones (SQLite, JSONL)
-checked by one conformance suite. delta keeps the contract, defines its own SQLite schema
-(version 1, below; a pi database does not open in delta) and implements memory and SQLite
-in phase 1.
+checked by one conformance suite. delta keeps the contract and implements all three, with
+its own SQLite schema and its own JSONL line format (version 1 each, below; a pi database or
+JSONL directory does not open in delta).
 
 ## `Storage`
 
@@ -74,12 +74,14 @@ pub enum StorageError {
     #[error("{0}")] Corrupt(String),          // missing base, version change in a tail, op that does not apply, unreadable row
     #[error(transparent)] Sqlite(#[from] delta_chord::sqlite::SqliteError),
     #[error(transparent)] Json(#[from] serde_json::Error),   // a record that does not encode
+    #[error("JSONL storage is poisoned and must be reopened: {0}")] Poisoned(String),
+    #[error(transparent)] File(#[from] crate::env::FileError),   // JSONL: a file operation at open, or a path before a commit writes
 }
 impl StorageError { pub fn is_request(&self) -> bool; }
 ```
 
-No `Io` variant: nothing in phase 1 raises one (SQLite reports file errors through
-`SqliteError::Io`); JSONL will add what it needs.
+No `Io` variant: SQLite reports file errors through `SqliteError::Io`, JSONL through
+`File` (its file system's `FileError`).
 
 ### Shared algorithms
 
@@ -383,18 +385,129 @@ CREATE INDEX {i.document_bases} ON {t.document_revisions} (document_id, seq) WHE
 | `head`, `parent_*`, `owner_*`, `retired_at`, `key`, `request_id` | `NULL` when absent |
 | `status`, `record_type`, revision `kind` | plain text |
 
-## JSONL
+## JSONL backend
 
-Deferred (README). The contract above is what it must meet; its sidecar layout, publication
-protocol and recovery are spec §11.3.
+```rust
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JsonlOptions { pub fsync: bool }
+pub const JSONL_FORMAT_VERSION: u32 = 1;
+
+impl JsonlStorage {
+    /// Opens or creates `dir` on `fs` and recovers it.
+    pub async fn open(dir: &str, fs: Arc<dyn FileSystem>, options: JsonlOptions, ctx: &Context) -> Result<JsonlStorage, StorageError>;
+    /// The same on this machine (`LocalEnv`); a relative `dir` is below the current directory.
+    pub async fn open_local(dir: impl AsRef<Path>, options: JsonlOptions) -> Result<JsonlStorage, StorageError>;
+    pub fn dir(&self) -> &str;
+}
+```
+
+Files: `storage/jsonl/{mod,format,recover}.rs`. The backend writes through `env::FileSystem`
+(`append_file`, `flush_file`, `truncate_file`, `rename_file`, `write_file`, `remove`,
+`list_dir`, `read_binary_file`), so a remote environment can host it. It serves every read
+from an inner `MemoryStorage` that recovery rebuilds; the memory backend lends three
+crate-internal steps for it: `prepare(writes)` plans a batch against the committed tables
+without changing them, `publish(prepared)` applies it, and `replay(writes, seq)` applies a
+recovered commit at its original sequence.
+
+### Layout and lines
+
+| File | Lines |
+| --- | --- |
+| `main.jsonl` | one commit marker per commit |
+| `doc-<id>.jsonl` | the bases and deltas of one document incarnation |
+| `task-<id>.jsonl` | whole records of one task while it is live |
+| `<sidecar>.reclaim` | a reclamation's temporary replacement; removed at open |
+
+Every line is one JSON object and a `\n`. A marker is
+`{"format":1,"type":"commit","seq":N,"writes":[...]}`; its writes use `StorageWrite`'s
+adjacent tagging (`{"type": ..., "value": ...}`) over delta's record JSON:
+
+| Write | Value |
+| --- | --- |
+| `conversation`, `entry`, `submission` | the record |
+| `task` | a terminal task's record; a live one is a `task_sidecar` |
+| `task_sidecar` | `{id, ordinal}` |
+| `document_create` | `{record, ordinal}` (the `DocumentCreate` record) |
+| `document_change` | `{id, ordinal}` |
+| `document_retire` | `{id}` |
+
+A sidecar line is `{"format":1,"type":"record","seq":N,"ordinal":k,"payload":P}` with `P`
+either `{"type":"task","value":TaskRecord}` (live) or
+`{"type":"document","id":D,"content":DocumentContent}`. The ordinal numbers the sidecar
+records of one commit in batch order, so `(seq, ordinal)` names a record across files.
+Copies are not written as such: `plan()` already resolved each `DocumentCopy` into a create
+with the source's base, which is what the sidecar keeps.
+
+### Commit
+
+1. One `tokio::sync::Mutex` serializes commits and `close`; it also holds the set of tasks
+   that have a sidecar. Closed or poisoned: fail.
+2. `memory.prepare(writes)` plans the batch (a `Rejected` batch returns here), and the lines
+   are encoded; a record that does not encode is `Json`. Nothing has been written yet, and
+   the storage stays usable.
+3. Each affected sidecar gets one append with its records, in the order of their first
+   ordinal; with `fsync`, each is then flushed; then the marker is appended to
+   `main.jsonl`. A failure at any of these steps poisons the storage: the write may or may
+   not have reached the file, so every later call (reads, `mint_id` and commits) fails with
+   `Poisoned` until the directory is reopened.
+4. `memory.publish(prepared)`: reads observe the batch only after its marker is written.
+5. Reclamation, best effort. With `fsync`, `main.jsonl` is flushed first (a failure skips
+   reclamation, so an undurable marker never authorizes it). A current-only incarnation's
+   sidecar is replaced by the new base alone (written to `.reclaim`, flushed with `fsync`,
+   renamed over the sidecar); a retired current-only incarnation's sidecar and a task's
+   sidecar once the task is terminal are removed. A failure is ignored: the committed state
+   does not depend on it, and the next open redoes it. Rewindable incarnations are never
+   reclaimed.
+
+The file operations run on `Context::background()`: a commit that started finishes, as the
+other backends do, since a cancelled append would be an uncertain write.
+
+Without `fsync`, a process crash leaves a directory that recovers to a prefix of the
+acknowledged commits; a power, host, kernel or file-system failure may lose acknowledged
+ones. With it, an acknowledged commit survives those too.
+
+### Recovery
+
+`open` creates the directory and recovers it before it returns:
+
+1. A final line without `\n` is torn: the file is truncated to the last line break, at the
+   byte. Every complete line must be UTF-8 and parse (`Corrupt`, naming the file and line).
+   Marker sequences must strictly increase.
+2. `.reclaim` files are removed; every `doc-<id>.jsonl` and `task-<id>.jsonl` (canonical
+   decimal ids) is read the same way, and its `(seq, ordinal)` keys must increase.
+3. From the markers alone: the current-only incarnations, the retired ones among them, each
+   one's newest base, and each task's final state (terminal in the marker, or live in a
+   sidecar).
+4. Each marker's writes are rebuilt with the sidecar records it names and replayed with
+   `memory.replay(writes, seq)`; a replay that fails is `Corrupt`. A named record must exist
+   (`Missing confirmed sidecar record`) unless reclamation may have removed it: it precedes
+   the newest base of its current-only incarnation, the incarnation is retired and
+   current-only, or the task is terminal later. Such a record is skipped even when present;
+   a reclaimed creation is replayed with the placeholder base `{version: 1, value: {}}`,
+   which a later base or the retirement supersedes.
+5. Sidecar records no marker names belong to commits whose marker was never written: the
+   tail they start is truncated. A named record after an unnamed one is `Corrupt`, as is a
+   record named twice.
+6. The reclamations the committed state allows are redone (step 5 of the commit), so an
+   interrupted one finishes and a task that ended stays without a sidecar.
+
+`next_seq` follows the last marker; `next_id` follows the highest id the replay wrote. The
+sequence of a commit whose marker was lost is reused by the next commit.
+
+### Close
+
+`close` refuses later calls, waits for a commit underway (it takes the commit mutex) and
+releases the memory tables; closing twice succeeds. The backend keeps no file open between
+operations, so nothing else needs closing.
 
 ## Conformance suite
 
 `tests/storage_conformance/` writes every case once as an `async fn(Fixture)` over
 `Arc<dyn Storage>` (in `tables.rs`, `documents.rs` and `general.rs`; `main.rs` holds the
 helpers) and runs it against memory, SQLite in memory, SQLite in a file under a unique temp
-directory (removed afterwards) and SQLite in a file under a table prefix, as upstream's
-`createStorageConformance`:
+directory (removed afterwards), SQLite in a file under a table prefix, JSONL, and JSONL closed
+and reopened after every commit (upstream's "across reopen" run, so every case also checks
+what recovery rebuilds), as upstream's `createStorageConformance`:
 
 | # | Upstream case | Rust test | Notes |
 | --- | --- | --- | --- |
@@ -440,6 +553,41 @@ conversations).
 `current_only_revisions_are_reclaimed_by_bases_and_retirement`, `queries_use_their_indexes`,
 `close_waits_and_refuses_later_calls`.
 
+`tests/jsonl_storage.rs` covers what only JSONL has, after upstream's
+`test/jsonl-storage.test.ts`. It wraps `LocalEnv` in a file system that logs the appends,
+flushes, writes, renames and removes and fails one of them on demand, before it acts, after
+it, or after writing half the bytes:
+
+| Upstream case | Rust test |
+| --- | --- |
+| opens through the Node adapter | `a_new_directory_opens_empty_and_files_carry_delta_s_own_records` (`open_local`, a nested new directory, the marker shape, close twice) |
+| publishes every commit before reclaiming current-only document and terminal-task sidecars | `every_commit_publishes_before_current_only_documents_and_finished_tasks_are_reclaimed` |
+| orders multiple live-task replacements in one sidecar by commit ordinal | `live_task_replacements_in_one_commit_keep_their_order` |
+| removes a complete-plus-torn unconfirmed multi-record sidecar append | `a_torn_multi_record_sidecar_append_is_removed` |
+| serializes the complete candidate before I/O and leaves preparation failures usable | `a_refused_batch_writes_nothing_and_leaves_the_storage_usable` (a Rust record always encodes, so only the preparation failure applies) |
+| poisons after {mode} failure at append {call} and recovers only confirmed state | `an_append_failure_poisons_and_reopening_recovers_only_confirmed_commits` |
+| poisons after {mode} failure at flush {call} and never writes a marker | `a_sidecar_flush_failure_poisons_before_any_marker` |
+| orders publication flushes exactly and flushes main only to authorize reclamation | `flushes_order_publication_and_flush_main_only_to_authorize_reclamation` |
+| recovers a committed base across reclaim {operation} {mode} | `a_failed_base_reclamation_is_redone_by_the_next_open` |
+| recovers document-retirement reclamation across remove {mode} | `a_failed_retirement_reclamation_is_redone_by_the_next_open` |
+| defers reclamation after authorizing-main flush {mode} failure | `a_failed_authorizing_main_flush_defers_reclamation` (also the flush recovery makes) |
+| keeps a committed base usable after reclaim-temp flush {mode} failure | `a_failed_replacement_flush_keeps_the_committed_base` |
+| recovers terminal-task reclamation across remove {mode} | `a_failed_task_reclamation_is_redone_by_the_next_open` |
+| appends later deltas to the replacement sidecar after a current-only base | `deltas_after_a_current_only_base_append_to_the_replacement` |
+| never reclaims rewindable document history, including after a base and retirement | `rewindable_history_is_never_reclaimed` |
+| reclaims retired task-, session-, and latest-conversation document sidecars | `retired_task_session_and_latest_documents_are_reclaimed` |
+| truncates torn UTF-8 tails at exact byte offsets and reuses the unconfirmed sequence | `torn_utf8_tails_are_truncated_at_their_byte_and_their_sequence_reused` |
+| removes complete unconfirmed sidecar tails without resurrecting terminal tasks | `unconfirmed_sidecar_tails_are_removed_without_resurrecting_finished_tasks` |
+| fails open when confirmed sidecar data is missing | `missing_confirmed_data_fails_the_open` |
+| rejects a confirmed record after an unconfirmed sidecar record | `a_confirmed_record_after_an_unconfirmed_one_fails_the_open` |
+| rejects non-increasing main commit sequences | `sequences_that_do_not_increase_fail_the_open` |
+| rejects structurally invalid confirmed document content | `invalid_document_content_fails_the_open` |
+| rejects malformed complete main and sidecar lines | `malformed_complete_lines_fail_the_open` |
+
+The unit tests in `jsonl/format.rs` check canonical sidecar names and the marker and record
+round trip. `tests/resume.rs` runs its restart case on JSONL and reopens the directory at
+each restart.
+
 ## Differences from upstream
 
 - A `BoxFuture` trait instead of an async interface; `visible_entry` instead of an overloaded
@@ -452,7 +600,17 @@ conversations).
 - SQLite goes through `delta_chord::sqlite::Database` with synchronous transaction closures;
   no portable `SqliteDatabase` facade and no Cloudflare driver.
 - Memory tables are `BTreeMap`s rather than sorted id vectors with binary search.
-- JSONL is not implemented.
+- JSONL lines are delta's own: the marker writes and sidecar payloads carry delta's records
+  in `StorageWrite`'s adjacent tagging and snake_case names, under
+  `JSONL_FORMAT_VERSION = 1`. The layout, the publication protocol, `fsync`, reclamation and
+  recovery follow upstream, including its corruption messages.
+- JSONL errors are `StorageError::Poisoned` and `Corrupt` instead of
+  `JsonlStoragePoisonedError` and `JsonlCorruptionError`; file failures at open are `File`.
+- `JsonlStorage::open(dir, fs, options, ctx)` takes `ctx` last; `open_local` is upstream's
+  `openNodeJsonlStorage`.
+- A JSONL commit holds a mutex of its own, so `close` waits for one underway (SQLite's
+  `RwLock` does the same), and its file operations ignore the caller's `ctx`; upstream
+  passes the context to them.
 - The SQLite schema is delta's own version 1: `INTEGER` ids and `next_id` (no decimal text,
   no 2^53 limit), plain-text kinds, keys and request ids (no JSON encoding), `key IS NULL`
   for singletons instead of a `family` flag and `""` key, conversation parent columns for
@@ -464,11 +622,14 @@ conversations).
 - delta's own SQLite schema, version 1 as above; no compatibility with pi's databases.
 - `delta_chord::sqlite` re-exports `rusqlite`.
 - The optional table prefix stays.
+- delta's own JSONL line format (above); no compatibility with pi's JSONL directories.
+- The kernel's `storage` writes JSONL through `env::FileSystem`; the layering rule lets the
+  kernel name `env`, which names nothing else in the crate.
 
 - `scan_documents` cursors carry `"order": "ascending"` like every other scan; a descending
   cursor is refused rather than ignored (upstream ignores it).
 
 ## Open (minor)
 
-- Async `mint_id` (kept for a later remote or JSONL backend) versus a synchronous method,
-  which both phase-1 backends could offer.
+- Async `mint_id` (kept for a later remote backend) versus a synchronous method, which all
+  three built-in backends could offer.

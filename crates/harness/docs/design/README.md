@@ -123,7 +123,7 @@ surface   harness (Harness, Conversation, Submission), observe (view, events, ta
 agent     agent (delta.agent, resolution, settings, AgentRuntime), registry (Extension and the
           hook traits), inbox, context, prompt, generation, model (ModelClient), tool,
           approval, compaction, usage
-kernel    records, documents, storage (trait; memory, sqlite), session (actor, Tx),
+kernel    records, documents, storage (trait; memory, sqlite, jsonl), session (actor, Tx),
           scheduler (the TaskDefinition runtime)
 side      env (ExecutionEnv trait; local), tools (read, write, edit, bash)
 ```
@@ -132,7 +132,7 @@ New features plug in through these traits; none needs a kernel change:
 
 | Trait | For |
 | --- | --- |
-| `Storage` | Another backend (JSONL later) |
+| `Storage` | Another backend (memory, SQLite and JSONL are built in) |
 | `TaskDefinition` | New durable work. The built-in tasks register through the same registry user tasks use; the scheduler has no special cases |
 | `DocDefinition` | New durable state |
 | `HarnessTool` | New tools; the built-in tools are ordinary implementations |
@@ -146,7 +146,8 @@ New features plug in through these traits; none needs a kernel change:
 Rules:
 
 - The kernel modules (`records`, `documents`, `storage`, `session`, `scheduler`) never name
-  an agent, surface or side module; the agent modules never name a surface module; `env`
+  an agent or surface module, and of the side modules only `env`, whose `FileSystem` the
+  JSONL storage writes through; the agent modules never name a surface module; `env`
   names nothing else in the crate. `tests/layering.rs` scans the sources and fails on a
   `crate::` path into a layer a module may not reach. Within the agent layer modules may
   name each other (the generation starts runs the inbox places, the registry lists the
@@ -165,7 +166,7 @@ Rules:
 | Kernel | pi-durable's model (storage-first commits, task state machines, documents, inbox, ownership tree), not pi-coding-agent's in-memory loop |
 | Compatibility with pi | None for the harness's own records and storage: kinds, record JSON and the SQLite schema are delta's. Messages inside entries are `delta_ai` types, which keep upstream's shape |
 | Namespace | Built-in entry, document and task kinds start with `delta.` (`delta.user`, `delta.assistant`, `delta.tool-result`, `delta.system`, `delta.reset`, `delta.compaction`, `delta.approval`, `delta.context`; documents `delta.agent`, `delta.provider`, `delta.live`, `delta.inbox`, `delta.usage`, `delta.approvals`, `delta.permissions`, `delta.permission_rules`; tasks `delta.generation`, `delta.tool`, `delta.compaction`, each at version 1) |
-| Phase 1 scope | Kernel, built-in tools and a local execution env. Deferred: code mode, remote env, JSONL storage, telemetry, Durable Object hosting |
+| Phase 1 scope | Kernel, built-in tools and a local execution env. Deferred: code mode, remote env, JSONL storage, telemetry, Durable Object hosting. Code mode and JSONL storage have since landed ([codemode.md](codemode.md), [storage.md](storage.md#jsonl-backend)) |
 | The session line | One tokio task owns the session state. `commit` sends a closure that receives `&mut Tx`; a document that is not loaded is read through `tx`, so a read inside a commit cannot hang |
 | Documents | `tx.doc::<D>()` borrows the `Tx` and returns a draft over `delta_chord::delta::Change` (one document edited at a time); prepared ops become `base` or `delta` writes under `checkpoint_when`; observers get a read-only `DocumentState` over a `delta_chord::State` |
 | No-op batches and overflow | chord's rules: a change that ends equal to its base writes and publishes nothing; a subscriber that falls behind gets merged batches (`r` past `MAX_OPS`) |
@@ -191,5 +192,5 @@ Rules:
 
 Seams kept visible for work after phase 1, in the order the survey suggests:
 
-- JSONL storage; remote execution environments on pi-env's daemon protocol; telemetry
+- Remote execution environments on pi-env's daemon protocol; telemetry
   once delta has a telemetry crate; sub-agent roles and limits.

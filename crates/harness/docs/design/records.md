@@ -288,10 +288,10 @@ pub struct DocumentQuery { pub scope: DocumentScope, pub at: DocumentPoint, pub 
 pub struct StoredEntry { pub entry: EntryRecord, pub commit_seq: Seq }
 ```
 
-Memory and SQLite do not persist `StorageWrite` itself; its serde form is what a later JSONL
-backend writes as its log lines. It is adjacently tagged, `{"type":"document_create","value":
-{...}}`, because an internally tagged `submission` would collide with the record's own
-`type` field. `limit` must be positive (`0` is a `Request` error).
+Memory and SQLite do not persist `StorageWrite` itself; the JSONL backend's commit markers
+use its serde form for the writes they carry ([storage.md](storage.md#jsonl-backend)). It is
+adjacently tagged, `{"type":"document_create","value":{...}}`, because an internally tagged
+`submission` would collide with the record's own `type` field. `limit` must be positive (`0` is a `Request` error).
 
 ## Errors and reports
 

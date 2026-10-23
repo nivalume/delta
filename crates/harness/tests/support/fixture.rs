@@ -47,7 +47,10 @@ pub struct Fixture {
     pub env: Option<Arc<dyn EnvBuilder>>,
     /// Epoch ms on tokio's clock, so paused time moves it.
     start: tokio::time::Instant,
-    _dir: Option<TempDir>,
+    backend: Backend,
+    /// The storage under [`Durable`].
+    inner: Arc<dyn Storage>,
+    dir: Option<TempDir>,
 }
 
 impl Fixture {
@@ -58,7 +61,7 @@ impl Fixture {
             ..HarnessSettings::default()
         };
         Self {
-            storage: Arc::new(Durable(fixture.storage)),
+            storage: Arc::new(Durable(fixture.storage.clone())),
             model: FakeModel::new(MODEL_ID, CONTEXT_WINDOW),
             registry: Registry::new(),
             settings: Arc::new(Mutex::new(settings)),
@@ -66,8 +69,19 @@ impl Fixture {
             compactor: Arc::new(TaskCompactor),
             env: None,
             start: tokio::time::Instant::now(),
-            _dir: fixture.dir,
+            backend,
+            inner: fixture.storage,
+            dir: fixture.dir,
         }
+    }
+
+    /// Closes a file-backed storage and opens its files again, as a restarted process
+    /// would; an in-memory storage stays as it is. Call it between Harnesses.
+    pub async fn restart(&mut self) {
+        let Some(dir) = &self.dir else { return };
+        self.inner.close(&ctx()).await.unwrap();
+        self.inner = self.backend.reopen(dir).await;
+        self.storage = Arc::new(Durable(self.inner.clone()));
     }
 
     /// The test clock now.
