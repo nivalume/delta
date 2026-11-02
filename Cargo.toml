@@ -42,7 +42,7 @@ http = "1.5"
 # The optional image processor of delta-harness (`images`): decoders and encoders only.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 indexmap = { version = "2.14", features = ["serde"] }
-jsonschema = { version = "0.59", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
 # Jinja templates of the mini-swe-agent example, whose configs are upstream's.
 minijinja = { version = "3", features = ["json", "loop_controls", "serde"] }
 # The mini-swe-agent example's trajectory inspector and batch progress.
