@@ -53,7 +53,7 @@ rquickjs = "0.14"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Line editing with history for the mini-swe-agent example's prompts. 19 needs Rust 1.95
 # (`cfg_select!`), above the MSRV.
-rustyline = { version = "18", default-features = false, features = ["with-file-history"] }
+rustyline = { version = "19", default-features = false, features = ["with-file-history"] }
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 regex = "1.13"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "http2", "system-proxy", "charset"] }
